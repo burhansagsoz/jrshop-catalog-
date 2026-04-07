@@ -2229,7 +2229,11 @@ async function login(){
   if(getFirebaseEnabled()){
     try{
       await initFirebaseRealtime({silent:true});
-      await firebaseSignInForSession(em,pw);
+      const fbUser=await firebaseSignInForSession(em,pw);
+      if(fbUser){
+        await initFirebaseRealtime({silent:true});
+        flushLocalSyncFallback().catch(()=>{});
+      }
       await applyFirebaseRoleMapping(me,em);
     }catch(_e){}
   }
@@ -5284,6 +5288,7 @@ async function shareCatalog(){
     const cleanCategories=catalogCategories||[];
     // Build catalog HTML from template with embedded products
     const catalogHTML=buildSimpleCatalogHTML(cleanProducts,cleanCategories,messengerLink);
+    try{localStorage.setItem('jb_catalog_html',JSON.stringify(catalogHTML));}catch(_e){}
     toast('📤 Publishing catalog...','info');
     try{
       const headers=getAuthHeaders({'Content-Type':'application/json'});
@@ -5301,13 +5306,17 @@ async function shareCatalog(){
           body:JSON.stringify({html:catalogHTML})
         });
       }catch(_e){}
-      if(syncRes.ok){
+      if(!syncRes.ok){
+        toast('⚠️ Catalog local saved (cloud retry later)','info');
+      }else{
         toast('✅ Catalog published!','ok');
-        showCatalogShareModal(null,catalogHTML);
-      } else {
-        toast('❌ Publish failed','err');
       }
-    }catch(e){toast('❌ Network error','err');}
+      showCatalogShareModal(null,catalogHTML);
+    }catch(e){
+      // Never block sharing on cloud connectivity issues.
+      toast('⚠️ Catalog local saved (offline mode)','info');
+      showCatalogShareModal(null,catalogHTML);
+    }
   }catch(e){toast('❌ Error: '+e.message,'err');}
 }
 
@@ -6493,6 +6502,71 @@ function getAuthHeaders(extra){
   if(k) headers.Authorization='Bearer '+k;
   return headers;
 }
+function readLocalSyncFallback(){
+  try{
+    const raw=localStorage.getItem(LOCAL_SYNC_FALLBACK_KEY);
+    const map=raw?JSON.parse(raw):{};
+    return map&&typeof map==='object'?map:{};
+  }catch(_e){
+    return {};
+  }
+}
+function persistLocalSyncFallback(key,value){
+  if(!key) return;
+  const map=readLocalSyncFallback();
+  map[key]={value,ts:Date.now()};
+  try{localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map));}catch(_e){}
+}
+function clearLocalSyncFallbackKey(key){
+  if(!key) return;
+  const map=readLocalSyncFallback();
+  if(!Object.prototype.hasOwnProperty.call(map,key)) return;
+  delete map[key];
+  try{localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map));}catch(_e){}
+}
+async function flushLocalSyncFallback(){
+  const map=readLocalSyncFallback();
+  const entries=Object.entries(map||{});
+  if(!entries.length) return 0;
+  let synced=0;
+  for(const [key,entry] of entries){
+    try{
+      const res=await fetch('/api/sync',{
+        method:'POST',
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
+        body:JSON.stringify({key,value:entry&&Object.prototype.hasOwnProperty.call(entry,'value')?entry.value:null})
+      });
+      if(res.ok){
+        clearLocalSyncFallbackKey(key);
+        synced++;
+      }
+    }catch(_e){}
+  }
+  return synced;
+}
+function readLocalDataMap(){
+  const out={};
+  for(const key of Object.keys(localStorage)){
+    if(!key.startsWith('jb_')) continue;
+    const raw=localStorage.getItem(key);
+    if(raw===null) continue;
+    try{out[key]=JSON.parse(raw);}catch(_e){out[key]=raw;}
+  }
+  return out;
+}
+function readLocalOrders(){
+  try{
+    const raw=localStorage.getItem('jb_orders');
+    const arr=raw?JSON.parse(raw):[];
+    return Array.isArray(arr)?arr:[];
+  }catch(_e){
+    return [];
+  }
+}
+function writeLocalJson(key,value){
+  if(!key) return;
+  try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
+}
 function cloudSave(key,value){
   localStorage.setItem(key,value);
   // Instant cloud write — no delay
@@ -6503,8 +6577,9 @@ function cloudSave(key,value){
 }
 async function syncToCloud(key,value){
   const api=getApiBase();
+  let parsed=value;
   try{
-    let parsed;try{parsed=JSON.parse(value);}catch{parsed=value;}
+    try{parsed=JSON.parse(value);}catch{parsed=value;}
     // For cloud: strip base64 (too large), keep only http URLs
     // Local storage keeps full base64 images
     let cloudValue=parsed;
@@ -6516,8 +6591,12 @@ async function syncToCloud(key,value){
         }))
       }));
     }
-    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
-  }catch(e){}
+    const res=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
+    if(res.ok) clearLocalSyncFallbackKey(key);
+    else persistLocalSyncFallback(key,parsed);
+  }catch(e){
+    persistLocalSyncFallback(key,parsed);
+  }
 }
 
 async function uploadToCloud(){
@@ -6624,6 +6703,10 @@ async function loadFromCloud(){
           if(key==='jb_orders')continue;
           if(data[key]!==undefined)localStorage.setItem(key,JSON.stringify(data[key]));
         }
+        // Keep chat/feed local snapshots durable even when Firebase auth is unstable.
+        ['jb_feed','jb_chat_index'].forEach(function(k){
+          if(data[k]!==undefined) localStorage.setItem(k,JSON.stringify(data[k]));
+        });
         // Load orders from dedicated endpoint (individual rows — no size limit)
         const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
         let cloudOrders=[];
@@ -6749,6 +6832,9 @@ const FIREBASE_COLLECTION_CATALOG_ORDERS='catalog_orders';
 const FIREBASE_COLLECTION_AUDIT='audit_logs';
 const FIREBASE_COLLECTION_USER_ROLES='user_roles';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
+const LOCAL_MEDIA_MAP_KEY='jb_media_local';
+const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
+const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
 let _firebaseApp=null;
 let _firebaseDb=null;
 let _firebaseStorage=null;
@@ -6758,7 +6844,8 @@ let _firebaseUnsubOrders=null;
 let _firebaseUnsubFeed=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
-const UPLOAD_TIMEOUT_MS=20000;
+let _firebaseRetryAt=0;
+const UPLOAD_TIMEOUT_MS=7000;
 const _health={
   firebaseConnected:false,
   lastSyncAt:0,
@@ -6929,14 +7016,8 @@ async function ensureFirebaseAuthSession(){
         try{unsub();}catch(_e){}
         return;
       }
-      try{
-        const anon=await _firebaseAuth.signInAnonymously();
-        saveAuthSession(anon&&anon.user?anon.user:null);
-        _health.authState='anonymous';
-      }catch(err){
-        markError(err);
-        _health.authState='auth_error';
-      }
+      // Do not force anonymous auth; wait for explicit login credentials.
+      _health.authState='waiting_login';
       resolve(null);
       try{unsub();}catch(_e){}
     });
@@ -6945,22 +7026,32 @@ async function ensureFirebaseAuthSession(){
 
 async function firebaseSignInForSession(email,password){
   if(!_firebaseAuth) return null;
+  const em=String(email||'').trim().toLowerCase();
+  const pw=String(password||'');
+  if(!em||!pw){
+    _health.authState='waiting_login';
+    return null;
+  }
   try{
-    if(email&&password){
-      const cred=await _firebaseAuth.signInWithEmailAndPassword(email,password);
-      saveAuthSession(cred&&cred.user?cred.user:null);
-      _health.authState='signed_in';
-      return cred&&cred.user?cred.user:null;
-    }
-  }catch(_e){}
-  try{
-    const anon=await _firebaseAuth.signInAnonymously();
-    saveAuthSession(anon&&anon.user?anon.user:null);
-    _health.authState='anonymous';
-    return anon&&anon.user?anon.user:null;
+    const cred=await _firebaseAuth.signInWithEmailAndPassword(em,pw);
+    saveAuthSession(cred&&cred.user?cred.user:null);
+    _health.authState='signed_in';
+    return cred&&cred.user?cred.user:null;
   }catch(err){
+    if(err&&err.code==='auth/user-not-found'){
+      try{
+        const created=await _firebaseAuth.createUserWithEmailAndPassword(em,pw);
+        saveAuthSession(created&&created.user?created.user:null);
+        _health.authState='signed_in';
+        return created&&created.user?created.user:null;
+      }catch(createErr){
+        markError(createErr);
+        _health.authState=(createErr&&createErr.code==='auth/operation-not-allowed')?'auth_provider_disabled':'auth_error';
+        return null;
+      }
+    }
     markError(err);
-    _health.authState='auth_error';
+    _health.authState=(err&&err.code==='auth/operation-not-allowed')?'auth_provider_disabled':'auth_error';
     return null;
   }
 }
@@ -7236,6 +7327,7 @@ async function subscribeFeedRealtime(opts={}){
 async function initFirebaseRealtime(opts={}){
   const silent=!!opts.silent;
   if(!getFirebaseEnabled()) return false;
+  if(Date.now()<_firebaseRetryAt) return false;
   if(_firebaseInitPromise) return _firebaseInitPromise;
   _firebaseInitPromise=(async()=>{
     const cfg=getFirebaseConfig();
@@ -7278,11 +7370,13 @@ async function initFirebaseRealtime(opts={}){
       await subscribeFeedRealtime({silent:true});
       _firebaseReady=true;
       _health.firebaseConnected=true;
+      _firebaseRetryAt=0;
       if(!silent) toast('✅ Firebase realtime connected','ok');
       return true;
     }catch(e){
       _firebaseReady=false;
       _health.firebaseConnected=false;
+      _firebaseRetryAt=Date.now()+60000;
       markError(e);
       if(!silent) toast('❌ Firebase bağlantı hatası: '+e.message,'err');
       return false;
@@ -7377,6 +7471,64 @@ async function getMediaFromFirebase(id){
   if(!doc.exists) return null;
   return doc.data()||null;
 }
+function parseLocalJson(key,fallback){
+  try{
+    const raw=localStorage.getItem(key);
+    if(raw===null||raw===undefined||raw==='') return fallback;
+    return JSON.parse(raw);
+  }catch(_e){
+    return fallback;
+  }
+}
+function writeLocalJson(key,value){
+  try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
+}
+function readLocalDataMap(){
+  const out={};
+  try{
+    for(const key of Object.keys(localStorage)){
+      if(!key.startsWith('jb_')) continue;
+      out[key]=parseLocalJson(key,null);
+    }
+  }catch(_e){}
+  return out;
+}
+function readLocalOrders(){
+  const list=parseLocalJson('jb_orders',[]);
+  return Array.isArray(list)?list:[];
+}
+function upsertLocalOrder(order){
+  if(!order||!order.id) return;
+  const list=readLocalOrders();
+  const idx=list.findIndex(o=>o&&o.id===order.id);
+  if(idx>=0) list[idx]=order;
+  else list.push(order);
+  writeLocalJson('jb_orders',list);
+}
+function deleteLocalOrder(orderId){
+  const list=readLocalOrders().filter(o=>o&&o.id!==orderId);
+  writeLocalJson('jb_orders',list);
+}
+function saveLocalMedia(data,type){
+  const id='lm'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+  const map=parseLocalJson(LOCAL_MEDIA_MAP_KEY,{})||{};
+  map[id]={data:data||'',type:type||'image/jpeg',ts:Date.now()};
+  writeLocalJson(LOCAL_MEDIA_MAP_KEY,map);
+  return {id,url:data||null};
+}
+function getLocalMedia(id){
+  const map=parseLocalJson(LOCAL_MEDIA_MAP_KEY,{})||{};
+  return map[id]||null;
+}
+function saveLocalCatalogOrder(code,payload){
+  const map=parseLocalJson(LOCAL_CATALOG_ORDERS_KEY,{})||{};
+  map[code]=payload;
+  writeLocalJson(LOCAL_CATALOG_ORDERS_KEY,map);
+}
+function getLocalCatalogOrder(code){
+  const map=parseLocalJson(LOCAL_CATALOG_ORDERS_KEY,{})||{};
+  return map[code]||null;
+}
 function isApiPath(pathname){
   return pathname.startsWith('/api/');
 }
@@ -7393,83 +7545,188 @@ function shouldRouteApiToFirebase(url){
   }
 }
 async function handleFirebaseApiRequest(url,method,body){
-  const ok=await initFirebaseRealtime({silent:true});
-  if(!ok||!_firebaseDb) return jsonApiResponse({error:'Firebase not ready'},503);
+  let firebaseOnline=false;
+  try{
+    const ok=await initFirebaseRealtime({silent:true});
+    firebaseOnline=!!(ok&&_firebaseDb);
+  }catch(_e){
+    firebaseOnline=false;
+  }
+  if(!firebaseOnline){
+    _health.firebaseConnected=false;
+    if(_health.authState==='auth_error') _health.authState='local_fallback';
+  }
   const u=new URL(url,location.origin);
   const path=u.pathname;
   const m=(method||'GET').toUpperCase();
   const req=await parseJsonBody(body);
 
   if(path==='/api/data'&&m==='GET'){
-    const data=await readFirebaseDataMap();
-    // Always serve orders from the dedicated orders collection to avoid stale jb_orders snapshots.
-    data.jb_orders=await readFirebaseOrders();
-    return jsonApiResponse({data});
+    const localData=readLocalDataMap();
+    if(firebaseOnline){
+      try{
+        const remoteData=await readFirebaseDataMap();
+        const merged={...localData,...remoteData};
+        const remoteOrders=await readFirebaseOrders();
+        if(Array.isArray(remoteOrders)){
+          merged.jb_orders=remoteOrders;
+          writeLocalJson('jb_orders',remoteOrders);
+        }
+        return jsonApiResponse({data:merged});
+      }catch(err){
+        markError(err);
+      }
+    }
+    return jsonApiResponse({data:localData,localOnly:true});
   }
   if(path==='/api/data'&&m==='POST'){
     const map={...(req||{})};
-    if(Array.isArray(map.jb_orders)){
-      await pushOrdersToFirebase([...(map.jb_orders||[])]);
-      await deleteFirebaseDataKey('jb_orders');
-      delete map.jb_orders;
+    Object.entries(map).forEach(([k,v])=>writeLocalJson(k,v));
+    if(Array.isArray(map.jb_orders)) writeLocalJson('jb_orders',map.jb_orders);
+    if(!firebaseOnline) return jsonApiResponse({ok:true,saved:Object.keys(map).length,localOnly:true});
+    try{
+      if(Array.isArray(map.jb_orders)){
+        await pushOrdersToFirebase([...(map.jb_orders||[])]);
+        await deleteFirebaseDataKey('jb_orders');
+        delete map.jb_orders;
+      }
+      await writeFirebaseDataMap(map);
+      return jsonApiResponse({ok:true,saved:Object.keys(map).length});
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,saved:Object.keys(map).length,localOnly:true});
     }
-    await writeFirebaseDataMap(map);
-    return jsonApiResponse({ok:true,saved:Object.keys(map).length});
   }
   if(path==='/api/sync'&&m==='POST'){
     const key=req&&req.key;
     const value=req&&req.value;
-    if(key==='jb_orders'&&Array.isArray(value)){
-      await pushOrdersToFirebase([...(value||[])]);
-      await deleteFirebaseDataKey('jb_orders');
-    }else{
-      await writeFirebaseDataKey(key,value);
+    if(key) writeLocalJson(key,value);
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
+    try{
+      if(key==='jb_orders'&&Array.isArray(value)){
+        await pushOrdersToFirebase([...(value||[])]);
+        await deleteFirebaseDataKey('jb_orders');
+      }else{
+        await writeFirebaseDataKey(key,value);
+      }
+      return jsonApiResponse({ok:true});
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,localOnly:true});
     }
-    return jsonApiResponse({ok:true});
   }
   if(path==='/api/orders'&&m==='GET'){
-    return jsonApiResponse({orders:await readFirebaseOrders()});
+    if(firebaseOnline){
+      try{
+        const remoteOrders=await readFirebaseOrders();
+        writeLocalJson('jb_orders',remoteOrders);
+        return jsonApiResponse({orders:remoteOrders});
+      }catch(err){
+        markError(err);
+      }
+    }
+    return jsonApiResponse({orders:readLocalOrders(),localOnly:true});
   }
   if(path==='/api/order'&&m==='POST'){
     const order=req&&req.order;
     if(!order||!order.id) return jsonApiResponse({error:'order missing'},400);
+    const localOrder=sanitizeOrderForRemote(order);
+    upsertLocalOrder(localOrder);
+    orders=mergeOrdersByFreshness(orders,[localOrder]);
     // Overwrite the whole document so removed fields (e.g. pendingApproval) are actually deleted.
-    await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(sanitizeOrderForRemote(order));
-    writeAuditEvent('order_upsert',{orderId:order.id,status:order.status||'',source:'api'}).catch(()=>{});
-    return jsonApiResponse({ok:true});
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
+    try{
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(localOrder);
+      writeAuditEvent('order_upsert',{orderId:order.id,status:order.status||'',source:'api'}).catch(()=>{});
+      return jsonApiResponse({ok:true});
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,localOnly:true});
+    }
   }
   if(path.startsWith('/api/order/')&&m==='DELETE'){
     const id=path.split('/').pop();
     if(id){
-      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
-      writeAuditEvent('order_delete',{orderId:id,source:'api'}).catch(()=>{});
+      deleteLocalOrder(id);
+      orders=(orders||[]).filter(o=>o&&o.id!==id);
+    }
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
+    if(id){
+      try{
+        await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
+        writeAuditEvent('order_delete',{orderId:id,source:'api'}).catch(()=>{});
+      }catch(err){
+        markError(err);
+        return jsonApiResponse({ok:true,localOnly:true});
+      }
     }
     return jsonApiResponse({ok:true});
   }
   if(path==='/api/image'&&m==='POST'){
-    const saved=await saveMediaToFirebase(req&&req.data,req&&req.type);
-    return jsonApiResponse(saved);
+    if(firebaseOnline){
+      try{
+        const saved=await saveMediaToFirebase(req&&req.data,req&&req.type);
+        return jsonApiResponse(saved);
+      }catch(err){
+        markError(err);
+      }
+    }
+    const savedLocal=saveLocalMedia(req&&req.data,req&&req.type);
+    return jsonApiResponse({...savedLocal,localOnly:true});
   }
   if(path.startsWith('/api/image/')&&m==='GET'){
     const id=path.replace('/api/image/','');
-    const media=await getMediaFromFirebase(id);
-    if(!media) return new Response('Not found',{status:404});
-    if(media.url){
-      return Response.redirect(media.url,302);
+    if(firebaseOnline){
+      try{
+        const media=await getMediaFromFirebase(id);
+        if(media){
+          if(media.url){
+            return Response.redirect(media.url,302);
+          }
+          if(media.data){
+            return new Response(media.data,{
+              status:200,
+              headers:{'Content-Type':media.type||'text/plain'}
+            });
+          }
+        }
+      }catch(err){
+        markError(err);
+      }
     }
-    if(!media.data) return new Response('Not found',{status:404});
-    return new Response(media.data,{
+    const mediaLocal=getLocalMedia(id);
+    if(!mediaLocal) return new Response('Not found',{status:404});
+    if(mediaLocal.url) return Response.redirect(mediaLocal.url,302);
+    if(!mediaLocal.data) return new Response('Not found',{status:404});
+    return new Response(mediaLocal.data,{
       status:200,
-      headers:{'Content-Type':media.type||'text/plain'}
+      headers:{'Content-Type':mediaLocal.type||'text/plain'}
     });
   }
   if(path==='/api/catalog-page'&&m==='POST'){
-    await writeFirebaseDataKey('catalog_html',req&&req.html||'');
+    writeLocalJson('catalog_html',req&&req.html||'');
+    writeLocalJson('jb_catalog_html',req&&req.html||'');
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
+    try{
+      await writeFirebaseDataKey('catalog_html',req&&req.html||'');
+      await writeFirebaseDataKey('jb_catalog_html',req&&req.html||'');
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,localOnly:true});
+    }
     return jsonApiResponse({ok:true});
   }
   if(path==='/api/backup'&&m==='GET'){
-    const data=await readFirebaseDataMap();
-    const ord=await readFirebaseOrders();
+    let data=readLocalDataMap();
+    let ord=readLocalOrders();
+    if(firebaseOnline){
+      try{
+        data=await readFirebaseDataMap();
+        ord=await readFirebaseOrders();
+      }catch(err){
+        markError(err);
+      }
+    }
     return jsonApiResponse({ok:true,kv:Object.entries(data).map(([key,value])=>({key,value})),orders:ord,ts:Date.now()});
   }
   if(path==='/api/catalog-order'&&m==='POST'){
@@ -7477,14 +7734,30 @@ async function handleFirebaseApiRequest(url,method,body){
     const code=payload.code||('JR-'+Math.random().toString(36).slice(2,8).toUpperCase());
     payload.code=code;
     payload.updatedAt=Date.now();
-    await _firebaseDb.collection(FIREBASE_COLLECTION_CATALOG_ORDERS).doc(code).set(payload,{merge:true});
+    saveLocalCatalogOrder(code,payload);
+    if(firebaseOnline){
+      try{
+        await _firebaseDb.collection(FIREBASE_COLLECTION_CATALOG_ORDERS).doc(code).set(payload,{merge:true});
+      }catch(err){
+        markError(err);
+        return jsonApiResponse({ok:true,code,localOnly:true});
+      }
+    }
     return jsonApiResponse({ok:true,code});
   }
   if(path.startsWith('/api/catalog-order/')&&m==='GET'){
     const code=path.replace('/api/catalog-order/','');
-    const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_CATALOG_ORDERS).doc(code).get();
-    if(!doc.exists) return jsonApiResponse({error:'Not found'},404);
-    return jsonApiResponse(doc.data()||{});
+    if(firebaseOnline){
+      try{
+        const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_CATALOG_ORDERS).doc(code).get();
+        if(doc.exists) return jsonApiResponse(doc.data()||{});
+      }catch(err){
+        markError(err);
+      }
+    }
+    const local=getLocalCatalogOrder(code);
+    if(!local) return jsonApiResponse({error:'Not found'},404);
+    return jsonApiResponse(local);
   }
   if(path==='/api/push/subscribe'&&m==='POST'){
     return jsonApiResponse({ok:true,firebase:true});
