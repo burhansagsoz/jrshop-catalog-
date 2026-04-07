@@ -1569,14 +1569,14 @@ body.dark .modal-foot{background:#263548;}
           </div>
           <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
         <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">☁️ Cloud Sync</div>
+          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase-First Sync</div>
           <div style="padding:13px 16px;">
-            <div class="fg" style="margin-bottom:10px;"><label class="fl">Worker URL</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api..."></div>
-            <div class="fg" style="margin-bottom:10px;"><label class="fl">API Key</label><input type="password" class="fi" id="cfg-cloud-key" placeholder="Your API key"></div>
+            <div class="fg" style="margin-bottom:10px;"><label class="fl">Legacy Worker URL (only for one-time migration)</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api..."></div>
+            <div class="fg" style="margin-bottom:10px;"><label class="fl">Legacy API Key (only for migration)</label><input type="password" class="fi" id="cfg-cloud-key" placeholder="Legacy worker API key"></div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-primary" onclick="saveCloudSettings(document.getElementById('cfg-cloud-api').value,document.getElementById('cfg-cloud-key').value)">💾 Save</button>
-              <button class="btn btn-blue" onclick="loadFromCloud()">⬇️ Load from Cloud</button>
-              <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Upload to Cloud</button>
+              <button class="btn btn-primary" onclick="saveCloudSettings(document.getElementById('cfg-cloud-api').value,document.getElementById('cfg-cloud-key').value)">💾 Save Legacy</button>
+              <button class="btn btn-blue" onclick="importLegacyCloudToFirebase()">⬇️ Import Legacy Data</button>
+              <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Firebase</button>
             </div>
           </div>
         </div>
@@ -1587,7 +1587,7 @@ body.dark .modal-foot{background:#263548;}
               <label class="fl">Enable Firebase</label>
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);">
                 <input type="checkbox" id="cfg-firebase-enabled">
-                Realtime updates (Cloud Worker remains fallback)
+                Realtime updates (Cloudflare Worker is bypassed)
               </label>
             </div>
             <div class="fg" style="margin-bottom:10px;">
@@ -1601,14 +1601,14 @@ body.dark .modal-foot{background:#263548;}
             </div>
           </div>
         </div>
-<!-- AI Settings removed — key managed via Cloudflare Secret -->
+<!-- AI Settings removed -->
         <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;max-width:560px;">
           <h3 style="font-size:14px;font-weight:700;margin-bottom:3px;">💾 Data Backup</h3>
           <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Export or import all data.</p>
           <div id="last-backup-info" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="btn btn-green" onclick="exportBackup()">📤 Export Backup</button>
-            <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">☁️ Cloud Backup</button>
+            <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">🔥 Firebase Backup</button>
             <label class="btn btn-ghost" style="cursor:pointer;">📥 Import<input type="file" accept=".json" onchange="importBackup(this)" style="display:none;"></label>
           
             <button class="btn btn-danger btn-sm" onclick="clearCache()">🧹 Clear Cache</button></div>
@@ -4428,7 +4428,7 @@ async function handleImg(idx,input){
         
         if(res.ok){
           const d = await res.json();
-          if(d.id) imgSrc = api + '/api/image/' + d.id;
+          if(d.url||d.id) imgSrc = d.url || (api + '/api/image/' + d.id);
         } else {
           console.warn('Image upload attempt failed:', res.status);
         }
@@ -4613,7 +4613,7 @@ async function uploadProdImages(){
           headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
           body:JSON.stringify({data:src,type:'image/jpeg'})
         });
-        if(res.ok){const d=await res.json();if(d.id){prodImages[idx]=api+'/api/image/'+d.id;}}
+        if(res.ok){const d=await res.json();if(d.url||d.id){prodImages[idx]=d.url||(api+'/api/image/'+d.id);}}
       }catch(e){console.warn('img upload err',e);}
     }
   }
@@ -4993,7 +4993,7 @@ async function handleCatImg(input){
         if(res.ok){
           const data = await res.json();
           if(data.id){
-            _catImg = api + '/api/image/' + data.id;
+            _catImg = data.url || (api + '/api/image/' + data.id);
             document.getElementById('cat-img-label').style.display = 'none';
             document.getElementById('cat-img-prev').style.display = 'block';
             document.getElementById('cat-img-img').src = _catImg;
@@ -5143,7 +5143,7 @@ async function saveCatalogProduct(){
         if(r.ok){
           const d = await r.json();
           if(d.id){
-            imgUrl = api+'/api/image/'+d.id;
+            imgUrl = d.url || (api+'/api/image/'+d.id);
             toast('✅ Image uploaded','ok');
           }
         }
@@ -5219,7 +5219,7 @@ async function shareCatalog(){
           if(r.ok){
             const d = await r.json();
             if(d.id){
-              imgUrl = api+'/api/image/'+d.id;
+              imgUrl = d.url || (api+'/api/image/'+d.id);
               // Update catalog with URL
               const idx = catalog.findIndex(x=>x.id===p.id);
               if(idx > -1){
@@ -5232,7 +5232,7 @@ async function shareCatalog(){
           console.warn('[Catalog] Failed to upload image for', p.name, e);
           imgUrl = null; // Don't include broken base64
         }
-      } else if(imgUrl && !imgUrl.startsWith('http')){
+      } else if(imgUrl && !/^(https?:|data:|blob:)/.test(imgUrl)){
         imgUrl = null; // Invalid URL
       }
       
@@ -6238,7 +6238,7 @@ async function handleROImg(idx,input){
         
         if(res.ok){
           const data = await res.json();
-          if(data.id) imgSrc = api + '/api/image/' + data.id;
+          if(data.url||data.id) imgSrc = data.url || (api + '/api/image/' + data.id);
         }
       }catch(uploadErr){
         console.warn('Upload attempt failed:', uploadErr);
@@ -6703,19 +6703,45 @@ function saveCloudSettings(api,key){
 }
 
 async function syncSettingsToFirebase(){
-  // Settings are still persisted via Cloud Worker; keep a no-op hook to avoid runtime errors.
-  return;
+  try{
+    const ok=await initFirebaseRealtime({silent:true});
+    if(!ok||!_firebaseDb) return;
+    await writeFirebaseDataKey('jb_settings',settings||{});
+  }catch(_e){}
 }
 
+const FIREBASE_CONFIG_DEFAULT={
+  apiKey:"AIzaSyBidcdMLlFsEp6c6P_tqwMMtP9w3wLKtFE",
+  authDomain:"jrshop-d732e.firebaseapp.com",
+  projectId:"jrshop-d732e",
+  storageBucket:"jrshop-d732e.firebasestorage.app",
+  messagingSenderId:"391477157629",
+  appId:"1:391477157629:web:ec7a9ffb307deca6296894",
+  measurementId:"G-B1RG9Z0D79"
+};
 const FIREBASE_CONFIG_KEY='jb_firebase_config';
 const FIREBASE_ENABLED_KEY='jb_firebase_enabled';
 const FIREBASE_COLLECTION_ORDERS='orders';
+const FIREBASE_COLLECTION_DATA='app_data';
+const FIREBASE_COLLECTION_MEDIA='media';
+const FIREBASE_COLLECTION_CATALOG_ORDERS='catalog_orders';
 let _firebaseApp=null;
 let _firebaseDb=null;
 let _firebaseReady=false;
 let _firebaseUnsubOrders=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
+const _nativeFetch=window.fetch.bind(window);
+
+function ensureFirebaseConfigDefaults(){
+  if(!localStorage.getItem(FIREBASE_CONFIG_KEY)){
+    localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(FIREBASE_CONFIG_DEFAULT));
+  }
+  if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
+    localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
+  }
+}
+ensureFirebaseConfigDefaults();
 
 function normalizeStatus(s){
   return s==='At Depott' ? 'At Depot' : (s==='Sent to Wechat'||s==='Sent to WeChat' ? 'Sent to Factory' : s);
@@ -6724,12 +6750,15 @@ function normalizeStatus(s){
 function getFirebaseEnabled(){
   return localStorage.getItem(FIREBASE_ENABLED_KEY)==='1';
 }
+function isFirebaseEnabled(){
+  return getFirebaseEnabled();
+}
 
 function getFirebaseConfig(){
   try{
-    const raw=localStorage.getItem(FIREBASE_CONFIG_KEY)||'';
-    return raw?JSON.parse(raw):null;
-  }catch(e){return null;}
+    const raw=localStorage.getItem(FIREBASE_CONFIG_KEY)||JSON.stringify(FIREBASE_CONFIG_DEFAULT);
+    return raw?JSON.parse(raw):FIREBASE_CONFIG_DEFAULT;
+  }catch(e){return FIREBASE_CONFIG_DEFAULT;}
 }
 
 function firebaseDocToOrder(doc){
@@ -6771,7 +6800,7 @@ function sanitizeOrderForRemote(order){
     products:(order.products||[]).map(p=>({
       ...p,
       img:p.img||null,
-      depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
+      depotPhoto:(p.depotPhoto&&/^(https?:|data:|blob:)/.test(p.depotPhoto))?p.depotPhoto:null
     }))
   };
 }
@@ -6855,6 +6884,183 @@ async function initFirebaseRealtime(opts={}){
   return _firebaseInitPromise;
 }
 
+function jsonApiResponse(data,status=200){
+  return new Response(JSON.stringify(data),{
+    status,
+    headers:{'Content-Type':'application/json'}
+  });
+}
+async function parseJsonBody(body){
+  if(!body) return {};
+  if(typeof body==='string'){
+    try{return JSON.parse(body);}catch(_e){return {};}
+  }
+  return {};
+}
+async function writeFirebaseDataKey(key,value){
+  if(!key) return;
+  await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(key).set({value,updatedAt:Date.now()},{merge:true});
+}
+async function readFirebaseDataMap(){
+  const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).get();
+  const out={};
+  snap.forEach(doc=>{
+    const d=doc.data()||{};
+    out[doc.id]=d.value;
+  });
+  return out;
+}
+async function writeFirebaseDataMap(map){
+  const entries=Object.entries(map||{});
+  if(!entries.length) return;
+  while(entries.length){
+    const chunk=entries.splice(0,300);
+    const batch=_firebaseDb.batch();
+    chunk.forEach(([k,v])=>{
+      batch.set(_firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(k),{value:v,updatedAt:Date.now()},{merge:true});
+    });
+    await batch.commit();
+  }
+}
+async function readFirebaseOrders(){
+  const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).get();
+  const list=snap.docs.map(firebaseDocToOrder);
+  return list.sort((a,b)=>(b.ts||0)-(a.ts||0));
+}
+async function saveMediaToFirebase(data,type){
+  const id='m'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+  await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).set({
+    data:data||'',
+    type:type||'image/jpeg',
+    ts:Date.now()
+  });
+  return {id,url:data||null};
+}
+async function getMediaFromFirebase(id){
+  const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).get();
+  if(!doc.exists) return null;
+  return doc.data()||null;
+}
+function isApiPath(pathname){
+  return pathname.startsWith('/api/');
+}
+function shouldRouteApiToFirebase(url){
+  if(!getFirebaseEnabled()) return false;
+  try{
+    const u=new URL(url,location.origin);
+    return isApiPath(u.pathname);
+  }catch(_e){
+    return false;
+  }
+}
+async function handleFirebaseApiRequest(url,method,body){
+  const ok=await initFirebaseRealtime({silent:true});
+  if(!ok||!_firebaseDb) return jsonApiResponse({error:'Firebase not ready'},503);
+  const u=new URL(url,location.origin);
+  const path=u.pathname;
+  const m=(method||'GET').toUpperCase();
+  const req=await parseJsonBody(body);
+
+  if(path==='/api/data'&&m==='GET'){
+    const data=await readFirebaseDataMap();
+    if(data.jb_orders===undefined){
+      try{data.jb_orders=JSON.parse(localStorage.getItem('jb_orders')||'[]');}catch(_e){data.jb_orders=[];}
+    }
+    return jsonApiResponse({data});
+  }
+  if(path==='/api/data'&&m==='POST'){
+    const map={...(req||{})};
+    if(Array.isArray(map.jb_orders)){
+      await pushOrdersToFirebase([...(map.jb_orders||[])]);
+      delete map.jb_orders;
+    }
+    await writeFirebaseDataMap(map);
+    return jsonApiResponse({ok:true,saved:Object.keys(map).length});
+  }
+  if(path==='/api/sync'&&m==='POST'){
+    const key=req&&req.key;
+    const value=req&&req.value;
+    if(key==='jb_orders'&&Array.isArray(value)){
+      await pushOrdersToFirebase([...(value||[])]);
+    }else{
+      await writeFirebaseDataKey(key,value);
+    }
+    return jsonApiResponse({ok:true});
+  }
+  if(path==='/api/orders'&&m==='GET'){
+    return jsonApiResponse({orders:await readFirebaseOrders()});
+  }
+  if(path==='/api/order'&&m==='POST'){
+    const order=req&&req.order;
+    if(!order||!order.id) return jsonApiResponse({error:'order missing'},400);
+    await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(sanitizeOrderForRemote(order),{merge:true});
+    return jsonApiResponse({ok:true});
+  }
+  if(path.startsWith('/api/order/')&&m==='DELETE'){
+    const id=path.split('/').pop();
+    if(id) await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
+    return jsonApiResponse({ok:true});
+  }
+  if(path==='/api/image'&&m==='POST'){
+    const saved=await saveMediaToFirebase(req&&req.data,req&&req.type);
+    return jsonApiResponse(saved);
+  }
+  if(path.startsWith('/api/image/')&&m==='GET'){
+    const id=path.replace('/api/image/','');
+    const media=await getMediaFromFirebase(id);
+    if(!media||!media.data) return new Response('Not found',{status:404});
+    return new Response(media.data,{
+      status:200,
+      headers:{'Content-Type':media.type||'text/plain'}
+    });
+  }
+  if(path==='/api/catalog-page'&&m==='POST'){
+    await writeFirebaseDataKey('catalog_html',req&&req.html||'');
+    return jsonApiResponse({ok:true});
+  }
+  if(path==='/api/backup'&&m==='GET'){
+    const data=await readFirebaseDataMap();
+    const ord=await readFirebaseOrders();
+    return jsonApiResponse({ok:true,kv:Object.entries(data).map(([key,value])=>({key,value})),orders:ord,ts:Date.now()});
+  }
+  if(path==='/api/catalog-order'&&m==='POST'){
+    const payload={...(req||{})};
+    const code=payload.code||('JR-'+Math.random().toString(36).slice(2,8).toUpperCase());
+    payload.code=code;
+    payload.updatedAt=Date.now();
+    await _firebaseDb.collection(FIREBASE_COLLECTION_CATALOG_ORDERS).doc(code).set(payload,{merge:true});
+    return jsonApiResponse({ok:true,code});
+  }
+  if(path.startsWith('/api/catalog-order/')&&m==='GET'){
+    const code=path.replace('/api/catalog-order/','');
+    const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_CATALOG_ORDERS).doc(code).get();
+    if(!doc.exists) return jsonApiResponse({error:'Not found'},404);
+    return jsonApiResponse(doc.data()||{});
+  }
+  if(path==='/api/push/subscribe'&&m==='POST'){
+    return jsonApiResponse({ok:true,firebase:true});
+  }
+  if(path==='/api/push/send'&&m==='POST'){
+    return jsonApiResponse({ok:true,queued:false,firebase:true});
+  }
+  return null;
+}
+window.fetch=async function(input,init){
+  const rawUrl=typeof input==='string'?input:(input&&input.url?input.url:String(input||''));
+  const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
+  const body=(init&&Object.prototype.hasOwnProperty.call(init,'body'))?init.body:null;
+  if(shouldRouteApiToFirebase(rawUrl)){
+    try{
+      const handled=await handleFirebaseApiRequest(rawUrl,method,body);
+      if(handled) return handled;
+      return jsonApiResponse({error:'Endpoint not available in Firebase mode'},404);
+    }catch(e){
+      return jsonApiResponse({error:e&&e.message?e.message:String(e)},500);
+    }
+  }
+  return _nativeFetch(input,init);
+};
+
 async function pushOrdersToFirebase(changedOrders){
   if(!getFirebaseEnabled()) return;
   if(!_firebaseReady){
@@ -6877,10 +7083,55 @@ async function migrateAllToFirebase(){
   const connected=await initFirebaseRealtime({silent:false});
   if(!connected) return;
   try{
+    const map={};
+    for(const key of Object.keys(localStorage)){
+      if(!key.startsWith('jb_')) continue;
+      const raw=localStorage.getItem(key);
+      if(raw===null) continue;
+      try{map[key]=JSON.parse(raw);}catch(_e){map[key]=raw;}
+    }
+    delete map.jb_orders;
+    await writeFirebaseDataMap(map);
     await pushOrdersToFirebase([...(orders||[])]);
-    toast('✅ Firebase migration complete','ok');
+    toast('✅ Firebase migration complete (orders + app data)','ok');
   }catch(e){
     toast('❌ Firebase migration failed: '+e.message,'err');
+  }
+}
+async function importLegacyCloudToFirebase(){
+  const api=(localStorage.getItem('jb_cloud_api')||'').trim().replace(/\/$/,'');
+  const key=(localStorage.getItem('jb_cloud_key')||'').trim();
+  if(!api||!key){
+    toast('⚠️ Legacy Worker URL / key gerekli','err');
+    return;
+  }
+  toast('⏳ Importing legacy worker data...','info');
+  try{
+    const connected=await initFirebaseRealtime({silent:false});
+    if(!connected) return;
+    const hdr={Authorization:'Bearer '+key};
+    const [dataRes,ordRes]=await Promise.all([
+      _nativeFetch(api+'/api/data',{headers:hdr}),
+      _nativeFetch(api+'/api/orders',{headers:hdr})
+    ]);
+    const dataJson=dataRes.ok?await dataRes.json():{data:{}};
+    const orderJson=ordRes.ok?await ordRes.json():{orders:[]};
+    const map={...(dataJson&&dataJson.data?dataJson.data:{})};
+    delete map.jb_orders;
+    await writeFirebaseDataMap(map);
+    const incomingOrders=[...(orderJson&&orderJson.orders?orderJson.orders:[])];
+    if(incomingOrders.length){
+      await pushOrdersToFirebase(incomingOrders);
+      orders=mergeOrdersByFreshness(orders,incomingOrders);
+      localStorage.setItem('jb_orders',JSON.stringify(orders));
+    }
+    Object.entries(map).forEach(([k,v])=>{
+      try{localStorage.setItem(k,JSON.stringify(v));}catch(_e){}
+    });
+    loadSettings();loadTemplates();loadNotifSettings();updateBadges();render();
+    toast(`✅ Legacy import finished (${incomingOrders.length} orders)`,'ok');
+  }catch(e){
+    toast('❌ Legacy import failed: '+(e&&e.message?e.message:e),'err');
   }
 }
 
@@ -9072,7 +9323,7 @@ async function createFeedPost(){
         const r=await fetch(api+'/api/image',{method:'POST',
           headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
           body:JSON.stringify({data:imgItem.data,type:'image/jpeg'})});
-        if(r.ok){const d=await r.json();if(d.id)imgUrls.push(api+'/api/image/'+d.id);}
+        if(r.ok){const d=await r.json();if(d.url||d.id)imgUrls.push(d.url||(api+'/api/image/'+d.id));}
       }catch(e){console.warn('Görsel upload hatası',e);}
     }
   }
@@ -9087,8 +9338,8 @@ async function createFeedPost(){
         body:JSON.stringify({data:_feedVideoData,type:'video/mp4'})});
       if(r.ok){
         const d = await r.json();
-        if(d.id) {
-          videoUrl = api+'/api/image/'+d.id;
+        if(d.url||d.id) {
+          videoUrl = d.url || (api+'/api/image/'+d.id);
           console.log('[Feed] Video uploaded:', videoUrl);
         }
       } else {
@@ -9336,7 +9587,7 @@ async function sendChatImage(input){
       }
       const d=await r.json();
       if(!d.id) throw new Error('Worker resim ID donmedi: '+JSON.stringify(d));
-      const imgUrl=api+'/api/image/'+d.id;
+      const imgUrl=d.url || (api+'/api/image/'+d.id);
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+imgUrl,ts:Date.now()};
       if(!_messages[_chatReseller])_messages[_chatReseller]=[];
       _messages[_chatReseller].push(msg);
@@ -9541,7 +9792,7 @@ async function sendVoiceMessage(audioBlob, from){
         if(!r.ok) throw new Error('Upload failed');
         
         const d = await r.json();
-        const audioUrl = api + '/api/image/' + d.id;
+        const audioUrl = d.url || (api + '/api/image/' + d.id);
         
         // Send as message
         const msg = {
@@ -9604,7 +9855,7 @@ async function sendResChatImage(input){
       }
       const d=await r.json();
       if(!d.id) throw new Error('Worker resim ID donmedi: '+JSON.stringify(d));
-      const imgUrl=api+'/api/image/'+d.id;
+      const imgUrl=d.url || (api+'/api/image/'+d.id);
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
       const rd=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
       let msgs=[];
@@ -10452,7 +10703,7 @@ async function saveOrders(){
         if(p.img && p.img.startsWith('data:')){
           try{
             const _r=await fetch(_api+'/api/image',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_k},body:JSON.stringify({data:p.img,type:'image/jpeg'})});
-            if(_r.ok){const _d=await _r.json();if(_d.id)p.img=_api+'/api/image/'+_d.id;}
+            if(_r.ok){const _d=await _r.json();if(_d.url||_d.id)p.img=_d.url||(_api+'/api/image/'+_d.id);}
           }catch(e){}
         }
       }
