@@ -2438,13 +2438,25 @@ async function approveOrder(id){
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
   localStorage.setItem('jb_orders',JSON.stringify(orders));
+  let persisted=false;
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
+    const ready=await initFirebaseRealtime({silent:true});
+    if(ready&&_firebaseDb){
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(o.id).set(sanitizeOrderForRemote(o));
+      persisted=true;
+    }
+  }catch(_e){}
+  if(!persisted){
+    try{
+    const api=getApiBase();
     const k=localStorage.getItem('jb_cloud_key')||'';
     const headers={'Content-Type':'application/json'};
     if(k) headers['Authorization']='Bearer '+k;
-    await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
-  }catch(_e){}
+    const res=await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
+    persisted=!!(res&&res.ok);
+  }catch(_e2){}
+  }
+  if(!persisted) toast('⚠️ Approval could not sync now, retry later','err');
   updateBadges();
   renderPendingInTable();
   logActivity('status',`Order approved: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
@@ -2461,12 +2473,21 @@ async function rejectOrder(id){
   updateBadges();renderPendingInTable();
   logActivity('status',`Order rejected: ${esc(o.ref||o.id.slice(-6))} — ${note}`,o.id);
   toast('❌ Rejected & deleted','info');
-  // Delete from cloud immediately
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||'';
-  const headers={};
-  if(k) headers['Authorization']='Bearer '+k;
-  fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
+  let removed=false;
+  try{
+    const ready=await initFirebaseRealtime({silent:true});
+    if(ready&&_firebaseDb){
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
+      removed=true;
+    }
+  }catch(_e){}
+  if(!removed){
+    const api=getApiBase();
+    const k=localStorage.getItem('jb_cloud_key')||'';
+    const headers={};
+    if(k) headers['Authorization']='Bearer '+k;
+    fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
+  }
 }
 
 async function navOrders(status,el){
@@ -2481,7 +2502,7 @@ async function navOrders(status,el){
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
-        const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
+        const api=getApiBase();
         const k=localStorage.getItem('jb_cloud_key')||'';
         const headers={};
         if(k) headers['Authorization']='Bearer '+k;
@@ -6512,6 +6533,12 @@ const CLOUD_API_DEFAULT='https://jrshop-api.sagsozburhan1.workers.dev';
 const CLOUD_KEY_DEFAULT='JrShop2026';
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
+function getApiBase(){
+  const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
+  if(getFirebaseEnabled()) return location.origin;
+  if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
+  return CLOUD_API_DEFAULT;
+}
 function cloudSave(key,value){
   localStorage.setItem(key,value);
   // Instant cloud write — no delay
