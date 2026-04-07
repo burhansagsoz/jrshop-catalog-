@@ -2434,9 +2434,17 @@ async function approveOrder(id){
   delete o.pendingApproval;
   delete o.rejected;
   delete o.rejectNote;
+  o.updatedAt=Date.now();
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
-  saveOrders();
+  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  try{
+    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
+    const k=localStorage.getItem('jb_cloud_key')||'';
+    const headers={'Content-Type':'application/json'};
+    if(k) headers['Authorization']='Bearer '+k;
+    await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
+  }catch(_e){}
   updateBadges();
   renderPendingInTable();
   logActivity('status',`Order approved: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
@@ -2455,8 +2463,10 @@ async function rejectOrder(id){
   toast('❌ Rejected & deleted','info');
   // Delete from cloud immediately
   const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(k)fetch(api+'/api/order/'+id,{method:'DELETE',headers:{'Authorization':'Bearer '+k}}).catch(()=>{});
+  const k=localStorage.getItem('jb_cloud_key')||'';
+  const headers={};
+  if(k) headers['Authorization']='Bearer '+k;
+  fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
 }
 
 async function navOrders(status,el){
@@ -2466,18 +2476,35 @@ async function navOrders(status,el){
     showPage('pg-orders');
     document.getElementById('pg-title').textContent='Pending Approval';
     showOrderTop();
-    // Always reload from cloud to get latest reseller orders
+    // Always reload latest orders when pending page opens.
     const tb=document.getElementById('tbody');
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
         const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
         const k=localStorage.getItem('jb_cloud_key')||'';
-        if(k){
-          const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+        const headers={};
+        if(k) headers['Authorization']='Bearer '+k;
+        let loaded=false;
+        const ordRes=await fetch(api+'/api/orders',{headers});
+        if(ordRes.ok){
+          const od=await ordRes.json();
+          if(Array.isArray(od.orders)){
+            orders=od.orders;
+            localStorage.setItem('jb_orders',JSON.stringify(orders));
+            updateBadges();
+            loaded=true;
+          }
+        }
+        if(!loaded){
+          const res=await fetch(api+'/api/data',{headers});
           if(res.ok){
             const {data}=await res.json();
-            if(data.jb_orders){orders=data.jb_orders;localStorage.setItem('jb_orders',JSON.stringify(orders));updateBadges();}
+            if(data&&Array.isArray(data.jb_orders)){
+              orders=data.jb_orders;
+              localStorage.setItem('jb_orders',JSON.stringify(orders));
+              updateBadges();
+            }
           }
         }
       }catch(e){}
@@ -4405,24 +4432,20 @@ async function handleImg(idx,input){
       reader.readAsDataURL(input.files[0]);
     });
     
-    // MUST upload to cloud - no base64 fallback
+    // Upload image through API bridge (Firebase mode supported)
     const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
-    
-    if(!k){
-      toast('⚠️ Cloud API key required for images', 'err');
-      if(lbl)lbl.innerHTML='📷 Choose';
-      return;
-    }
+    const k = localStorage.getItem('jb_cloud_key') || '';
     
     let imgSrc = null;
     let retries = 3;
     
     while(retries > 0 && !imgSrc){
       try{
+        const headers = { 'Content-Type': 'application/json' };
+        if(k) headers['Authorization'] = 'Bearer '+k;
         const res = await fetch(api+'/api/image', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer '+k },
+          headers,
           body: JSON.stringify({ data: compressed, type: 'image/jpeg' })
         });
         
@@ -4602,15 +4625,16 @@ function collectProducts(){const prods=[];document.querySelectorAll('.prod-item'
 // Ürün görsellerini worker'a upload et (base64 olanları)
 async function uploadProdImages(){
   const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k) return;
+  const k=localStorage.getItem('jb_cloud_key')||'';
   for(const idx in prodImages){
     const src=prodImages[idx];
     if(src && src.startsWith('data:')){
       try{
+        const headers={'Content-Type':'application/json'};
+        if(k) headers['Authorization']='Bearer '+k;
         const res=await fetch(api+'/api/image',{
           method:'POST',
-          headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+          headers,
           body:JSON.stringify({data:src,type:'image/jpeg'})
         });
         if(res.ok){const d=await res.json();if(d.url||d.id){prodImages[idx]=d.url||(api+'/api/image/'+d.id);}}
@@ -6215,24 +6239,20 @@ async function handleROImg(idx,input){
       reader.readAsDataURL(input.files[0]);
     });
     
-    // MUST upload to cloud
+    // Upload image through API bridge (Firebase mode supported)
     const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
-    
-    if(!k){
-      toast('⚠️ Cloud API key required for images', 'err');
-      if(label) label.innerHTML = '📷 Choose';
-      return;
-    }
+    const k = localStorage.getItem('jb_cloud_key') || '';
     
     let imgSrc = null;
     let retries = 3;
     
     while(retries > 0 && !imgSrc){
       try{
+        const headers = { 'Content-Type': 'application/json' };
+        if(k) headers['Authorization'] = 'Bearer '+k;
         const res = await fetch(api+'/api/image', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer '+k },
+          headers,
           body: JSON.stringify({ data: compressed, type: 'image/jpeg' })
         });
         
@@ -6794,7 +6814,7 @@ async function ensureFirebaseScripts(){
 }
 
 function sanitizeOrderForRemote(order){
-  return {
+  const clean={
     ...order,
     status:normalizeStatus(order.status),
     products:(order.products||[]).map(p=>({
@@ -6803,6 +6823,10 @@ function sanitizeOrderForRemote(order){
       depotPhoto:(p.depotPhoto&&/^(https?:|data:|blob:)/.test(p.depotPhoto))?p.depotPhoto:null
     }))
   };
+  if(!clean.pendingApproval) delete clean.pendingApproval;
+  if(!clean.rejected) delete clean.rejected;
+  if(!clean.rejectNote) delete clean.rejectNote;
+  return clean;
 }
 
 function mergeOrdersByFreshness(localOrders,incomingOrders){
@@ -6901,6 +6925,12 @@ async function writeFirebaseDataKey(key,value){
   if(!key) return;
   await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(key).set({value,updatedAt:Date.now()},{merge:true});
 }
+async function deleteFirebaseDataKey(key){
+  if(!key) return;
+  try{
+    await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(key).delete();
+  }catch(_e){}
+}
 async function readFirebaseDataMap(){
   const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).get();
   const out={};
@@ -6963,15 +6993,15 @@ async function handleFirebaseApiRequest(url,method,body){
 
   if(path==='/api/data'&&m==='GET'){
     const data=await readFirebaseDataMap();
-    if(data.jb_orders===undefined){
-      try{data.jb_orders=JSON.parse(localStorage.getItem('jb_orders')||'[]');}catch(_e){data.jb_orders=[];}
-    }
+    // Always serve orders from the dedicated orders collection to avoid stale jb_orders snapshots.
+    data.jb_orders=await readFirebaseOrders();
     return jsonApiResponse({data});
   }
   if(path==='/api/data'&&m==='POST'){
     const map={...(req||{})};
     if(Array.isArray(map.jb_orders)){
       await pushOrdersToFirebase([...(map.jb_orders||[])]);
+      await deleteFirebaseDataKey('jb_orders');
       delete map.jb_orders;
     }
     await writeFirebaseDataMap(map);
@@ -6982,6 +7012,7 @@ async function handleFirebaseApiRequest(url,method,body){
     const value=req&&req.value;
     if(key==='jb_orders'&&Array.isArray(value)){
       await pushOrdersToFirebase([...(value||[])]);
+      await deleteFirebaseDataKey('jb_orders');
     }else{
       await writeFirebaseDataKey(key,value);
     }
@@ -6993,7 +7024,8 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path==='/api/order'&&m==='POST'){
     const order=req&&req.order;
     if(!order||!order.id) return jsonApiResponse({error:'order missing'},400);
-    await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(sanitizeOrderForRemote(order),{merge:true});
+    // Overwrite the whole document so removed fields (e.g. pendingApproval) are actually deleted.
+    await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(sanitizeOrderForRemote(order));
     return jsonApiResponse({ok:true});
   }
   if(path.startsWith('/api/order/')&&m==='DELETE'){
@@ -7074,7 +7106,8 @@ async function pushOrdersToFirebase(changedOrders){
   while(list.length) chunks.push(list.splice(0,300));
   for(const chunk of chunks){
     const batch=_firebaseDb.batch();
-    chunk.forEach(o=>batch.set(col.doc(o.id),sanitizeOrderForRemote(o),{merge:true}));
+    // Full replace prevents stale flags from surviving across status transitions.
+    chunk.forEach(o=>batch.set(col.doc(o.id),sanitizeOrderForRemote(o)));
     try{await batch.commit();}catch(e){console.warn('[Firebase write]',e.message);}
   }
 }
@@ -7091,6 +7124,7 @@ async function migrateAllToFirebase(){
       try{map[key]=JSON.parse(raw);}catch(_e){map[key]=raw;}
     }
     delete map.jb_orders;
+    await deleteFirebaseDataKey('jb_orders');
     await writeFirebaseDataMap(map);
     await pushOrdersToFirebase([...(orders||[])]);
     toast('✅ Firebase migration complete (orders + app data)','ok');
@@ -7118,6 +7152,7 @@ async function importLegacyCloudToFirebase(){
     const orderJson=ordRes.ok?await ordRes.json():{orders:[]};
     const map={...(dataJson&&dataJson.data?dataJson.data:{})};
     delete map.jb_orders;
+    await deleteFirebaseDataKey('jb_orders');
     await writeFirebaseDataMap(map);
     const incomingOrders=[...(orderJson&&orderJson.orders?orderJson.orders:[])];
     if(incomingOrders.length){
@@ -10714,24 +10749,23 @@ async function saveOrders(){
       orders=orders.map(o=>({...o,status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status,updatedAt:o.updatedAt||o.ts||Date.now()}));
       // Save to localStorage (cache)
       localStorage.setItem('jb_orders',JSON.stringify(orders));
-      // Write changed orders to cloud individually — cloud-first
+      // Write changed orders to cloud individually when legacy key is available.
       const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-      const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-      if(!k)return;
-      // Send all orders that were just updated (updatedAt === now)
-      // Tüm siparişleri cloud'a gönder
-      for(const o of orders){
-        const clean={...o,products:(o.products||[]).map(p=>({...p,
-          img:p.img||null,
-          depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
-        }))};
-        try{
-          const _sr=await fetch(api+'/api/order',{method:'POST',
-            headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
-            body:JSON.stringify({order:clean})
-          });
-          if(!_sr.ok) console.warn('[saveOrders] cloud save failed for',o.id);
-        }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
+      const k=localStorage.getItem('jb_cloud_key')||'';
+      if(k){
+        for(const o of orders){
+          const clean={...o,products:(o.products||[]).map(p=>({...p,
+            img:p.img||null,
+            depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
+          }))};
+          try{
+            const _sr=await fetch(api+'/api/order',{method:'POST',
+              headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+              body:JSON.stringify({order:clean})
+            });
+            if(!_sr.ok) console.warn('[saveOrders] cloud save failed for',o.id);
+          }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
+        }
       }
       if(getFirebaseEnabled()){
         pushOrdersToFirebase([...(orders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
