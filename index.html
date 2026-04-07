@@ -1598,6 +1598,7 @@ body.dark .modal-foot{background:#263548;}
               <button class="btn btn-blue" onclick="connectFirebaseNow()">🔌 Connect Now</button>
               <button class="btn btn-ghost" onclick="migrateAllToFirebase()">⬆️ Migrate Current Data</button>
             </div>
+            <div id="firebase-health-panel" style="margin-top:10px;"></div>
           </div>
         </div>
 <!-- AI Settings removed -->
@@ -2198,7 +2199,7 @@ function getShelfStatus(o){
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
 
 // ── AUTH ──
-function login(){
+async function login(){
   const em=document.getElementById('l-em').value.trim().toLowerCase();
   const pw=document.getElementById('l-pw').value;
   const u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
@@ -2225,6 +2226,13 @@ function login(){
     return;
   }
   me=u;
+  if(getFirebaseEnabled()){
+    try{
+      await initFirebaseRealtime({silent:true});
+      await firebaseSignInForSession(em,pw);
+      await applyFirebaseRoleMapping(me,em);
+    }catch(_e){}
+  }
   // Remember me
   const remCb=document.getElementById('l-remember');
   if(remCb&&remCb.checked){
@@ -4719,9 +4727,11 @@ function importBackup(input){if(!input.files||!input.files[0])return;const reade
 // ── ACTIVITY LOG ──
 let activityLog = JSON.parse(localStorage.getItem('jb_activity') || '[]');
 function logActivity(type, msg, orderId=''){
-  activityLog.unshift({id:'a'+Date.now(),type,msg,orderId,user:me?.email||'system',ts:Date.now()});
+  const entry={id:'a'+Date.now(),type,msg,orderId,user:me?.email||'system',ts:Date.now()};
+  activityLog.unshift(entry);
   if(activityLog.length>500) activityLog=activityLog.slice(0,500);
   localStorage.setItem('jb_activity',JSON.stringify(activityLog));
+  writeAuditEvent('activity',entry).catch(()=>{});
 }
 function renderActivityLog(){
   const filter=document.getElementById('activity-filter-type')?.value||'';
@@ -6779,12 +6789,31 @@ const FIREBASE_COLLECTION_ORDERS='orders';
 const FIREBASE_COLLECTION_DATA='app_data';
 const FIREBASE_COLLECTION_MEDIA='media';
 const FIREBASE_COLLECTION_CATALOG_ORDERS='catalog_orders';
+const FIREBASE_COLLECTION_AUDIT='audit_logs';
+const FIREBASE_COLLECTION_USER_ROLES='user_roles';
+const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 let _firebaseApp=null;
 let _firebaseDb=null;
+let _firebaseStorage=null;
+let _firebaseAuth=null;
 let _firebaseReady=false;
 let _firebaseUnsubOrders=null;
+let _firebaseUnsubFeed=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
+const _health={
+  firebaseConnected:false,
+  lastSyncAt:0,
+  lastSyncSource:'-',
+  apiCalls:0,
+  apiErrors:0,
+  lastError:'',
+  authState:'signed_out',
+  feedRealtime:false,
+  ordersRealtime:false
+};
+let _realtimeRenderTimer=null;
+let _lastOrdersSaveAuditAt=0;
 const _nativeFetch=window.fetch.bind(window);
 
 function ensureFirebaseConfigDefaults(){
@@ -6796,6 +6825,57 @@ function ensureFirebaseConfigDefaults(){
   }
 }
 ensureFirebaseConfigDefaults();
+
+function markSync(source){
+  _health.lastSyncAt=Date.now();
+  _health.lastSyncSource=source||'-';
+}
+function markApiCall(){
+  _health.apiCalls++;
+}
+function markError(err){
+  _health.apiErrors++;
+  _health.lastError=err&&err.message?err.message:String(err||'unknown');
+}
+function renderHealthPanel(){
+  const el=document.getElementById('firebase-health-panel');
+  if(!el) return;
+  const fmtTs=_health.lastSyncAt?new Date(_health.lastSyncAt).toLocaleString('tr-TR'):'-';
+  const lastAct=Array.isArray(activityLog)&&activityLog[0]?activityLog[0]:null;
+  const lastActTxt=lastAct?`${lastAct.type||'activity'} · ${fmtDateTime(lastAct.ts)}`:'-';
+  el.innerHTML=`
+    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Firebase</div>
+        <div style="font-size:13px;font-weight:700;color:${_health.firebaseConnected?'#22c55e':'#ef4444'};">${_health.firebaseConnected?'Connected':'Disconnected'}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Auth</div>
+        <div style="font-size:13px;font-weight:700;">${_health.authState}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Realtime</div>
+        <div style="font-size:13px;font-weight:700;">orders:${_health.ordersRealtime?'on':'off'} · feed:${_health.feedRealtime?'on':'off'}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">API</div>
+        <div style="font-size:13px;font-weight:700;">${_health.apiCalls} calls / ${_health.apiErrors} errors</div>
+      </div>
+    </div>
+    <div style="margin-top:8px;font-size:11px;color:var(--muted);">Last sync: ${fmtTs} (${_health.lastSyncSource})</div>
+    <div style="margin-top:4px;font-size:11px;color:var(--muted);">Last activity: ${esc(lastActTxt)}</div>
+    ${_health.lastError?`<div style="margin-top:6px;font-size:11px;color:#fca5a5;">Last error: ${esc(_health.lastError)}</div>`:''}
+  `;
+}
+setInterval(renderHealthPanel,5000);
+
+function scheduleRealtimeRender(){
+  if(_realtimeRenderTimer) return;
+  _realtimeRenderTimer=setTimeout(()=>{
+    _realtimeRenderTimer=null;
+    if(me){updateBadges();render();}
+  },250);
+}
 
 function normalizeStatus(s){
   return s==='At Depott' ? 'At Depot' : (s==='Sent to Wechat'||s==='Sent to WeChat' ? 'Sent to Factory' : s);
@@ -6843,8 +6923,218 @@ async function ensureFirebaseScripts(){
   if(_firebaseScriptsReady && window.firebase && window.firebase.firestore) return true;
   await loadScriptOnce('https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js');
   await loadScriptOnce('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js');
-  _firebaseScriptsReady=!!(window.firebase && window.firebase.firestore);
+  await loadScriptOnce('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js');
+  await loadScriptOnce('https://www.gstatic.com/firebasejs/10.13.2/firebase-storage-compat.js');
+  _firebaseScriptsReady=!!(window.firebase && window.firebase.firestore && window.firebase.auth && window.firebase.storage);
   return _firebaseScriptsReady;
+}
+
+function saveAuthSession(authUser){
+  try{
+    if(authUser&&authUser.uid){
+      localStorage.setItem(FIREBASE_AUTH_SESSION_KEY,JSON.stringify({uid:authUser.uid,email:authUser.email||'',ts:Date.now()}));
+    }else{
+      localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);
+    }
+  }catch(_e){}
+}
+
+async function ensureFirebaseAuthSession(){
+  if(!_firebaseAuth) return;
+  return new Promise(resolve=>{
+    const unsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
+      saveAuthSession(authUser||null);
+      if(authUser){
+        _health.authState='signed_in';
+        resolve(authUser);
+        try{unsub();}catch(_e){}
+        return;
+      }
+      try{
+        const anon=await _firebaseAuth.signInAnonymously();
+        saveAuthSession(anon&&anon.user?anon.user:null);
+        _health.authState='anonymous';
+      }catch(err){
+        markError(err);
+        _health.authState='auth_error';
+      }
+      resolve(null);
+      try{unsub();}catch(_e){}
+    });
+  });
+}
+
+async function firebaseSignInForSession(email,password){
+  if(!_firebaseAuth) return null;
+  try{
+    if(email&&password){
+      const cred=await _firebaseAuth.signInWithEmailAndPassword(email,password);
+      saveAuthSession(cred&&cred.user?cred.user:null);
+      _health.authState='signed_in';
+      return cred&&cred.user?cred.user:null;
+    }
+  }catch(_e){}
+  try{
+    const anon=await _firebaseAuth.signInAnonymously();
+    saveAuthSession(anon&&anon.user?anon.user:null);
+    _health.authState='anonymous';
+    return anon&&anon.user?anon.user:null;
+  }catch(err){
+    markError(err);
+    _health.authState='auth_error';
+    return null;
+  }
+}
+
+async function resolveRoleFromClaims(){
+  try{
+    const u=_firebaseAuth&&_firebaseAuth.currentUser;
+    if(!u) return null;
+    const token=await u.getIdTokenResult(true);
+    const role=(token&&token.claims&&token.claims.role)||'';
+    return role?String(role):null;
+  }catch(_e){
+    return null;
+  }
+}
+
+async function resolveRoleFromFirestore(email){
+  try{
+    if(!_firebaseDb) return null;
+    const keys=[];
+    if(email) keys.push(String(email).toLowerCase());
+    const uid=_firebaseAuth&&_firebaseAuth.currentUser&&_firebaseAuth.currentUser.uid;
+    if(uid) keys.push(String(uid));
+    for(const key of keys){
+      const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(key).get();
+      if(doc.exists){
+        const d=doc.data()||{};
+        if(d.role) return String(d.role);
+      }
+    }
+    return null;
+  }catch(_e){
+    return null;
+  }
+}
+
+function normalizeRoleName(role){
+  const r=String(role||'').toLowerCase();
+  if(r==='admin') return 'Admin';
+  if(r==='staff') return 'Staff';
+  if(r==='reseller') return 'Reseller';
+  return '';
+}
+
+async function applyFirebaseRoleMapping(userObj,email){
+  const roleFromClaims=await resolveRoleFromClaims();
+  const roleFromDoc=await resolveRoleFromFirestore(email);
+  const normalized=normalizeRoleName(roleFromClaims||roleFromDoc);
+  if(normalized) userObj.role=normalized;
+  return userObj.role||'';
+}
+
+function normalizeAppRole(role){
+  const r=String(role||'').toLowerCase();
+  if(r==='admin') return 'Admin';
+  if(r==='staff') return 'Staff';
+  return 'Reseller';
+}
+
+async function signInFirebaseForUser(email,password){
+  if(!_firebaseAuth) return null;
+  const em=String(email||'').trim().toLowerCase();
+  const pw=String(password||'');
+  if(!em||!pw) return null;
+  try{
+    const cred=await _firebaseAuth.signInWithEmailAndPassword(em,pw);
+    return cred&&cred.user?cred.user:null;
+  }catch(err){
+    if(err&&err.code==='auth/user-not-found'){
+      try{
+        const created=await _firebaseAuth.createUserWithEmailAndPassword(em,pw);
+        return created&&created.user?created.user:null;
+      }catch(createErr){
+        markError(createErr);
+        return null;
+      }
+    }
+    if(err&&['auth/wrong-password','auth/too-many-requests','auth/invalid-credential','auth/invalid-email'].includes(err.code)){
+      markError(err);
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function upsertFirebaseRoleForUser(appUser){
+  if(!_firebaseDb||!_firebaseAuth||!_firebaseAuth.currentUser||!appUser) return null;
+  const now=Date.now();
+  const emailKey=String(appUser.email||'').toLowerCase();
+  const payload={
+    uid:_firebaseAuth.currentUser.uid,
+    email:emailKey,
+    appUserId:appUser.id||'',
+    role:normalizeAppRole(appUser.role),
+    displayName:appUser.dname||appUser.email||'',
+    updatedAt:now
+  };
+  if(emailKey){
+    await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(emailKey).set(payload,{merge:true});
+  }
+  await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(payload.uid).set(payload,{merge:true});
+  localStorage.setItem('jb_firebase_role',JSON.stringify(payload));
+  _health.authState='role:'+payload.role;
+  markSync('role_sync');
+  return payload;
+}
+
+async function syncFirebaseIdentityForAppUser(appUser,password){
+  if(!getFirebaseEnabled()) return null;
+  const ready=await initFirebaseRealtime({silent:true});
+  if(!ready) return null;
+  try{
+    await signInFirebaseForUser(appUser&&appUser.email, password);
+    return await upsertFirebaseRoleForUser(appUser);
+  }catch(err){
+    markError(err);
+    return null;
+  }
+}
+
+function inferContentTypeFromDataUri(data){
+  const m=String(data||'').match(/^data:([^;,]+)[;,]/i);
+  return m&&m[1]?m[1]:'application/octet-stream';
+}
+
+async function ensureStorageUpload(data,type){
+  if(!data) return {url:null};
+  if(typeof data==='string'&&/^https?:\/\//i.test(data)) return {url:data};
+  if(!_firebaseStorage) return {url:data};
+  let payload=String(data||'');
+  const contentType=type||inferContentTypeFromDataUri(payload);
+  if(!/^data:/i.test(payload)){
+    payload='data:'+contentType+';base64,'+payload;
+  }
+  const ref=_firebaseStorage.ref().child('media/'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8));
+  await ref.putString(payload,'data_url',{contentType});
+  const url=await ref.getDownloadURL();
+  markSync('storage_upload');
+  return {url};
+}
+
+async function writeAuditEvent(action,payload){
+  try{
+    if(!_firebaseDb) return;
+    const uid=(_firebaseAuth&&_firebaseAuth.currentUser&&_firebaseAuth.currentUser.uid)||'anonymous';
+    await _firebaseDb.collection(FIREBASE_COLLECTION_AUDIT).add({
+      action:action||'unknown',
+      actor:me&&me.email?me.email:'system',
+      uid,
+      payload:payload||{},
+      ts:Date.now()
+    });
+  }catch(_e){}
 }
 
 function sanitizeOrderForRemote(order){
@@ -6893,10 +7183,46 @@ function disconnectFirebaseRealtime(){
     try{_firebaseUnsubOrders();}catch(e){}
     _firebaseUnsubOrders=null;
   }
+  if(_firebaseUnsubFeed){
+    try{_firebaseUnsubFeed();}catch(e){}
+    _firebaseUnsubFeed=null;
+  }
   _firebaseReady=false;
+  _health.firebaseConnected=false;
+  _health.ordersRealtime=false;
+  _health.feedRealtime=false;
+  _health.authState='signed_out';
 }
 function stopFirebaseRealtime(){
   disconnectFirebaseRealtime();
+}
+
+async function subscribeFeedRealtime(opts={}){
+  const silent=!!opts.silent;
+  if(!_firebaseDb) return false;
+  if(_firebaseUnsubFeed){try{_firebaseUnsubFeed();}catch(_e){}}
+  try{
+    _firebaseUnsubFeed=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc('jb_feed').onSnapshot(doc=>{
+      const d=doc&&doc.data?doc.data():null;
+      const list=Array.isArray(d&&d.value)?d.value:[];
+      try{localStorage.setItem('jb_feed',JSON.stringify(list));}catch(_e){}
+      _health.feedRealtime=true;
+      markSync('feed_snapshot');
+      if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
+      if(me&&me.role==='Admin') renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
+    },err=>{
+      _health.feedRealtime=false;
+      markError(err);
+      if(!silent) console.warn('[feed snapshot]',err&&err.message?err.message:err);
+    });
+    _health.feedRealtime=true;
+    return true;
+  }catch(e){
+    _health.feedRealtime=false;
+    markError(e);
+    if(!silent) console.warn('[subscribeFeedRealtime]',e&&e.message?e.message:e);
+    return false;
+  }
 }
 
 async function initFirebaseRealtime(opts={}){
@@ -6918,21 +7244,38 @@ async function initFirebaseRealtime(opts={}){
         _firebaseApp=window.firebase.initializeApp(cfg);
       }
       _firebaseDb=window.firebase.firestore(_firebaseApp);
+      _firebaseAuth=window.firebase.auth(_firebaseApp);
+      _firebaseStorage=window.firebase.storage(_firebaseApp);
+      await ensureFirebaseAuthSession();
       if(_firebaseUnsubOrders){try{_firebaseUnsubOrders();}catch(e){}}
       _firebaseUnsubOrders=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).onSnapshot(snap=>{
         const incoming=snap.docs.map(firebaseDocToOrder);
         const merged=mergeOrdersByFreshness(orders,incoming);
         orders=merged;
         localStorage.setItem('jb_orders',JSON.stringify(orders));
-        if(me){updateBadges();render();}
+        _health.ordersRealtime=true;
+        markSync('orders_snapshot');
+        if(me){
+          if(_realtimeRenderTimer) clearTimeout(_realtimeRenderTimer);
+          _realtimeRenderTimer=setTimeout(()=>{
+            updateBadges();
+            render();
+          },120);
+        }
       },err=>{
+        _health.ordersRealtime=false;
+        markError(err);
         console.warn('[Firebase snapshot]',err.message);
       });
+      await subscribeFeedRealtime({silent:true});
       _firebaseReady=true;
+      _health.firebaseConnected=true;
       if(!silent) toast('✅ Firebase realtime connected','ok');
       return true;
     }catch(e){
       _firebaseReady=false;
+      _health.firebaseConnected=false;
+      markError(e);
       if(!silent) toast('❌ Firebase bağlantı hatası: '+e.message,'err');
       return false;
     }finally{
@@ -6993,10 +7336,23 @@ async function readFirebaseOrders(){
 }
 async function saveMediaToFirebase(data,type){
   const id='m'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+  try{
+    const up=await ensureStorageUpload(data,type);
+    if(up&&up.url&&/^https?:\/\//i.test(up.url)){
+      await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).set({
+        url:up.url,
+        type:type||inferContentTypeFromDataUri(data||''),
+        ts:Date.now(),
+        storage:true
+      });
+      return {id,url:up.url};
+    }
+  }catch(_e){}
   await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).set({
     data:data||'',
     type:type||'image/jpeg',
-    ts:Date.now()
+    ts:Date.now(),
+    storage:false
   });
   return {id,url:data||null};
 }
@@ -7063,11 +7419,15 @@ async function handleFirebaseApiRequest(url,method,body){
     if(!order||!order.id) return jsonApiResponse({error:'order missing'},400);
     // Overwrite the whole document so removed fields (e.g. pendingApproval) are actually deleted.
     await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(sanitizeOrderForRemote(order));
+    writeAuditEvent('order_upsert',{orderId:order.id,status:order.status||'',source:'api'}).catch(()=>{});
     return jsonApiResponse({ok:true});
   }
   if(path.startsWith('/api/order/')&&m==='DELETE'){
     const id=path.split('/').pop();
-    if(id) await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
+    if(id){
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
+      writeAuditEvent('order_delete',{orderId:id,source:'api'}).catch(()=>{});
+    }
     return jsonApiResponse({ok:true});
   }
   if(path==='/api/image'&&m==='POST'){
@@ -7077,7 +7437,11 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path.startsWith('/api/image/')&&m==='GET'){
     const id=path.replace('/api/image/','');
     const media=await getMediaFromFirebase(id);
-    if(!media||!media.data) return new Response('Not found',{status:404});
+    if(!media) return new Response('Not found',{status:404});
+    if(media.url){
+      return Response.redirect(media.url,302);
+    }
+    if(!media.data) return new Response('Not found',{status:404});
     return new Response(media.data,{
       status:200,
       headers:{'Content-Type':media.type||'text/plain'}
@@ -7118,16 +7482,25 @@ window.fetch=async function(input,init){
   const rawUrl=typeof input==='string'?input:(input&&input.url?input.url:String(input||''));
   const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
   const body=(init&&Object.prototype.hasOwnProperty.call(init,'body'))?init.body:null;
+  markApiCall();
   if(shouldRouteApiToFirebase(rawUrl)){
     try{
       const handled=await handleFirebaseApiRequest(rawUrl,method,body);
       if(handled) return handled;
       return jsonApiResponse({error:'Endpoint not available in Firebase mode'},404);
     }catch(e){
+      markError(e);
       return jsonApiResponse({error:e&&e.message?e.message:String(e)},500);
     }
   }
-  return _nativeFetch(input,init);
+  try{
+    const res=await _nativeFetch(input,init);
+    if(!res.ok) markError(new Error('HTTP '+res.status+' '+res.statusText));
+    return res;
+  }catch(e){
+    markError(e);
+    throw e;
+  }
 };
 
 async function pushOrdersToFirebase(changedOrders){
@@ -7668,6 +8041,7 @@ let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
 async function startPendingPoll(){
+  if(getFirebaseEnabled() && _health.ordersRealtime) return;
   if(_pendingPollInterval)clearInterval(_pendingPollInterval);
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
@@ -7743,6 +8117,7 @@ let _globalChatPoll = null;
 
 // Start global poll when admin logs in - checks all reseller chats
 function startGlobalChatPoll(){
+  if(getFirebaseEnabled()) return;
   if(_globalChatPoll) clearInterval(_globalChatPoll);
   _globalChatPoll = setInterval(pollAllChats, 5000); // every 5s
   pollAllChats(); // immediate first check
@@ -7930,14 +8305,11 @@ async function openChatWith(resellerId){
     // Sync to cloud
     try{
       const api = getApiBase();
-      const k = (localStorage.getItem('jb_cloud_key') || '').trim();
-      if(k){
-        await fetch(api+'/api/sync', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer '+k},
-          body: JSON.stringify({key: 'jb_chat_'+resellerId, value: msgs})
-        });
-      }
+      await fetch(api+'/api/sync', {
+        method: 'POST',
+        headers: getAuthHeaders({'Content-Type':'application/json'}),
+        body: JSON.stringify({key: 'jb_chat_'+resellerId, value: msgs})
+      });
     }catch(e){}
   }
   
@@ -7945,7 +8317,7 @@ async function openChatWith(resellerId){
   renderChatList();
   // Start polling
   if(_chatPollInterval) clearInterval(_chatPollInterval);
-  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, 2000);
+  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?10000:5000);
   document.getElementById('chat-input')?.focus();
 }
 
@@ -8046,6 +8418,7 @@ let _resMsgPollInterval = null;
 let _lastResUnreadCount = 0;
 
 function startResellerMessagePoll(){
+  if(getFirebaseEnabled()) return;
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
   // Check unread messages every 5 seconds
   _resMsgPollInterval = setInterval(checkResellerUnreadMessages, 5000);
@@ -8107,7 +8480,7 @@ function openResellerChat(){
   _overlay.style.display='flex';
   loadResellerMessages();
   if(_resChatInterval) clearInterval(_resChatInterval);
-  _resChatInterval = setInterval(loadResellerMessages, 2000);
+  _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?7000:2000);
   // Clear unread badges when chat opened
   const badge = document.getElementById('res-chat-badge');
   if(badge) badge.style.display = 'none';
@@ -8372,11 +8745,13 @@ function initOfflineIndicator(){
 
 // ── AUTO SYNC ──
 let _autoSyncInterval = null;
+let _autoSyncVisibilityBound=false;
 
 function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
   
-  // Sync every 30 seconds
+  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:30000;
+  // Sync interval adapts when realtime is active.
   _autoSyncInterval = setInterval(() => {
     if(me && navigator.onLine){
       loadFromCloudSilent().catch(()=>{});
@@ -8384,14 +8759,17 @@ function startAutoSync(){
         initFirebaseRealtime({silent:true}).catch(()=>{});
       }
     }
-  }, 30000);
+  }, syncMs);
   
   // Also sync when tab becomes visible
-  document.addEventListener('visibilitychange', () => {
-    if(document.visibilityState === 'visible' && me && navigator.onLine){
-      loadFromCloud().catch(()=>{});
-    }
-  });
+  if(!_autoSyncVisibilityBound){
+    document.addEventListener('visibilitychange', () => {
+      if(document.visibilityState === 'visible' && me && navigator.onLine){
+        loadFromCloud().catch(()=>{});
+      }
+    });
+    _autoSyncVisibilityBound=true;
+  }
 }
 
 // ── CONFETTI ──
@@ -8825,6 +9203,15 @@ function formatVideoDuration(seconds){
   return `${m}:${s.toString().padStart(2,'0')}`;
 }
 
+function getFeedPostsFromCache(){
+  try{
+    const raw=localStorage.getItem('jb_feed');
+    return raw?JSON.parse(raw):[];
+  }catch(_e){
+    return [];
+  }
+}
+
 
 function renderResFeed(searchQuery=''){
   if(!me)return;
@@ -8834,13 +9221,8 @@ function renderResFeed(searchQuery=''){
   const feedEl=document.getElementById('res-feed-list');
   if(!feedEl)return;
   
-  // Load feed posts from Firebase bridge
-  const api=getApiBase();
-  
-  fetch(api+'/api/data',{headers:getAuthHeaders()})
-    .then(r=>r.json())
-    .then(({data})=>{
-      let posts=data.jb_feed||[];
+  // Realtime-first: render from local cache updated by Firestore snapshot.
+  let posts=getFeedPostsFromCache();
       
       // Filter by search query
       if(searchQuery && searchQuery.trim()){
@@ -8891,8 +9273,6 @@ function renderResFeed(searchQuery=''){
           </div>
         </div>`;
       }).join('')+'</div>';
-    })
-    .catch(()=>{feedEl.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);">Could not load feed</div>';});
 }
 
 // Filter Reseller Feed
@@ -9334,10 +9714,14 @@ async function createFeedPost(){
     toast('Uploading images...','info');
     for(const imgItem of allImgs){
       try{
-        const r=await fetch(api+'/api/image',{method:'POST',
-          headers:getAuthHeaders({'Content-Type':'application/json'}),
-          body:JSON.stringify({data:imgItem.data,type:'image/jpeg'})});
-        if(r.ok){const d=await r.json();if(d.url||d.id)imgUrls.push(d.url||(api+'/api/image/'+d.id));}
+        const up=await ensureStorageUpload(imgItem.data,'image/jpeg');
+        if(up&&up.url){imgUrls.push(up.url);}
+        else{
+          const r=await fetch(api+'/api/image',{method:'POST',
+            headers:getAuthHeaders({'Content-Type':'application/json'}),
+            body:JSON.stringify({data:imgItem.data,type:'image/jpeg'})});
+          if(r.ok){const d=await r.json();if(d.url||d.id)imgUrls.push(d.url||(api+'/api/image/'+d.id));}
+        }
       }catch(e){console.warn('Görsel upload hatası',e);}
     }
   }
@@ -9347,18 +9731,23 @@ async function createFeedPost(){
   if(_feedVideoData){
     toast('Uploading video...','info');
     try{
-      const r = await fetch(api+'/api/image',{method:'POST',
-        headers:getAuthHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({data:_feedVideoData,type:'video/mp4'})});
-      if(r.ok){
-        const d = await r.json();
-        if(d.url||d.id) {
-          videoUrl = d.url || (api+'/api/image/'+d.id);
-          console.log('[Feed] Video uploaded:', videoUrl);
+      const up = await ensureStorageUpload(_feedVideoData,'video/mp4');
+      if(up&&up.url){
+        videoUrl=up.url;
+      }else{
+        const r = await fetch(api+'/api/image',{method:'POST',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({data:_feedVideoData,type:'video/mp4'})});
+        if(r.ok){
+          const d = await r.json();
+          if(d.url||d.id) {
+            videoUrl = d.url || (api+'/api/image/'+d.id);
+            console.log('[Feed] Video uploaded:', videoUrl);
+          }
+        } else {
+          console.error('[Feed] Video upload failed:', r.status);
+          toast('⚠️ Video upload failed, posting without video','err');
         }
-      } else {
-        console.error('[Feed] Video upload failed:', r.status);
-        toast('⚠️ Video upload failed, posting without video','err');
       }
     }catch(e){
       console.error('[Feed] Video upload error:', e);
@@ -9381,10 +9770,8 @@ async function createFeedPost(){
   };
   
   try{
-    // Load existing posts
-    const r=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    const {data}=await r.json();
-    const posts=data.jb_feed||[];
+    // Realtime cache keeps feed current; append locally then sync.
+    const posts=getFeedPostsFromCache();
     posts.push(post);
     
     // Save back
@@ -9403,14 +9790,8 @@ async function createFeedPost(){
 async function renderAdminFeed(searchQuery=''){
   const el=document.getElementById('admin-feed-list');
   if(!el)return;
-  
-  const api=getApiBase();
-  
-  try{
-    const r=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!r.ok){el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);"><div style="font-size:40px;margin-bottom:12px;">❌</div>Connection error. Check API settings.</div>';return;}
-    const {data}=await r.json();
-    let posts=(data.jb_feed||[]).slice().reverse();
+
+  let posts=getFeedPostsFromCache().slice().reverse();
     
     // Filter by search query
     if(searchQuery && searchQuery.trim()){
@@ -9444,7 +9825,6 @@ async function renderAdminFeed(searchQuery=''){
           ${p.price?`<span style="font-weight:700;color:#f97316;">£${p.price}</span>`:''}
         </div>
       </div>`).join('');
-  }catch(e){el.innerHTML='<div style="text-align:center;padding:20px;color:var(--muted);">Failed to load posts</div>';}
 }
 
 // Filter Admin Feed
@@ -9458,12 +9838,10 @@ function filterAdminFeed(query){
 
 async function deleteFeedPost(postId){
   if(!confirm('Delete this post?'))return;
-  const api=getApiBase();
   try{
-    const r=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    const {data}=await r.json();
-    const posts=(data.jb_feed||[]).filter(p=>p.id!==postId);
-    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})});
+    const posts=getFeedPostsFromCache().filter(p=>p.id!==postId);
+    await fetch('/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})});
+    try{localStorage.setItem('jb_feed',JSON.stringify(posts));}catch(_e){}
     toast('🗑️ Deleted','info');
     renderAdminFeed();
   }catch(e){toast('Failed to delete','err');}
@@ -10731,6 +11109,8 @@ async function saveOrders(){
       if(getFirebaseEnabled()){
         pushOrdersToFirebase([...(orders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
       }
+      markSync('orders_save');
+      writeAuditEvent('orders_save',{count:orders.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
   } catch(e) {
     console.error('[saveOrders]', e);
   }
