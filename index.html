@@ -7110,7 +7110,7 @@ function inferContentTypeFromDataUri(data){
 async function ensureStorageUpload(data,type){
   if(!data) return {url:null};
   if(typeof data==='string'&&/^https?:\/\//i.test(data)) return {url:data};
-  if(!_firebaseStorage) return {url:data};
+  if(!_firebaseStorage) return {url:null};
   let payload=String(data||'');
   const contentType=type||inferContentTypeFromDataUri(payload);
   if(!/^data:/i.test(payload)){
@@ -7339,22 +7339,30 @@ async function saveMediaToFirebase(data,type){
   try{
     const up=await ensureStorageUpload(data,type);
     if(up&&up.url&&/^https?:\/\//i.test(up.url)){
-      await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).set({
-        url:up.url,
-        type:type||inferContentTypeFromDataUri(data||''),
-        ts:Date.now(),
-        storage:true
-      });
+      // Storage URL is enough for runtime; media index write is best-effort.
+      try{
+        await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).set({
+          url:up.url,
+          type:type||inferContentTypeFromDataUri(data||''),
+          ts:Date.now(),
+          storage:true
+        });
+      }catch(_e){}
       return {id,url:up.url};
     }
   }catch(_e){}
-  await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).set({
-    data:data||'',
-    type:type||'image/jpeg',
-    ts:Date.now(),
-    storage:false
-  });
-  return {id,url:data||null};
+  try{
+    await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).set({
+      data:data||'',
+      type:type||'image/jpeg',
+      ts:Date.now(),
+      storage:false
+    });
+    return {id,url:data||null};
+  }catch(err){
+    // If media collection write is blocked by rules, bubble up cleanly.
+    throw new Error('Media save blocked: '+(err&&err.message?err.message:String(err)));
+  }
 }
 async function getMediaFromFirebase(id){
   const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_MEDIA).doc(id).get();
@@ -9956,30 +9964,36 @@ function closeLogisticsModal(){
 
 async function sendChatImage(input){
   if(!input.files||!input.files[0]||!_chatReseller)return;
-  const api=getApiBase();
-  toast('Uploading image...','info');;
+  toast('Uploading image...','info');
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
       const compressed=await compressImage(e.target.result,600,0.7);
-      const r=await fetch(api+'/api/image',{method:'POST',
-        headers:getAuthHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({data:compressed,type:'image/jpeg'})});
-      if(!r.ok){
-        const errText=await r.text().catch(()=>'');
-        throw new Error('Upload failed '+r.status+': '+errText.slice(0,100));
+      let imgUrl=null;
+      try{
+        const up=await ensureStorageUpload(compressed,'image/jpeg');
+        if(up&&up.url) imgUrl=up.url;
+      }catch(_e){}
+      if(!imgUrl){
+        const r=await fetch('/api/image',{method:'POST',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({data:compressed,type:'image/jpeg'})});
+        if(!r.ok){
+          const errText=await r.text().catch(()=>'');
+          throw new Error('Upload failed '+r.status+': '+errText.slice(0,100));
+        }
+        const d=await r.json();
+        if(!(d.url||d.id)) throw new Error('Image response missing url/id');
+        imgUrl=d.url || ('/api/image/'+d.id);
       }
-      const d=await r.json();
-      if(!d.id) throw new Error('Worker resim ID donmedi: '+JSON.stringify(d));
-      const imgUrl=d.url || (api+'/api/image/'+d.id);
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+imgUrl,ts:Date.now()};
       if(!_messages[_chatReseller])_messages[_chatReseller]=[];
       _messages[_chatReseller].push(msg);
       renderMessages();
-      await fetch(api+'/api/sync',{method:'POST',
+      await fetch('/api/sync',{method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({key:'jb_chat_'+_chatReseller,value:_messages[_chatReseller]})});
-      toast('Image sent','ok');;
+      toast('Image sent','ok');
     }catch(err){toast('Failed to send image: '+err.message,'err');}
   };
   reader.readAsDataURL(input.files[0]);
@@ -10220,32 +10234,38 @@ async function sendVoiceMessage(audioBlob, from){
 
 async function sendResChatImage(input){
   if(!input.files||!input.files[0]||!me)return;
-  const api=getApiBase();
-  toast('Uploading image...','info');;
+  toast('Uploading image...','info');
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
       const compressed=await compressImage(e.target.result,600,0.7);
-      const r=await fetch(api+'/api/image',{method:'POST',
-        headers:getAuthHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({data:compressed,type:'image/jpeg'})});
-      if(!r.ok){
-        const errText=await r.text().catch(()=>'');
-        throw new Error('Upload failed '+r.status+': '+errText.slice(0,100));
+      let imgUrl=null;
+      try{
+        const up=await ensureStorageUpload(compressed,'image/jpeg');
+        if(up&&up.url) imgUrl=up.url;
+      }catch(_e){}
+      if(!imgUrl){
+        const r=await fetch('/api/image',{method:'POST',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({data:compressed,type:'image/jpeg'})});
+        if(!r.ok){
+          const errText=await r.text().catch(()=>'');
+          throw new Error('Upload failed '+r.status+': '+errText.slice(0,100));
+        }
+        const d=await r.json();
+        if(!(d.url||d.id)) throw new Error('Image response missing url/id');
+        imgUrl=d.url || ('/api/image/'+d.id);
       }
-      const d=await r.json();
-      if(!d.id) throw new Error('Worker resim ID donmedi: '+JSON.stringify(d));
-      const imgUrl=d.url || (api+'/api/image/'+d.id);
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
-      const rd=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+      const rd=await fetch('/api/data',{headers:getAuthHeaders()});
       let msgs=[];
       if(rd.ok){const dd=await rd.json();msgs=dd.data&&dd.data['jb_chat_'+me.id]||[];}
       msgs.push(msg);
-      await fetch(api+'/api/sync',{method:'POST',
+      await fetch('/api/sync',{method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({key:'jb_chat_'+me.id,value:msgs})});
       renderResellerMessages(msgs);
-      toast('Image sent','ok');;
+      toast('Image sent','ok');
     }catch(err){toast('Failed to send image: '+err.message,'err');}
   };
   reader.readAsDataURL(input.files[0]);
