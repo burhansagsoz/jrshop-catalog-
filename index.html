@@ -2437,7 +2437,14 @@ async function approveOrder(id){
   o.updatedAt=Date.now();
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
-  saveOrders();
+  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  try{
+    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
+    const k=localStorage.getItem('jb_cloud_key')||'';
+    const headers={'Content-Type':'application/json'};
+    if(k) headers['Authorization']='Bearer '+k;
+    await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
+  }catch(_e){}
   updateBadges();
   renderPendingInTable();
   logActivity('status',`Order approved: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
@@ -2456,8 +2463,10 @@ async function rejectOrder(id){
   toast('❌ Rejected & deleted','info');
   // Delete from cloud immediately
   const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(k)fetch(api+'/api/order/'+id,{method:'DELETE',headers:{'Authorization':'Bearer '+k}}).catch(()=>{});
+  const k=localStorage.getItem('jb_cloud_key')||'';
+  const headers={};
+  if(k) headers['Authorization']='Bearer '+k;
+  fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
 }
 
 async function navOrders(status,el){
@@ -2467,18 +2476,35 @@ async function navOrders(status,el){
     showPage('pg-orders');
     document.getElementById('pg-title').textContent='Pending Approval';
     showOrderTop();
-    // Always reload from cloud to get latest reseller orders
+    // Always reload latest orders when pending page opens.
     const tb=document.getElementById('tbody');
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
         const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
         const k=localStorage.getItem('jb_cloud_key')||'';
-        if(k){
-          const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+        const headers={};
+        if(k) headers['Authorization']='Bearer '+k;
+        let loaded=false;
+        const ordRes=await fetch(api+'/api/orders',{headers});
+        if(ordRes.ok){
+          const od=await ordRes.json();
+          if(Array.isArray(od.orders)){
+            orders=od.orders;
+            localStorage.setItem('jb_orders',JSON.stringify(orders));
+            updateBadges();
+            loaded=true;
+          }
+        }
+        if(!loaded){
+          const res=await fetch(api+'/api/data',{headers});
           if(res.ok){
             const {data}=await res.json();
-            if(data.jb_orders){orders=data.jb_orders;localStorage.setItem('jb_orders',JSON.stringify(orders));updateBadges();}
+            if(data&&Array.isArray(data.jb_orders)){
+              orders=data.jb_orders;
+              localStorage.setItem('jb_orders',JSON.stringify(orders));
+              updateBadges();
+            }
           }
         }
       }catch(e){}
@@ -4406,24 +4432,20 @@ async function handleImg(idx,input){
       reader.readAsDataURL(input.files[0]);
     });
     
-    // MUST upload to cloud - no base64 fallback
+    // Upload image through API bridge (Firebase mode supported)
     const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
-    
-    if(!k){
-      toast('⚠️ Cloud API key required for images', 'err');
-      if(lbl)lbl.innerHTML='📷 Choose';
-      return;
-    }
+    const k = localStorage.getItem('jb_cloud_key') || '';
     
     let imgSrc = null;
     let retries = 3;
     
     while(retries > 0 && !imgSrc){
       try{
+        const headers = { 'Content-Type': 'application/json' };
+        if(k) headers['Authorization'] = 'Bearer '+k;
         const res = await fetch(api+'/api/image', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer '+k },
+          headers,
           body: JSON.stringify({ data: compressed, type: 'image/jpeg' })
         });
         
@@ -4603,15 +4625,16 @@ function collectProducts(){const prods=[];document.querySelectorAll('.prod-item'
 // Ürün görsellerini worker'a upload et (base64 olanları)
 async function uploadProdImages(){
   const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k) return;
+  const k=localStorage.getItem('jb_cloud_key')||'';
   for(const idx in prodImages){
     const src=prodImages[idx];
     if(src && src.startsWith('data:')){
       try{
+        const headers={'Content-Type':'application/json'};
+        if(k) headers['Authorization']='Bearer '+k;
         const res=await fetch(api+'/api/image',{
           method:'POST',
-          headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+          headers,
           body:JSON.stringify({data:src,type:'image/jpeg'})
         });
         if(res.ok){const d=await res.json();if(d.url||d.id){prodImages[idx]=d.url||(api+'/api/image/'+d.id);}}
@@ -6216,24 +6239,20 @@ async function handleROImg(idx,input){
       reader.readAsDataURL(input.files[0]);
     });
     
-    // MUST upload to cloud
+    // Upload image through API bridge (Firebase mode supported)
     const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
-    
-    if(!k){
-      toast('⚠️ Cloud API key required for images', 'err');
-      if(label) label.innerHTML = '📷 Choose';
-      return;
-    }
+    const k = localStorage.getItem('jb_cloud_key') || '';
     
     let imgSrc = null;
     let retries = 3;
     
     while(retries > 0 && !imgSrc){
       try{
+        const headers = { 'Content-Type': 'application/json' };
+        if(k) headers['Authorization'] = 'Bearer '+k;
         const res = await fetch(api+'/api/image', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer '+k },
+          headers,
           body: JSON.stringify({ data: compressed, type: 'image/jpeg' })
         });
         
@@ -10730,24 +10749,23 @@ async function saveOrders(){
       orders=orders.map(o=>({...o,status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status,updatedAt:o.updatedAt||o.ts||Date.now()}));
       // Save to localStorage (cache)
       localStorage.setItem('jb_orders',JSON.stringify(orders));
-      // Write changed orders to cloud individually — cloud-first
+      // Write changed orders to cloud individually when legacy key is available.
       const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-      const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-      if(!k)return;
-      // Send all orders that were just updated (updatedAt === now)
-      // Tüm siparişleri cloud'a gönder
-      for(const o of orders){
-        const clean={...o,products:(o.products||[]).map(p=>({...p,
-          img:p.img||null,
-          depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
-        }))};
-        try{
-          const _sr=await fetch(api+'/api/order',{method:'POST',
-            headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
-            body:JSON.stringify({order:clean})
-          });
-          if(!_sr.ok) console.warn('[saveOrders] cloud save failed for',o.id);
-        }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
+      const k=localStorage.getItem('jb_cloud_key')||'';
+      if(k){
+        for(const o of orders){
+          const clean={...o,products:(o.products||[]).map(p=>({...p,
+            img:p.img||null,
+            depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
+          }))};
+          try{
+            const _sr=await fetch(api+'/api/order',{method:'POST',
+              headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+              body:JSON.stringify({order:clean})
+            });
+            if(!_sr.ok) console.warn('[saveOrders] cloud save failed for',o.id);
+          }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
+        }
       }
       if(getFirebaseEnabled()){
         pushOrdersToFirebase([...(orders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
