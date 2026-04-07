@@ -6978,7 +6978,10 @@ function shouldRouteApiToFirebase(url){
   if(!getFirebaseEnabled()) return false;
   try{
     const u=new URL(url,location.origin);
-    return isApiPath(u.pathname);
+    if(isApiPath(u.pathname)) return true;
+    // Also intercept legacy absolute worker URLs that still point to /api/*
+    // even when the current origin is now Pages/static hosting.
+    return /workers\.dev$/i.test(u.hostname) && isApiPath(u.pathname);
   }catch(_e){
     return false;
   }
