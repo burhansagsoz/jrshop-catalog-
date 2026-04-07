@@ -2219,6 +2219,7 @@ function safeApplyRemoteOrders(remoteOrders){
 async function login(){
   const em=document.getElementById('l-em').value.trim().toLowerCase();
   const pw=document.getElementById('l-pw').value;
+  resetHealthCounters();
   cacheFirebaseLoginCreds(em,pw);
   const u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
   if(!u){
@@ -2322,7 +2323,7 @@ async function login(){
     }).catch(function(){});
   },1000);
 }
-function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
+function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}resetHealthCounters();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
 
 // ── SIDEBAR ──
 let _sbOpen=window.innerWidth>900;
@@ -7001,6 +7002,11 @@ function markSync(source){
 function markApiCall(){
   _health.apiCalls++;
 }
+function resetHealthCounters(){
+  _health.apiCalls=0;
+  _health.apiErrors=0;
+  _health.lastError='';
+}
 function markError(err){
   const code=err&&err.code?` [${err.code}]`:'';
   const msg=(err&&err.message?err.message:String(err||'unknown'))+code;
@@ -8153,6 +8159,7 @@ async function migrateAllToFirebase(){
 }
 
 async function connectFirebaseNow(){
+  resetHealthCounters();
   await initFirebaseRealtime({silent:false,force:true});
 }
 
