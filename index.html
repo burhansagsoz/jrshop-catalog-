@@ -2228,10 +2228,10 @@ async function login(){
   me=u;
   if(getFirebaseEnabled()){
     try{
-      await initFirebaseRealtime({silent:true});
+      await initFirebaseRealtime({silent:true,force:true});
       const fbUser=await firebaseSignInForSession(em,pw);
       if(fbUser){
-        await initFirebaseRealtime({silent:true});
+        await initFirebaseRealtime({silent:true,force:true});
         flushLocalSyncFallback().catch(()=>{});
       }
       await applyFirebaseRoleMapping(me,em);
