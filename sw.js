@@ -40,8 +40,6 @@ self.addEventListener('fetch', e => {
 
   // API istekleri - cache'leme, her zaman network
   if (
-    url.hostname.includes('workers.dev') ||
-    url.hostname.includes('cloudflare') ||
     url.pathname.startsWith('/api/') ||
     e.request.method !== 'GET'
   ) {

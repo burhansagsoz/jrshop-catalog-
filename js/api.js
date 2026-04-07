@@ -1,35 +1,33 @@
 // ════════════════════════════════════════════════════
-// JRSHOP API Modülü — Tüm cloud API çağrıları burada
-// Backend: Cloudflare Workers + D1
+// JRSHOP API Modülü — API helper katmanı
+// Backend: Firebase / Firestore bridge (/api/*)
 // ════════════════════════════════════════════════════
 
 const API = (() => {
 
   // Konfigürasyon
   function getConfig() {
+    const key = (localStorage.getItem('jb_cloud_key') || '').trim();
     return {
-      url: localStorage.getItem('jb_cloud_api') || 'https://jrshop-api.sagsozburhan1.workers.dev',
-      key: localStorage.getItem('jb_cloud_key') || 'JrShop2026'
+      url: localStorage.getItem('jb_cloud_api') || location.origin,
+      key
     };
   }
 
   function isConfigured() {
-    return !!getConfig().key;
+    return true;
   }
 
   // Temel istek fonksiyonu
   async function request(method, path, body = null, isPublic = false) {
     const cfg = getConfig();
-    if (!isPublic && !cfg.key) {
-      throw new Error('API anahtarı ayarlanmamış. Lütfen Settings > Cloud Sync bölümünden ayarlayın.');
-    }
 
     const opts = {
       method,
       headers: { 'Content-Type': 'application/json' }
     };
 
-    if (!isPublic) {
+    if (!isPublic && cfg.key) {
       opts.headers['Authorization'] = 'Bearer ' + cfg.key;
     }
 
@@ -73,7 +71,7 @@ const API = (() => {
 
     // ── Resim ──
     saveImage:    (data, type) => request('POST', '/api/image', { data, type: type || 'image/jpeg' }),
-    getImageUrl:  (id)         => getConfig().url + '/api/image/' + id,
+    getImageUrl:  (id)         => '/api/image/' + id,
 
     // ── AI ──
     askAI: (messages, system) => request('POST', '/api/anthropic', {
