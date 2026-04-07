@@ -2438,13 +2438,25 @@ async function approveOrder(id){
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
   localStorage.setItem('jb_orders',JSON.stringify(orders));
+  let persisted=false;
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
+    const ready=await initFirebaseRealtime({silent:true});
+    if(ready&&_firebaseDb){
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(o.id).set(sanitizeOrderForRemote(o));
+      persisted=true;
+    }
+  }catch(_e){}
+  if(!persisted){
+    try{
+    const api=getApiBase();
     const k=localStorage.getItem('jb_cloud_key')||'';
     const headers={'Content-Type':'application/json'};
     if(k) headers['Authorization']='Bearer '+k;
-    await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
-  }catch(_e){}
+    const res=await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
+    persisted=!!(res&&res.ok);
+  }catch(_e2){}
+  }
+  if(!persisted) toast('⚠️ Approval could not sync now, retry later','err');
   updateBadges();
   renderPendingInTable();
   logActivity('status',`Order approved: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
@@ -2461,12 +2473,21 @@ async function rejectOrder(id){
   updateBadges();renderPendingInTable();
   logActivity('status',`Order rejected: ${esc(o.ref||o.id.slice(-6))} — ${note}`,o.id);
   toast('❌ Rejected & deleted','info');
-  // Delete from cloud immediately
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||'';
-  const headers={};
-  if(k) headers['Authorization']='Bearer '+k;
-  fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
+  let removed=false;
+  try{
+    const ready=await initFirebaseRealtime({silent:true});
+    if(ready&&_firebaseDb){
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
+      removed=true;
+    }
+  }catch(_e){}
+  if(!removed){
+    const api=getApiBase();
+    const k=localStorage.getItem('jb_cloud_key')||'';
+    const headers={};
+    if(k) headers['Authorization']='Bearer '+k;
+    fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
+  }
 }
 
 async function navOrders(status,el){
@@ -2481,7 +2502,7 @@ async function navOrders(status,el){
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
-        const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
+        const api=getApiBase();
         const k=localStorage.getItem('jb_cloud_key')||'';
         const headers={};
         if(k) headers['Authorization']='Bearer '+k;
@@ -3924,12 +3945,40 @@ function closeLightbox(){
   _lightboxIndex = 0;
   _lightboxScale = 1;
 }
-function downloadImage(src, name){
-  const a=document.createElement('a');
-  a.href=src;
-  a.download=(name||'image').replace(/[^a-z0-9]/gi,'_')+'.jpg';
-  a.click();
-  toast('⬇️ Downloading…','ok');
+async function downloadImage(src, name){
+  const fileName=(name||'image').replace(/[^a-z0-9]/gi,'_')+'.jpg';
+  // Prefer direct data/blob links.
+  if(/^data:|^blob:|^https?:/i.test(src) && !/\/api\/image\//.test(src)){
+    const a=document.createElement('a');
+    a.href=src;
+    a.download=fileName;
+    a.click();
+    toast('⬇️ Downloading…','ok');
+    return;
+  }
+  // For legacy worker-style URLs, fetch image bytes through the API bridge
+  // so download works even when worker domain is no longer reachable.
+  const m=String(src||'').match(/\/api\/image\/([^?#]+)/);
+  if(!m){toast('⚠️ Image URL invalid','err');return;}
+  const id=decodeURIComponent(m[1]);
+  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
+  const k=localStorage.getItem('jb_cloud_key')||'';
+  const headers={};
+  if(k) headers['Authorization']='Bearer '+k;
+  try{
+    const res=await fetch(api+'/api/image/'+id,{headers});
+    if(!res.ok) throw new Error('not found');
+    const blob=await res.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download=fileName;
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    toast('⬇️ Downloading…','ok');
+  }catch(_e){
+    toast('❌ Image unavailable (legacy source)','err');
+  }
 }
 function downloadAllImages(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
@@ -5223,7 +5272,7 @@ async function shareCatalog(){
     if(!catalog||!catalog.length){toast('Add products first!','err');return;}
     
     const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-    const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
+    const k=localStorage.getItem('jb_cloud_key')||'';
     
     // Upload images to cloud first (convert base64 to URLs)
     toast('📤 Uploading images...','info');
@@ -5235,9 +5284,11 @@ async function shareCatalog(){
       // If image is base64, upload to cloud
       if(imgUrl && imgUrl.startsWith('data:')){
         try{
+          const headers={'Content-Type':'application/json'};
+          if(k) headers['Authorization']='Bearer '+k;
           const r = await fetch(api+'/api/image',{
             method:'POST',
-            headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+            headers,
             body:JSON.stringify({data:imgUrl,type:'image/jpeg'})
           });
           if(r.ok){
@@ -5284,13 +5335,23 @@ async function shareCatalog(){
     const catalogHTML=buildSimpleCatalogHTML(cleanProducts,cleanCategories,messengerLink);
     toast('📤 Publishing catalog...','info');
     try{
-      const res=await fetch(api+'/api/catalog-page',{
+      const headers={'Content-Type':'application/json'};
+      if(k) headers['Authorization']='Bearer '+k;
+      // Firebase-first publish target used by catalog.html loader.
+      const syncRes=await fetch(api+'/api/sync',{
         method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
-        body:JSON.stringify({html:catalogHTML})
+        headers,
+        body:JSON.stringify({key:'jb_catalog_html',value:catalogHTML})
       });
-      if(res.ok){
-        const permanentUrl=api+'/catalog';
+      // Backward compatibility: keep old endpoint write as best-effort.
+      try{
+        await fetch(api+'/api/catalog-page',{
+          method:'POST',
+          headers,
+          body:JSON.stringify({html:catalogHTML})
+        });
+      }catch(_e){}
+      if(syncRes.ok){
         toast('✅ Catalog published!','ok');
         showCatalogShareModal(null,catalogHTML);
       } else {
@@ -5343,9 +5404,7 @@ async function uploadToGitHub(htmlContent){
 function showCatalogShareModal(blobUrl, htmlContent){
   const old=document.getElementById('cat-share-modal');
   if(old)old.remove();
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const permanentUrl='https://jr.shop/catalog';
-  const realUrl=api+'/catalog';
+  const realUrl=(location.origin||'')+'/catalog.html';
   const div=document.createElement('div');
   div.id='cat-share-modal';
   div.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
@@ -5357,7 +5416,7 @@ function showCatalogShareModal(blobUrl, htmlContent){
       </div>
       <div style="background:linear-gradient(135deg,#f97316,#ea580c);border-radius:12px;padding:16px;margin-bottom:16px;text-align:center;">
         <div style="color:rgba(255,255,255,0.8);font-size:11px;font-weight:600;margin-bottom:6px;">YOUR CATALOG LINK</div>
-        <div style="color:#fff;font-size:18px;font-weight:800;letter-spacing:-0.5px;">jr.shop/catalog</div>
+        <div style="color:#fff;font-size:15px;font-weight:800;letter-spacing:-0.3px;word-break:break-all;">${realUrl}</div>
       </div>
       <div style="font-size:12px;color:var(--muted);margin-bottom:12px;text-align:center;">Share this link with your customers</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -6474,6 +6533,12 @@ const CLOUD_API_DEFAULT='https://jrshop-api.sagsozburhan1.workers.dev';
 const CLOUD_KEY_DEFAULT='JrShop2026';
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
+function getApiBase(){
+  const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
+  if(getFirebaseEnabled()) return location.origin;
+  if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
+  return CLOUD_API_DEFAULT;
+}
 function cloudSave(key,value){
   localStorage.setItem(key,value);
   // Instant cloud write — no delay
@@ -6978,7 +7043,10 @@ function shouldRouteApiToFirebase(url){
   if(!getFirebaseEnabled()) return false;
   try{
     const u=new URL(url,location.origin);
-    return isApiPath(u.pathname);
+    if(isApiPath(u.pathname)) return true;
+    // Also intercept legacy absolute worker URLs that still point to /api/*
+    // even when the current origin is now Pages/static hosting.
+    return /workers\.dev$/i.test(u.hostname) && isApiPath(u.pathname);
   }catch(_e){
     return false;
   }
