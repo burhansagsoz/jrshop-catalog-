@@ -2208,6 +2208,55 @@ function shouldAcceptRemoteOrders(remoteOrders){
     return true;
   }
 }
+function mergeArrayByTs(localArr,remoteArr){
+  const local=Array.isArray(localArr)?localArr:[];
+  const remote=Array.isArray(remoteArr)?remoteArr:[];
+  const byId=new Map();
+  for(const item of local){
+    if(item&&item.id) byId.set(item.id,item);
+  }
+  for(const item of remote){
+    if(!item||!item.id){
+      continue;
+    }
+    const prev=byId.get(item.id);
+    const itemTs=item.updatedAt||item.ts||0;
+    const prevTs=prev&&(prev.updatedAt||prev.ts||0)||0;
+    if(!prev || itemTs>=prevTs){
+      byId.set(item.id,item);
+    }
+  }
+  return [...byId.values()];
+}
+function mergeChatMessages(localArr,remoteArr){
+  const merged=mergeArrayByTs(localArr,remoteArr);
+  // Keep chronological chat order for renderer consistency.
+  return merged.sort((a,b)=>(a&&a.ts||0)-(b&&b.ts||0));
+}
+function mergeKeyWithLocalFirst(key,remoteValue){
+  if(remoteValue===undefined) return;
+  try{
+    const localRaw=localStorage.getItem(key);
+    if(localRaw===null){
+      localStorage.setItem(key,JSON.stringify(remoteValue));
+      return;
+    }
+    let localValue=null;
+    try{localValue=JSON.parse(localRaw);}catch(_e){localValue=null;}
+    // For feed/chat arrays, merge by message/post id instead of blind overwrite.
+    if(Array.isArray(remoteValue)&&Array.isArray(localValue)&&(key==='jb_feed'||key.indexOf('jb_chat_')===0)){
+      const merged=(key.indexOf('jb_chat_')===0)?mergeChatMessages(localValue,remoteValue):mergeArrayByTs(localValue,remoteValue);
+      localStorage.setItem(key,JSON.stringify(merged));
+      return;
+    }
+    // For object maps, preserve local keys and apply remote keys (local-first conflict).
+    if(remoteValue&&typeof remoteValue==='object'&&!Array.isArray(remoteValue) && localValue&&typeof localValue==='object'&&!Array.isArray(localValue)){
+      localStorage.setItem(key,JSON.stringify({...remoteValue,...localValue}));
+      return;
+    }
+    // For primitive values, keep existing local value to avoid rollback.
+  }catch(_e){}
+}
 function shouldAcceptRemoteFeed(remoteFeed){
   if(!Array.isArray(remoteFeed)) return false;
   if(remoteFeed.length>0) return true;
@@ -2228,6 +2277,10 @@ function setFeedCache(posts,updatedAt){
     localStorage.setItem('jb_feed',JSON.stringify(Array.isArray(posts)?posts:[]));
     localStorage.setItem('jb_feed_updated_at',String(ts));
   }catch(_e){}
+}
+function mergeFeedByTs(localFeed,remoteFeed){
+  return mergeArrayByTs(Array.isArray(localFeed)?localFeed:[],Array.isArray(remoteFeed)?remoteFeed:[])
+    .sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
 }
 function safeApplyRemoteOrders(remoteOrders){
   if(!shouldAcceptRemoteOrders(remoteOrders)) return false;
@@ -4712,13 +4765,37 @@ async function uploadProdImages(){
     }
   }
 }
+function runProdImageUploadAsync(orderId){
+  const targetId=String(orderId||'');
+  if(!targetId) return;
+  setTimeout(async function(){
+    try{
+      const idx=orders.findIndex(x=>x&&x.id===targetId);
+      if(idx<0) return;
+      const order=orders[idx];
+      let changed=false;
+      for(const p of (order.products||[])){
+        if(!p||!p.img||!String(p.img).startsWith('data:')) continue;
+        try{
+          const up=await uploadImageWithFallback(String(p.img),'image/jpeg',{allowDataFallback:true,timeoutMs:3500});
+          if(up&&up.url&&up.url!==p.img){ p.img=up.url; changed=true; }
+        }catch(_e){}
+      }
+      if(changed){
+        order.updatedAt=Date.now();
+        orders[idx]=order;
+        await saveOrders([order.id]);
+      }
+    }catch(_e){}
+  },0);
+}
 async function saveOrder(){
   const name=document.getElementById('f-name').value.trim(),addr=document.getElementById('f-addr').value.trim(),city=document.getElementById('f-city').value.trim(),post=document.getElementById('f-post').value.trim(),ref=document.getElementById('f-ref').value.trim();
   if(!name||!addr||!city||!post||!ref){toast('⚠️ Fill required fields','err');return;}
   const prods=collectProducts();if(!prods.length){toast('⚠️ Add at least one product','err');return;}
   const o={id:'o'+Date.now()+Math.random().toString(36).substr(2,4),updatedAt:Date.now(),ref,name,phone:document.getElementById('f-phone').value.trim(),address:addr,city,state:document.getElementById('f-state').value.trim(),postcode:post,country:document.getElementById('f-country').value.trim()||'GB',email:document.getElementById('f-cemail').value.trim(),fblink:document.getElementById('f-fblink').value.trim(),supplierId:document.getElementById('f-supplier').value,resellerId:document.getElementById('f-reseller').value,products:prods,status:'New',ts:Date.now(),cnTracking:null,ukTracking:null,note:''};
   // Local-first save for instant UX; media upload + cloud sync runs async.
-  orders.unshift(o);saveOrders([o.id]);closeOrderModal();render();selectOrder(o.id);
+  orders.unshift(o);saveOrders([o.id]);runProdImageUploadAsync(o.id);closeOrderModal();render();selectOrder(o.id);
   logActivity('created',`Order created: ${esc(o.ref)} for ${esc(o.name)}`,o.id);
   toast('✅ Order saved!','ok');
 }
@@ -6987,6 +7064,7 @@ const FIREBASE_COLLECTION_USER_ROLES='user_roles';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
+const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
