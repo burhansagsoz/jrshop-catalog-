@@ -2229,7 +2229,11 @@ async function login(){
   if(getFirebaseEnabled()){
     try{
       await initFirebaseRealtime({silent:true});
-      await firebaseSignInForSession(em,pw);
+      const fbUser=await firebaseSignInForSession(em,pw);
+      if(fbUser){
+        await initFirebaseRealtime({silent:true});
+        flushLocalSyncFallback().catch(()=>{});
+      }
       await applyFirebaseRoleMapping(me,em);
     }catch(_e){}
   }
@@ -6498,6 +6502,48 @@ function getAuthHeaders(extra){
   if(k) headers.Authorization='Bearer '+k;
   return headers;
 }
+function readLocalSyncFallback(){
+  try{
+    const raw=localStorage.getItem(LOCAL_SYNC_FALLBACK_KEY);
+    const map=raw?JSON.parse(raw):{};
+    return map&&typeof map==='object'?map:{};
+  }catch(_e){
+    return {};
+  }
+}
+function persistLocalSyncFallback(key,value){
+  if(!key) return;
+  const map=readLocalSyncFallback();
+  map[key]={value,ts:Date.now()};
+  try{localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map));}catch(_e){}
+}
+function clearLocalSyncFallbackKey(key){
+  if(!key) return;
+  const map=readLocalSyncFallback();
+  if(!Object.prototype.hasOwnProperty.call(map,key)) return;
+  delete map[key];
+  try{localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map));}catch(_e){}
+}
+async function flushLocalSyncFallback(){
+  const map=readLocalSyncFallback();
+  const entries=Object.entries(map||{});
+  if(!entries.length) return 0;
+  let synced=0;
+  for(const [key,entry] of entries){
+    try{
+      const res=await fetch('/api/sync',{
+        method:'POST',
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
+        body:JSON.stringify({key,value:entry&&Object.prototype.hasOwnProperty.call(entry,'value')?entry.value:null})
+      });
+      if(res.ok){
+        clearLocalSyncFallbackKey(key);
+        synced++;
+      }
+    }catch(_e){}
+  }
+  return synced;
+}
 function readLocalDataMap(){
   const out={};
   for(const key of Object.keys(localStorage)){
@@ -6531,8 +6577,9 @@ function cloudSave(key,value){
 }
 async function syncToCloud(key,value){
   const api=getApiBase();
+  let parsed=value;
   try{
-    let parsed;try{parsed=JSON.parse(value);}catch{parsed=value;}
+    try{parsed=JSON.parse(value);}catch{parsed=value;}
     // For cloud: strip base64 (too large), keep only http URLs
     // Local storage keeps full base64 images
     let cloudValue=parsed;
@@ -6544,7 +6591,9 @@ async function syncToCloud(key,value){
         }))
       }));
     }
-    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
+    const res=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
+    if(res.ok) clearLocalSyncFallbackKey(key);
+    else persistLocalSyncFallback(key,parsed);
   }catch(e){
     persistLocalSyncFallback(key,parsed);
   }
@@ -6785,6 +6834,7 @@ const FIREBASE_COLLECTION_USER_ROLES='user_roles';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
+const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
 let _firebaseApp=null;
 let _firebaseDb=null;
 let _firebaseStorage=null;
@@ -6966,14 +7016,8 @@ async function ensureFirebaseAuthSession(){
         try{unsub();}catch(_e){}
         return;
       }
-      try{
-        const anon=await _firebaseAuth.signInAnonymously();
-        saveAuthSession(anon&&anon.user?anon.user:null);
-        _health.authState='anonymous';
-      }catch(err){
-        markError(err);
-        _health.authState='auth_error';
-      }
+      // Do not force anonymous auth; wait for explicit login credentials.
+      _health.authState='waiting_login';
       resolve(null);
       try{unsub();}catch(_e){}
     });
@@ -6982,22 +7026,32 @@ async function ensureFirebaseAuthSession(){
 
 async function firebaseSignInForSession(email,password){
   if(!_firebaseAuth) return null;
+  const em=String(email||'').trim().toLowerCase();
+  const pw=String(password||'');
+  if(!em||!pw){
+    _health.authState='waiting_login';
+    return null;
+  }
   try{
-    if(email&&password){
-      const cred=await _firebaseAuth.signInWithEmailAndPassword(email,password);
-      saveAuthSession(cred&&cred.user?cred.user:null);
-      _health.authState='signed_in';
-      return cred&&cred.user?cred.user:null;
-    }
-  }catch(_e){}
-  try{
-    const anon=await _firebaseAuth.signInAnonymously();
-    saveAuthSession(anon&&anon.user?anon.user:null);
-    _health.authState='anonymous';
-    return anon&&anon.user?anon.user:null;
+    const cred=await _firebaseAuth.signInWithEmailAndPassword(em,pw);
+    saveAuthSession(cred&&cred.user?cred.user:null);
+    _health.authState='signed_in';
+    return cred&&cred.user?cred.user:null;
   }catch(err){
+    if(err&&err.code==='auth/user-not-found'){
+      try{
+        const created=await _firebaseAuth.createUserWithEmailAndPassword(em,pw);
+        saveAuthSession(created&&created.user?created.user:null);
+        _health.authState='signed_in';
+        return created&&created.user?created.user:null;
+      }catch(createErr){
+        markError(createErr);
+        _health.authState=(createErr&&createErr.code==='auth/operation-not-allowed')?'auth_provider_disabled':'auth_error';
+        return null;
+      }
+    }
     markError(err);
-    _health.authState='auth_error';
+    _health.authState=(err&&err.code==='auth/operation-not-allowed')?'auth_provider_disabled':'auth_error';
     return null;
   }
 }
