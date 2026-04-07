@@ -6906,6 +6906,12 @@ async function writeFirebaseDataKey(key,value){
   if(!key) return;
   await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(key).set({value,updatedAt:Date.now()},{merge:true});
 }
+async function deleteFirebaseDataKey(key){
+  if(!key) return;
+  try{
+    await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(key).delete();
+  }catch(_e){}
+}
 async function readFirebaseDataMap(){
   const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_DATA).get();
   const out={};
@@ -6968,15 +6974,15 @@ async function handleFirebaseApiRequest(url,method,body){
 
   if(path==='/api/data'&&m==='GET'){
     const data=await readFirebaseDataMap();
-    if(data.jb_orders===undefined){
-      try{data.jb_orders=JSON.parse(localStorage.getItem('jb_orders')||'[]');}catch(_e){data.jb_orders=[];}
-    }
+    // Always serve orders from the dedicated orders collection to avoid stale jb_orders snapshots.
+    data.jb_orders=await readFirebaseOrders();
     return jsonApiResponse({data});
   }
   if(path==='/api/data'&&m==='POST'){
     const map={...(req||{})};
     if(Array.isArray(map.jb_orders)){
       await pushOrdersToFirebase([...(map.jb_orders||[])]);
+      await deleteFirebaseDataKey('jb_orders');
       delete map.jb_orders;
     }
     await writeFirebaseDataMap(map);
@@ -6987,6 +6993,7 @@ async function handleFirebaseApiRequest(url,method,body){
     const value=req&&req.value;
     if(key==='jb_orders'&&Array.isArray(value)){
       await pushOrdersToFirebase([...(value||[])]);
+      await deleteFirebaseDataKey('jb_orders');
     }else{
       await writeFirebaseDataKey(key,value);
     }
@@ -7098,6 +7105,7 @@ async function migrateAllToFirebase(){
       try{map[key]=JSON.parse(raw);}catch(_e){map[key]=raw;}
     }
     delete map.jb_orders;
+    await deleteFirebaseDataKey('jb_orders');
     await writeFirebaseDataMap(map);
     await pushOrdersToFirebase([...(orders||[])]);
     toast('✅ Firebase migration complete (orders + app data)','ok');
@@ -7125,6 +7133,7 @@ async function importLegacyCloudToFirebase(){
     const orderJson=ordRes.ok?await ordRes.json():{orders:[]};
     const map={...(dataJson&&dataJson.data?dataJson.data:{})};
     delete map.jb_orders;
+    await deleteFirebaseDataKey('jb_orders');
     await writeFirebaseDataMap(map);
     const incomingOrders=[...(orderJson&&orderJson.orders?orderJson.orders:[])];
     if(incomingOrders.length){
