@@ -2434,6 +2434,7 @@ async function approveOrder(id){
   delete o.pendingApproval;
   delete o.rejected;
   delete o.rejectNote;
+  o.updatedAt=Date.now();
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
   saveOrders();
@@ -6794,7 +6795,7 @@ async function ensureFirebaseScripts(){
 }
 
 function sanitizeOrderForRemote(order){
-  return {
+  const clean={
     ...order,
     status:normalizeStatus(order.status),
     products:(order.products||[]).map(p=>({
@@ -6803,6 +6804,10 @@ function sanitizeOrderForRemote(order){
       depotPhoto:(p.depotPhoto&&/^(https?:|data:|blob:)/.test(p.depotPhoto))?p.depotPhoto:null
     }))
   };
+  if(!clean.pendingApproval) delete clean.pendingApproval;
+  if(!clean.rejected) delete clean.rejected;
+  if(!clean.rejectNote) delete clean.rejectNote;
+  return clean;
 }
 
 function mergeOrdersByFreshness(localOrders,incomingOrders){
@@ -6993,7 +6998,8 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path==='/api/order'&&m==='POST'){
     const order=req&&req.order;
     if(!order||!order.id) return jsonApiResponse({error:'order missing'},400);
-    await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(sanitizeOrderForRemote(order),{merge:true});
+    // Overwrite the whole document so removed fields (e.g. pendingApproval) are actually deleted.
+    await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(sanitizeOrderForRemote(order));
     return jsonApiResponse({ok:true});
   }
   if(path.startsWith('/api/order/')&&m==='DELETE'){
@@ -7074,7 +7080,8 @@ async function pushOrdersToFirebase(changedOrders){
   while(list.length) chunks.push(list.splice(0,300));
   for(const chunk of chunks){
     const batch=_firebaseDb.batch();
-    chunk.forEach(o=>batch.set(col.doc(o.id),sanitizeOrderForRemote(o),{merge:true}));
+    // Full replace prevents stale flags from surviving across status transitions.
+    chunk.forEach(o=>batch.set(col.doc(o.id),sanitizeOrderForRemote(o)));
     try{await batch.commit();}catch(e){console.warn('[Firebase write]',e.message);}
   }
 }
