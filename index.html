@@ -2198,11 +2198,28 @@ function getShelfStatus(o){
   return {arrived,total:prods.length,ready:arrived===prods.length&&prods.length>0};
 }
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
+function shouldAcceptRemoteOrders(remoteOrders){
+  if(!Array.isArray(remoteOrders)) return false;
+  if(remoteOrders.length>0) return true;
+  try{
+    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    return !Array.isArray(localOrders)||localOrders.length===0;
+  }catch(_e){
+    return true;
+  }
+}
+function safeApplyRemoteOrders(remoteOrders){
+  if(!shouldAcceptRemoteOrders(remoteOrders)) return false;
+  orders=Array.isArray(remoteOrders)?remoteOrders:[];
+  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  return true;
+}
 
 // ── AUTH ──
 async function login(){
   const em=document.getElementById('l-em').value.trim().toLowerCase();
   const pw=document.getElementById('l-pw').value;
+  cacheFirebaseLoginCreds(em,pw);
   const u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
   if(!u){
     // Firebase-first login retry
@@ -2282,6 +2299,7 @@ async function login(){
         // Merge: cloud orders + local images (cloud strips base64)
     const cloudOrders=(res.data&&res.data.jb_orders)||[];
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    if(!shouldAcceptRemoteOrders(cloudOrders)) return;
     orders=cloudOrders.map(co=>({...co,status:co.status==='At Depott'?'At Depot':co.status==='Sent to Wechat'||co.status==='Sent to WeChat'?'Sent to Factory':co.status,
       products:(co.products||[]).map((cp,i)=>{
         const lo=localOrders.find(o=>o.id===co.id);
@@ -2304,7 +2322,7 @@ async function login(){
     }).catch(function(){});
   },1000);
 }
-function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
+function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
 
 // ── SIDEBAR ──
 let _sbOpen=window.innerWidth>900;
@@ -4709,7 +4727,70 @@ function loadSettings(){
 
 // ── BACKUP ──
 function exportBackup(){const data=JSON.stringify({orders,users,suppliers,templates,settings,notifSettings,catalog,exportDate:new Date().toISOString()},null,2);const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type:'application/json'}));a.download='jrshop-backup-'+fmtDate(Date.now())+'.json';a.click();toast('📤 Backup exported!','ok');}
-function importBackup(input){if(!input.files||!input.files[0])return;const reader=new FileReader();reader.onload=e=>{try{const data=JSON.parse(e.target.result);if(!confirm(`Import backup from ${data.exportDate||'unknown'}? This overwrites current data.`))return;if(data.orders)orders=data.orders;if(data.users)users=data.users;if(data.suppliers)suppliers=data.suppliers;if(data.templates)templates=data.templates;if(data.settings)settings=data.settings;if(data.notifSettings)notifSettings=data.notifSettings;if(data.catalog)catalog=data.catalog;saveOrders();saveUsers();saveSuppliers();saveCatalog();localStorage.setItem('jb_templates',JSON.stringify(templates));localStorage.setItem('jb_settings',JSON.stringify(settings));localStorage.setItem('jb_notif',JSON.stringify(notifSettings));loadSettings();loadTemplates();loadNotifSettings();updateBadges();render();toast('✅ Backup imported!','ok');}catch(err){toast('❌ Invalid backup file','err');}};reader.readAsText(input.files[0]);}
+function extractBackupPayload(raw){
+  const data=(raw&&typeof raw==='object')?raw:{};
+  const nested=(data.data&&typeof data.data==='object')?data.data:{};
+  const pickArray=(arrs)=>arrs.find(Array.isArray)||null;
+  const pickObject=(objs)=>objs.find(v=>v&&typeof v==='object'&&!Array.isArray(v))||null;
+  return {
+    exportDate:data.exportDate||data.createdAt||nested.exportDate||null,
+    orders:pickArray([data.orders,data.jb_orders,nested.jb_orders,nested.orders])||[],
+    users:pickArray([data.users,data.jb_users,nested.jb_users,nested.users])||[],
+    suppliers:pickArray([data.suppliers,data.jb_suppliers,nested.jb_suppliers,nested.suppliers])||[],
+    catalog:pickArray([data.catalog,data.jb_catalog,nested.jb_catalog,nested.catalog])||[],
+    templates:pickObject([data.templates,data.jb_templates,nested.jb_templates,nested.templates])||{},
+    settings:pickObject([data.settings,data.jb_settings,nested.jb_settings,nested.settings])||{},
+    notifSettings:pickObject([data.notifSettings,data.jb_notif,nested.jb_notif,nested.notifSettings])||{}
+  };
+}
+function importBackup(input){
+  if(!input.files||!input.files[0]) return;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const raw=JSON.parse(e.target.result);
+      const payload=extractBackupPayload(raw);
+      const importedCount=Array.isArray(payload.orders)?payload.orders.length:0;
+      if(!importedCount){
+        toast('❌ Backup has 0 orders. Import cancelled.','err');
+        return;
+      }
+      if(!confirm(`Import backup from ${payload.exportDate||'unknown'}?\nOrders found: ${importedCount}\nThis overwrites current local data.`)) return;
+
+      const normStatus=function(s){
+        return s==='At Depott'?'At Depot':(s==='Sent to Wechat'||s==='Sent to WeChat'?'Sent to Factory':s);
+      };
+      orders=(payload.orders||[]).map(function(o){
+        return {...o,status:normStatus(o&&o.status),updatedAt:(o&&o.updatedAt)||(o&&o.ts)||Date.now()};
+      });
+      if(Array.isArray(payload.users)&&payload.users.length) users=payload.users;
+      if(Array.isArray(payload.suppliers)&&payload.suppliers.length) suppliers=payload.suppliers;
+      if(Array.isArray(payload.catalog)&&payload.catalog.length) catalog=payload.catalog;
+      templates=payload.templates||templates||{};
+      settings={...(settings||{}),...(payload.settings||{})};
+      notifSettings={...(notifSettings||{}),...(payload.notifSettings||{})};
+
+      // Persist locally first so restore is instant even if cloud/auth is degraded.
+      localStorage.setItem('jb_orders',JSON.stringify(orders));
+      localStorage.setItem('jb_users',JSON.stringify(users));
+      localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));
+      localStorage.setItem('jb_catalog',JSON.stringify(catalog));
+      localStorage.setItem('jb_templates',JSON.stringify(templates));
+      localStorage.setItem('jb_settings',JSON.stringify(settings));
+      localStorage.setItem('jb_notif',JSON.stringify(notifSettings));
+
+      loadSettings();loadTemplates();loadNotifSettings();
+      updateBadges();render();
+      markSync('backup_import');
+      toast(`✅ Backup imported: ${orders.length} orders`,'ok');
+    }catch(err){
+      toast('❌ Invalid backup file','err');
+    }finally{
+      input.value='';
+    }
+  };
+  reader.readAsText(input.files[0]);
+}
 
 // ── ACTIVITY LOG ──
 let activityLog = JSON.parse(localStorage.getItem('jb_activity') || '[]');
@@ -6411,12 +6492,20 @@ async function trackOrder(){
       // Önce /api/orders dene
       try{
         const r1=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-        if(r1.ok){const d=await r1.json();orders=d.orders||[];}
+        if(r1.ok){
+          const d=await r1.json();
+          const incoming=Array.isArray(d&&d.orders)?d.orders:[];
+          if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
+        }
       }catch(e){}
       // Yoksa /api/data dene
       if(!orders.length){
         const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-        if(res.ok){const d=await res.json();orders=d.data&&d.data.jb_orders||d.jb_orders||[];}
+        if(res.ok){
+          const d=await res.json();
+          const incoming=(d&&d.data&&Array.isArray(d.data.jb_orders))?d.data.jb_orders:(Array.isArray(d&&d.jb_orders)?d.jb_orders:[]);
+          if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
+        }
       }
     }catch(e){}
   }
@@ -6859,9 +6948,12 @@ const FIREBASE_COLLECTION_CATALOG_ORDERS='catalog_orders';
 const FIREBASE_COLLECTION_AUDIT='audit_logs';
 const FIREBASE_COLLECTION_USER_ROLES='user_roles';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
+const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
+const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
+const FIREBASE_MIGRATE_MAX_BYTES=850000;
 let _firebaseApp=null;
 let _firebaseDb=null;
 let _firebaseStorage=null;
@@ -6872,6 +6964,10 @@ let _firebaseUnsubFeed=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
 let _firebaseRetryAt=0;
+let _firebaseAuthWatcherUnsub=null;
+let _firebaseReauthTimer=null;
+let _lastHealthErrorKey='';
+let _lastHealthErrorAt=0;
 const UPLOAD_TIMEOUT_MS=7000;
 const _health={
   firebaseConnected:false,
@@ -6906,8 +7002,19 @@ function markApiCall(){
   _health.apiCalls++;
 }
 function markError(err){
+  const code=err&&err.code?` [${err.code}]`:'';
+  const msg=(err&&err.message?err.message:String(err||'unknown'))+code;
+  const key=String(msg||'unknown');
+  const now=Date.now();
+  // Avoid inflating error counter with the same repeating offline/auth error.
+  if(key===_lastHealthErrorKey && (now-_lastHealthErrorAt)<15000){
+    _health.lastError=msg;
+    return;
+  }
+  _lastHealthErrorKey=key;
+  _lastHealthErrorAt=now;
   _health.apiErrors++;
-  _health.lastError=err&&err.message?err.message:String(err||'unknown');
+  _health.lastError=msg;
 }
 function renderHealthPanel(){
   const el=document.getElementById('firebase-health-panel');
@@ -6984,8 +7091,33 @@ function isFirebaseEnabled(){
 function getFirebaseConfig(){
   try{
     const raw=localStorage.getItem(FIREBASE_CONFIG_KEY)||JSON.stringify(FIREBASE_CONFIG_DEFAULT);
-    return raw?JSON.parse(raw):FIREBASE_CONFIG_DEFAULT;
+    const parsed=raw?JSON.parse(raw):FIREBASE_CONFIG_DEFAULT;
+    if(!parsed||!parsed.projectId||!parsed.apiKey||!parsed.appId){
+      return FIREBASE_CONFIG_DEFAULT;
+    }
+    return parsed;
   }catch(e){return FIREBASE_CONFIG_DEFAULT;}
+}
+function firebaseAuthHint(err){
+  const code=String(err&&err.code||'');
+  if(code==='auth/operation-not-allowed') return 'enable Email/Password and Anonymous in Firebase Auth Sign-in method';
+  if(code==='auth/api-key-not-valid') return 'check Firebase apiKey in Settings';
+  if(code==='auth/invalid-api-key') return 'check Firebase apiKey in Settings';
+  if(code==='auth/unauthorized-domain') return 'add this domain in Firebase Auth Authorized domains';
+  if(code==='auth/network-request-failed') return 'network/firewall blocked Firebase';
+  if(code==='auth/too-many-requests') return 'too many attempts, wait and retry';
+  if(code==='permission-denied') return 'check Firestore/Storage rules for signed-in users';
+  return '';
+}
+function firebaseAuthStateHint(state){
+  const s=String(state||'');
+  if(s==='auth_provider_disabled') return 'Firebase Auth -> Sign-in method: enable Email/Password and Anonymous';
+  if(s==='auth_invalid_api_key') return 'Firebase config API key invalid';
+  if(s==='auth_unauthorized_domain') return 'Firebase Auth -> Authorized domains: add this domain';
+  if(s==='auth_network_error') return 'Network blocked Firebase; try another connection';
+  if(s==='auth_config_error') return 'Firebase Auth configuration missing';
+  if(s==='auth_rate_limited') return 'Too many auth attempts; wait and retry';
+  return '';
 }
 
 function firebaseDocToOrder(doc){
@@ -7032,6 +7164,34 @@ function saveAuthSession(authUser){
   }catch(_e){}
 }
 
+function encodeSavedPassword(pw){
+  try{return btoa(encodeURIComponent(String(pw||'')));}catch(_e){return '';}
+}
+function decodeSavedPassword(raw){
+  if(!raw) return '';
+  try{return decodeURIComponent(atob(String(raw)));}catch(_e){return '';}
+}
+function cacheFirebaseLoginCreds(email,password){
+  const em=String(email||'').trim().toLowerCase();
+  const pw=String(password||'');
+  if(!em||!pw) return;
+  try{
+    localStorage.setItem(FIREBASE_AUTH_EMAIL_KEY,em);
+    localStorage.setItem(FIREBASE_AUTH_PASSWORD_KEY,encodeSavedPassword(pw));
+  }catch(_e){}
+}
+function mapFirebaseAuthState(err,defaultState='auth_error'){
+  const code=err&&err.code?String(err.code):'';
+  if(!code) return defaultState;
+  if(code==='auth/operation-not-allowed') return 'auth_provider_disabled';
+  if(code==='auth/invalid-api-key') return 'auth_invalid_api_key';
+  if(code==='auth/unauthorized-domain') return 'auth_unauthorized_domain';
+  if(code==='auth/network-request-failed') return 'auth_network_error';
+  if(code==='auth/configuration-not-found') return 'auth_config_error';
+  if(code==='auth/too-many-requests') return 'auth_rate_limited';
+  return defaultState;
+}
+
 function getFirebaseLoginCreds(){
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   const mePw=me&&me.password?String(me.password):'';
@@ -7039,6 +7199,14 @@ function getFirebaseLoginCreds(){
   const remEmail=String(localStorage.getItem('jb_remember_email')||'').trim().toLowerCase();
   const remPw=String(localStorage.getItem('jb_remember_pw')||'');
   if(remEmail&&remPw) return {email:remEmail,password:remPw};
+  const savedEmail=String(localStorage.getItem(FIREBASE_AUTH_EMAIL_KEY)||'').trim().toLowerCase();
+  const savedPw=decodeSavedPassword(localStorage.getItem(FIREBASE_AUTH_PASSWORD_KEY)||'');
+  if(savedEmail&&savedPw) return {email:savedEmail,password:savedPw};
+  const formEmailEl=document.getElementById('l-em');
+  const formPwEl=document.getElementById('l-pw');
+  const formEmail=formEmailEl&&formEmailEl.value?String(formEmailEl.value).trim().toLowerCase():'';
+  const formPw=formPwEl&&formPwEl.value?String(formPwEl.value):'';
+  if(formEmail&&formPw) return {email:formEmail,password:formPw};
   return null;
 }
 
@@ -7061,7 +7229,29 @@ async function ensureFirebaseAuthSession(){
   });
 }
 
-async function ensureFirebaseOnlineAuth(){
+function ensureFirebaseAuthWatcher(){
+  if(!_firebaseAuth || _firebaseAuthWatcherUnsub) return;
+  _firebaseAuthWatcherUnsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
+    saveAuthSession(authUser||null);
+    if(authUser){
+      _health.authState='signed_in';
+      return;
+    }
+    _health.authState='waiting_login';
+    if(_firebaseReauthTimer) clearTimeout(_firebaseReauthTimer);
+    _firebaseReauthTimer=setTimeout(async()=>{
+      try{
+        const u=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+        if(u && (!_firebaseReady || !_health.ordersRealtime || !_health.feedRealtime)){
+          initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
+        }
+      }catch(_e){}
+    },700);
+  });
+}
+
+async function ensureFirebaseOnlineAuth(opts={}){
+  const allowAnonymous=opts.allowAnonymous!==false;
   if(!_firebaseAuth) return null;
   if(_firebaseAuth.currentUser){
     _health.authState='signed_in';
@@ -7072,16 +7262,20 @@ async function ensureFirebaseOnlineAuth(){
     const u=await firebaseSignInForSession(creds.email,creds.password);
     if(u) return u;
   }
-  try{
-    const anon=await _firebaseAuth.signInAnonymously();
-    saveAuthSession(anon&&anon.user?anon.user:null);
-    _health.authState='anonymous';
-    return anon&&anon.user?anon.user:null;
-  }catch(err){
-    markError(err);
-    _health.authState=(err&&err.code==='auth/operation-not-allowed')?'auth_provider_disabled':'waiting_login';
-    return null;
+  if(allowAnonymous){
+    try{
+      const anon=await _firebaseAuth.signInAnonymously();
+      saveAuthSession(anon&&anon.user?anon.user:null);
+      _health.authState='anonymous';
+      return anon&&anon.user?anon.user:null;
+    }catch(err){
+      markError(err);
+      _health.authState=mapFirebaseAuthState(err,'waiting_login');
+      return null;
+    }
   }
+  _health.authState='waiting_login';
+  return null;
 }
 
 async function firebaseSignInForSession(email,password){
@@ -7106,12 +7300,12 @@ async function firebaseSignInForSession(email,password){
         return created&&created.user?created.user:null;
       }catch(createErr){
         markError(createErr);
-        _health.authState=(createErr&&createErr.code==='auth/operation-not-allowed')?'auth_provider_disabled':'auth_error';
+        _health.authState=mapFirebaseAuthState(createErr,'auth_error');
         return null;
       }
     }
     markError(err);
-    _health.authState=(err&&err.code==='auth/operation-not-allowed')?'auth_provider_disabled':'auth_error';
+    _health.authState=mapFirebaseAuthState(err,'auth_error');
     return null;
   }
 }
@@ -7346,6 +7540,14 @@ function disconnectFirebaseRealtime(){
     try{_firebaseUnsubFeed();}catch(e){}
     _firebaseUnsubFeed=null;
   }
+  if(_firebaseAuthWatcherUnsub){
+    try{_firebaseAuthWatcherUnsub();}catch(_e){}
+    _firebaseAuthWatcherUnsub=null;
+  }
+  if(_firebaseReauthTimer){
+    clearTimeout(_firebaseReauthTimer);
+    _firebaseReauthTimer=null;
+  }
   _firebaseReady=false;
   _health.firebaseConnected=false;
   _health.ordersRealtime=false;
@@ -7407,7 +7609,21 @@ async function initFirebaseRealtime(opts={}){
       _firebaseDb=window.firebase.firestore(_firebaseApp);
       _firebaseAuth=window.firebase.auth(_firebaseApp);
       _firebaseStorage=window.firebase.storage(_firebaseApp);
+      try{
+        await _firebaseAuth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL);
+      }catch(_e){}
       await ensureFirebaseAuthSession();
+      ensureFirebaseAuthWatcher();
+      const authedUser=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+      if(!authedUser){
+        disconnectFirebaseRealtime();
+        _firebaseRetryAt=Date.now()+30000;
+        if(!silent){
+          const hint=firebaseAuthHint({code:_health.authState,message:_health.lastError||''});
+          toast('⚠️ Firebase auth gerekli. '+(hint?('Hint: '+hint):'Tekrar giriş yapın.'),'err');
+        }
+        return false;
+      }
       if(_firebaseUnsubOrders){try{_firebaseUnsubOrders();}catch(e){}}
       _firebaseUnsubOrders=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).onSnapshot(snap=>{
         const incoming=snap.docs.map(firebaseDocToOrder);
@@ -7609,7 +7825,7 @@ async function handleFirebaseApiRequest(url,method,body){
   let firebaseOnline=false;
   try{
     const ok=await initFirebaseRealtime({silent:true});
-    firebaseOnline=!!(ok&&_firebaseDb);
+    firebaseOnline=!!(ok&&_firebaseDb&&_firebaseAuth&&_firebaseAuth.currentUser);
   }catch(_e){
     firebaseOnline=false;
   }
@@ -7832,7 +8048,12 @@ window.fetch=async function(input,init){
   const rawUrl=typeof input==='string'?input:(input&&input.url?input.url:String(input||''));
   const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
   const body=(init&&Object.prototype.hasOwnProperty.call(init,'body'))?init.body:null;
-  markApiCall();
+  let isApiFetch=false;
+  try{
+    const u=new URL(rawUrl,location.origin);
+    isApiFetch=isApiPath(u.pathname);
+  }catch(_e){}
+  if(isApiFetch) markApiCall();
   if(shouldRouteApiToFirebase(rawUrl)){
     try{
       const handled=await handleFirebaseApiRequest(rawUrl,method,body);
@@ -7845,10 +8066,10 @@ window.fetch=async function(input,init){
   }
   try{
     const res=await _nativeFetch(input,init);
-    if(!res.ok) markError(new Error('HTTP '+res.status+' '+res.statusText));
+    if(!res.ok && isApiFetch) markError(new Error('HTTP '+res.status+' '+res.statusText));
     return res;
   }catch(e){
-    markError(e);
+    if(isApiFetch) markError(e);
     throw e;
   }
 };
@@ -7873,21 +8094,59 @@ async function pushOrdersToFirebase(changedOrders){
 }
 
 async function migrateAllToFirebase(){
-  const connected=await initFirebaseRealtime({silent:false});
+  const connected=await initFirebaseRealtime({silent:false,force:true});
   if(!connected) return;
   try{
+    const authUser=_firebaseAuth&&_firebaseAuth.currentUser;
+    if(!authUser){
+      const ensured=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+      if(!ensured){
+        toast('❌ Firebase auth hazır değil. Çıkış/Giriş yapıp tekrar deneyin.','err');
+        return;
+      }
+    }
     const map={};
+    const skipKeys=new Set([
+      'jb_orders',
+      FIREBASE_AUTH_SESSION_KEY,
+      LOCAL_MEDIA_MAP_KEY,
+      LOCAL_CATALOG_ORDERS_KEY,
+      LOCAL_SYNC_FALLBACK_KEY,
+      'jb_saved_pw',
+      'jb_remember_pw'
+    ]);
+    let skippedLarge=0;
+    let skippedUnsafe=0;
     for(const key of Object.keys(localStorage)){
       if(!key.startsWith('jb_')) continue;
+      if(skipKeys.has(key)){skippedUnsafe++;continue;}
       const raw=localStorage.getItem(key);
       if(raw===null) continue;
-      try{map[key]=JSON.parse(raw);}catch(_e){map[key]=raw;}
+      let parsed=raw;
+      try{parsed=JSON.parse(raw);}catch(_e){}
+      let serialized='';
+      try{
+        serialized=typeof parsed==='string'?parsed:JSON.stringify(parsed);
+      }catch(_e){
+        skippedUnsafe++;
+        continue;
+      }
+      if(serialized && serialized.length>FIREBASE_MIGRATE_MAX_BYTES){
+        skippedLarge++;
+        continue;
+      }
+      map[key]=parsed;
     }
-    delete map.jb_orders;
     await deleteFirebaseDataKey('jb_orders');
-    await writeFirebaseDataMap(map);
+    for(const [key,value] of Object.entries(map)){
+      try{
+        await writeFirebaseDataKey(key,value);
+      }catch(_e){
+        skippedUnsafe++;
+      }
+    }
     await pushOrdersToFirebase([...(orders||[])]);
-    toast('✅ Firebase migration complete (orders + app data)','ok');
+    toast(`✅ Firebase migration complete (${orders.length} orders, ${Object.keys(map).length} keys, skip:${skippedLarge+skippedUnsafe})`,'ok');
   }catch(e){
     toast('❌ Firebase migration failed: '+e.message,'err');
   }
