@@ -4479,36 +4479,11 @@ async function handleImg(idx,input){
       reader.readAsDataURL(input.files[0]);
     });
     
-    // Upload image through API bridge (Firebase mode supported)
-    const api=getApiBase();
-    
-    let imgSrc = null;
-    let retries = 3;
-    
-    while(retries > 0 && !imgSrc){
-      try{
-        const headers=getAuthHeaders({'Content-Type':'application/json'});
-        const res = await fetch(api+'/api/image', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ data: compressed, type: 'image/jpeg' })
-        });
-        
-        if(res.ok){
-          const d = await res.json();
-          if(d.url||d.id) imgSrc = d.url || (api + '/api/image/' + d.id);
-        } else {
-          console.warn('Image upload attempt failed:', res.status);
-        }
-      }catch(err){
-        console.warn('Image upload error:', err);
-      }
-      retries--;
-      if(!imgSrc && retries > 0) await new Promise(r => setTimeout(r, 1000));
-    }
+    // Upload image with timeout and automatic fallback.
+    const imgSrc=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:15000});
     
     if(!imgSrc){
-      toast('⚠️ Image upload failed after retries', 'err');
+      toast('⚠️ Image upload failed', 'err');
       if(lbl){lbl.style.display='flex';lbl.innerHTML='📷 Choose';}
       return;
     }
@@ -4669,18 +4644,25 @@ function collectProducts(){const prods=[];document.querySelectorAll('.prod-item'
 
 // Ürün görsellerini worker'a upload et (base64 olanları)
 async function uploadProdImages(){
-  const api=getApiBase();
   for(const idx in prodImages){
     const src=prodImages[idx];
     if(src && src.startsWith('data:')){
       try{
-        const headers=getAuthHeaders({'Content-Type':'application/json'});
-        const res=await fetch(api+'/api/image',{
+        const res=await fetch('/api/image',{
           method:'POST',
-          headers,
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
           body:JSON.stringify({data:src,type:'image/jpeg'})
         });
-        if(res.ok){const d=await res.json();if(d.url||d.id){prodImages[idx]=d.url||(api+'/api/image/'+d.id);}}
+        if(res.ok){
+          const d=await res.json();
+          if(d.url||d.id){
+            prodImages[idx]=d.url||('/api/image/'+d.id);
+          }else{
+            prodImages[idx]=src;
+          }
+        }else{
+          prodImages[idx]=src;
+        }
       }catch(e){console.warn('img upload err',e);}
     }
   }
@@ -5197,27 +5179,13 @@ async function saveCatalogProduct(){
   
   // Upload image to cloud if it's base64
   if(imgUrl && imgUrl.startsWith('data:')){
-    const api = getApiBase();
-    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
-    if(k){
-      toast('📤 Uploading image...','info');
-      try{
-        const r = await fetch(api+'/api/image',{
-          method:'POST',
-          headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
-          body:JSON.stringify({data:imgUrl,type:'image/jpeg'})
-        });
-        if(r.ok){
-          const d = await r.json();
-          if(d.id){
-            imgUrl = d.url || (api+'/api/image/'+d.id);
-            toast('✅ Image uploaded','ok');
-          }
-        }
-      }catch(e){
-        console.warn('[Catalog] Image upload failed, saving locally', e);
-        toast('⚠️ Image saved locally (will upload on share)','info');
-      }
+    toast('📤 Uploading image...','info');
+    const uploaded=await uploadImageWithFallback(imgUrl,'image/jpeg',{allowDataFallback:true});
+    if(uploaded&&uploaded.url){
+      imgUrl=uploaded.url;
+      toast(/^data:/i.test(imgUrl)?'ℹ️ Saved locally, will sync later':'✅ Image uploaded','ok');
+    }else{
+      toast('⚠️ Image saved locally (will upload on share)','info');
     }
   }
   
@@ -5265,7 +5233,6 @@ async function shareCatalog(){
     if(!catalog||!catalog.length){toast('Add products first!','err');return;}
     
     const api=getApiBase();
-    const k=localStorage.getItem('jb_cloud_key')||'';
     
     // Upload images to cloud first (convert base64 to URLs)
     toast('📤 Uploading images...','info');
@@ -5277,28 +5244,19 @@ async function shareCatalog(){
       // If image is base64, upload to cloud
       if(imgUrl && imgUrl.startsWith('data:')){
         try{
-          const headers={'Content-Type':'application/json'};
-          if(k) headers['Authorization']='Bearer '+k;
-          const r = await fetch(api+'/api/image',{
-            method:'POST',
-            headers,
-            body:JSON.stringify({data:imgUrl,type:'image/jpeg'})
-          });
-          if(r.ok){
-            const d = await r.json();
-            if(d.id){
-              imgUrl = d.url || (api+'/api/image/'+d.id);
-              // Update catalog with URL
-              const idx = catalog.findIndex(x=>x.id===p.id);
-              if(idx > -1){
-                catalog[idx].img = imgUrl;
-                localStorage.setItem('jb_catalog',JSON.stringify(catalog));
-              }
+          const up=await uploadImageWithFallback(imgUrl,'image/jpeg',{allowDataFallback:true});
+          if(up&&up.url){
+            imgUrl=up.url;
+            // Update catalog with best known URL/base64 so share never blocks.
+            const idx = catalog.findIndex(x=>x.id===p.id);
+            if(idx > -1){
+              catalog[idx].img = imgUrl;
+              localStorage.setItem('jb_catalog',JSON.stringify(catalog));
             }
           }
         }catch(e){
           console.warn('[Catalog] Failed to upload image for', p.name, e);
-          imgUrl = null; // Don't include broken base64
+          imgUrl = p.img || null;
         }
       } else if(imgUrl && !/^(https?:|data:|blob:)/.test(imgUrl)){
         imgUrl = null; // Invalid URL
@@ -5328,8 +5286,7 @@ async function shareCatalog(){
     const catalogHTML=buildSimpleCatalogHTML(cleanProducts,cleanCategories,messengerLink);
     toast('📤 Publishing catalog...','info');
     try{
-      const headers={'Content-Type':'application/json'};
-      if(k) headers['Authorization']='Bearer '+k;
+      const headers=getAuthHeaders({'Content-Type':'application/json'});
       // Firebase-first publish target used by catalog.html loader.
       const syncRes=await fetch(api+'/api/sync',{
         method:'POST',
@@ -6801,6 +6758,7 @@ let _firebaseUnsubOrders=null;
 let _firebaseUnsubFeed=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
+const UPLOAD_TIMEOUT_MS=20000;
 const _health={
   firebaseConnected:false,
   lastSyncAt:0,
@@ -6875,6 +6833,27 @@ function scheduleRealtimeRender(){
     _realtimeRenderTimer=null;
     if(me){updateBadges();render();}
   },250);
+}
+
+function withTimeoutPromise(promise,ms,label){
+  const timeoutMs=Math.max(1000,Number(ms)||UPLOAD_TIMEOUT_MS);
+  let timer=null;
+  const timeout=new Promise((_,reject)=>{
+    timer=setTimeout(()=>reject(new Error((label||'operation')+' timeout')),timeoutMs);
+  });
+  return Promise.race([promise,timeout]).finally(()=>{
+    if(timer) clearTimeout(timer);
+  });
+}
+
+async function fetchWithTimeout(url,options={},timeoutMs=UPLOAD_TIMEOUT_MS){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),Math.max(1000,Number(timeoutMs)||UPLOAD_TIMEOUT_MS));
+  try{
+    return await fetch(url,{...(options||{}),signal:controller.signal});
+  }finally{
+    clearTimeout(timer);
+  }
 }
 
 function normalizeStatus(s){
@@ -7117,10 +7096,39 @@ async function ensureStorageUpload(data,type){
     payload='data:'+contentType+';base64,'+payload;
   }
   const ref=_firebaseStorage.ref().child('media/'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8));
-  await ref.putString(payload,'data_url',{contentType});
-  const url=await ref.getDownloadURL();
+  await withTimeoutPromise(ref.putString(payload,'data_url',{contentType}),UPLOAD_TIMEOUT_MS,'storage put');
+  const url=await withTimeoutPromise(ref.getDownloadURL(),UPLOAD_TIMEOUT_MS,'storage url');
   markSync('storage_upload');
   return {url};
+}
+
+async function uploadImageSmart(data,type='image/jpeg',opts={}){
+  const timeoutMs=Math.max(1000,Number(opts.timeoutMs)||UPLOAD_TIMEOUT_MS);
+  const allowDataFallback=opts.allowDataFallback!==false;
+  const payload=String(data||'');
+  if(!payload) return null;
+  try{
+    const up=await withTimeoutPromise(ensureStorageUpload(payload,type),timeoutMs,'storage upload');
+    if(up&&up.url) return up.url;
+  }catch(_e){}
+  try{
+    const res=await fetchWithTimeout('/api/image',{
+      method:'POST',
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({data:payload,type:type||'image/jpeg'})
+    },timeoutMs);
+    if(res.ok){
+      const d=await res.json();
+      if(d&&(d.url||d.id)) return d.url||('/api/image/'+d.id);
+    }
+  }catch(_e){}
+  if(allowDataFallback&&/^data:/i.test(payload)) return payload;
+  return null;
+}
+
+async function uploadImageWithFallback(data,type='image/jpeg',opts={}){
+  const url=await uploadImageSmart(data,type,opts);
+  return {url:url||null};
 }
 
 async function writeAuditEvent(action,payload){
@@ -9722,14 +9730,8 @@ async function createFeedPost(){
     toast('Uploading images...','info');
     for(const imgItem of allImgs){
       try{
-        const up=await ensureStorageUpload(imgItem.data,'image/jpeg');
+        const up=await uploadImageWithFallback(imgItem.data,'image/jpeg',{allowDataFallback:true});
         if(up&&up.url){imgUrls.push(up.url);}
-        else{
-          const r=await fetch(api+'/api/image',{method:'POST',
-            headers:getAuthHeaders({'Content-Type':'application/json'}),
-            body:JSON.stringify({data:imgItem.data,type:'image/jpeg'})});
-          if(r.ok){const d=await r.json();if(d.url||d.id)imgUrls.push(d.url||(api+'/api/image/'+d.id));}
-        }
       }catch(e){console.warn('Görsel upload hatası',e);}
     }
   }
@@ -9739,24 +9741,9 @@ async function createFeedPost(){
   if(_feedVideoData){
     toast('Uploading video...','info');
     try{
-      const up = await ensureStorageUpload(_feedVideoData,'video/mp4');
-      if(up&&up.url){
-        videoUrl=up.url;
-      }else{
-        const r = await fetch(api+'/api/image',{method:'POST',
-          headers:getAuthHeaders({'Content-Type':'application/json'}),
-          body:JSON.stringify({data:_feedVideoData,type:'video/mp4'})});
-        if(r.ok){
-          const d = await r.json();
-          if(d.url||d.id) {
-            videoUrl = d.url || (api+'/api/image/'+d.id);
-            console.log('[Feed] Video uploaded:', videoUrl);
-          }
-        } else {
-          console.error('[Feed] Video upload failed:', r.status);
-          toast('⚠️ Video upload failed, posting without video','err');
-        }
-      }
+      const up = await uploadImageWithFallback(_feedVideoData,'video/mp4',{allowDataFallback:true});
+      if(up&&up.url){videoUrl=up.url;}
+      else{toast('⚠️ Video upload failed, posting without video','err');}
     }catch(e){
       console.error('[Feed] Video upload error:', e);
       toast('⚠️ Video upload error','err');
@@ -9969,23 +9956,8 @@ async function sendChatImage(input){
   reader.onload=async function(e){
     try{
       const compressed=await compressImage(e.target.result,600,0.7);
-      let imgUrl=null;
-      try{
-        const up=await ensureStorageUpload(compressed,'image/jpeg');
-        if(up&&up.url) imgUrl=up.url;
-      }catch(_e){}
-      if(!imgUrl){
-        const r=await fetch('/api/image',{method:'POST',
-          headers:getAuthHeaders({'Content-Type':'application/json'}),
-          body:JSON.stringify({data:compressed,type:'image/jpeg'})});
-        if(!r.ok){
-          const errText=await r.text().catch(()=>'');
-          throw new Error('Upload failed '+r.status+': '+errText.slice(0,100));
-        }
-        const d=await r.json();
-        if(!(d.url||d.id)) throw new Error('Image response missing url/id');
-        imgUrl=d.url || ('/api/image/'+d.id);
-      }
+      const uploaded=await uploadImageWithFallback(compressed,'image/jpeg');
+      const imgUrl=uploaded&&uploaded.url?uploaded.url:compressed;
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+imgUrl,ts:Date.now()};
       if(!_messages[_chatReseller])_messages[_chatReseller]=[];
       _messages[_chatReseller].push(msg);
@@ -10239,23 +10211,8 @@ async function sendResChatImage(input){
   reader.onload=async function(e){
     try{
       const compressed=await compressImage(e.target.result,600,0.7);
-      let imgUrl=null;
-      try{
-        const up=await ensureStorageUpload(compressed,'image/jpeg');
-        if(up&&up.url) imgUrl=up.url;
-      }catch(_e){}
-      if(!imgUrl){
-        const r=await fetch('/api/image',{method:'POST',
-          headers:getAuthHeaders({'Content-Type':'application/json'}),
-          body:JSON.stringify({data:compressed,type:'image/jpeg'})});
-        if(!r.ok){
-          const errText=await r.text().catch(()=>'');
-          throw new Error('Upload failed '+r.status+': '+errText.slice(0,100));
-        }
-        const d=await r.json();
-        if(!(d.url||d.id)) throw new Error('Image response missing url/id');
-        imgUrl=d.url || ('/api/image/'+d.id);
-      }
+      const imgUrl=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true});
+      if(!imgUrl) throw new Error('Image upload unavailable');
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
       const rd=await fetch('/api/data',{headers:getAuthHeaders()});
       let msgs=[];
