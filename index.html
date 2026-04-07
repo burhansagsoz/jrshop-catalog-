@@ -6925,6 +6925,7 @@ const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
+const FIREBASE_MIGRATE_MAX_BYTES=850000;
 let _firebaseApp=null;
 let _firebaseDb=null;
 let _firebaseStorage=null;
@@ -7102,6 +7103,11 @@ function getFirebaseLoginCreds(){
   const remEmail=String(localStorage.getItem('jb_remember_email')||'').trim().toLowerCase();
   const remPw=String(localStorage.getItem('jb_remember_pw')||'');
   if(remEmail&&remPw) return {email:remEmail,password:remPw};
+  const formEmailEl=document.getElementById('l-em');
+  const formPwEl=document.getElementById('l-pw');
+  const formEmail=formEmailEl&&formEmailEl.value?String(formEmailEl.value).trim().toLowerCase():'';
+  const formPw=formPwEl&&formPwEl.value?String(formPwEl.value):'';
+  if(formEmail&&formPw) return {email:formEmail,password:formPw};
   return null;
 }
 
@@ -7124,7 +7130,8 @@ async function ensureFirebaseAuthSession(){
   });
 }
 
-async function ensureFirebaseOnlineAuth(){
+async function ensureFirebaseOnlineAuth(opts={}){
+  const allowAnonymous=opts.allowAnonymous!==false;
   if(!_firebaseAuth) return null;
   if(_firebaseAuth.currentUser){
     _health.authState='signed_in';
@@ -7135,16 +7142,20 @@ async function ensureFirebaseOnlineAuth(){
     const u=await firebaseSignInForSession(creds.email,creds.password);
     if(u) return u;
   }
-  try{
-    const anon=await _firebaseAuth.signInAnonymously();
-    saveAuthSession(anon&&anon.user?anon.user:null);
-    _health.authState='anonymous';
-    return anon&&anon.user?anon.user:null;
-  }catch(err){
-    markError(err);
-    _health.authState=(err&&err.code==='auth/operation-not-allowed')?'auth_provider_disabled':'waiting_login';
-    return null;
+  if(allowAnonymous){
+    try{
+      const anon=await _firebaseAuth.signInAnonymously();
+      saveAuthSession(anon&&anon.user?anon.user:null);
+      _health.authState='anonymous';
+      return anon&&anon.user?anon.user:null;
+    }catch(err){
+      markError(err);
+      _health.authState=(err&&err.code==='auth/operation-not-allowed')?'auth_provider_disabled':'waiting_login';
+      return null;
+    }
   }
+  _health.authState='waiting_login';
+  return null;
 }
 
 async function firebaseSignInForSession(email,password){
@@ -7470,7 +7481,20 @@ async function initFirebaseRealtime(opts={}){
       _firebaseDb=window.firebase.firestore(_firebaseApp);
       _firebaseAuth=window.firebase.auth(_firebaseApp);
       _firebaseStorage=window.firebase.storage(_firebaseApp);
+      try{
+        await _firebaseAuth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL);
+      }catch(_e){}
       await ensureFirebaseAuthSession();
+      const authedUser=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+      if(!authedUser){
+        _firebaseReady=false;
+        _health.firebaseConnected=false;
+        _health.ordersRealtime=false;
+        _health.feedRealtime=false;
+        _firebaseRetryAt=Date.now()+5000;
+        if(!silent) toast('⚠️ Firebase auth gerekli. Tekrar giriş yapın.','err');
+        return false;
+      }
       if(_firebaseUnsubOrders){try{_firebaseUnsubOrders();}catch(e){}}
       _firebaseUnsubOrders=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).onSnapshot(snap=>{
         const incoming=snap.docs.map(firebaseDocToOrder);
@@ -7672,7 +7696,7 @@ async function handleFirebaseApiRequest(url,method,body){
   let firebaseOnline=false;
   try{
     const ok=await initFirebaseRealtime({silent:true});
-    firebaseOnline=!!(ok&&_firebaseDb);
+    firebaseOnline=!!(ok&&_firebaseDb&&_firebaseAuth&&_firebaseAuth.currentUser);
   }catch(_e){
     firebaseOnline=false;
   }
@@ -7936,21 +7960,59 @@ async function pushOrdersToFirebase(changedOrders){
 }
 
 async function migrateAllToFirebase(){
-  const connected=await initFirebaseRealtime({silent:false});
+  const connected=await initFirebaseRealtime({silent:false,force:true});
   if(!connected) return;
   try{
+    const authUser=_firebaseAuth&&_firebaseAuth.currentUser;
+    if(!authUser){
+      const ensured=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+      if(!ensured){
+        toast('❌ Firebase auth hazır değil. Çıkış/Giriş yapıp tekrar deneyin.','err');
+        return;
+      }
+    }
     const map={};
+    const skipKeys=new Set([
+      'jb_orders',
+      FIREBASE_AUTH_SESSION_KEY,
+      LOCAL_MEDIA_MAP_KEY,
+      LOCAL_CATALOG_ORDERS_KEY,
+      LOCAL_SYNC_FALLBACK_KEY,
+      'jb_saved_pw',
+      'jb_remember_pw'
+    ]);
+    let skippedLarge=0;
+    let skippedUnsafe=0;
     for(const key of Object.keys(localStorage)){
       if(!key.startsWith('jb_')) continue;
+      if(skipKeys.has(key)){skippedUnsafe++;continue;}
       const raw=localStorage.getItem(key);
       if(raw===null) continue;
-      try{map[key]=JSON.parse(raw);}catch(_e){map[key]=raw;}
+      let parsed=raw;
+      try{parsed=JSON.parse(raw);}catch(_e){}
+      let serialized='';
+      try{
+        serialized=typeof parsed==='string'?parsed:JSON.stringify(parsed);
+      }catch(_e){
+        skippedUnsafe++;
+        continue;
+      }
+      if(serialized && serialized.length>FIREBASE_MIGRATE_MAX_BYTES){
+        skippedLarge++;
+        continue;
+      }
+      map[key]=parsed;
     }
-    delete map.jb_orders;
     await deleteFirebaseDataKey('jb_orders');
-    await writeFirebaseDataMap(map);
+    for(const [key,value] of Object.entries(map)){
+      try{
+        await writeFirebaseDataKey(key,value);
+      }catch(_e){
+        skippedUnsafe++;
+      }
+    }
     await pushOrdersToFirebase([...(orders||[])]);
-    toast('✅ Firebase migration complete (orders + app data)','ok');
+    toast(`✅ Firebase migration complete (${orders.length} orders, ${Object.keys(map).length} keys, skip:${skippedLarge+skippedUnsafe})`,'ok');
   }catch(e){
     toast('❌ Firebase migration failed: '+e.message,'err');
   }
