@@ -6645,7 +6645,12 @@ async function loadFromCloudSilent(){
     // Siparişler: sadece cloud'da YENİ olan veya DAHA YENİ olanı al
     const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
-    const {orders:cloudOrders=[]}=await ordRes.json();
+    const ordPayload=await ordRes.json();
+    const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
+    // Guard: never treat fallback/no-data response as authoritative overwrite.
+    if((ordPayload&&ordPayload.localOnly)||!cloudOrders.length){
+      return false;
+    }
 
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
     let changed=false;
@@ -6698,7 +6703,8 @@ async function loadFromCloud(){
           console.error('[Remote] Error response:', errText);
           return false;
         }
-        const {data}=await dataRes.json();
+        const dataPayload=await dataRes.json();
+        const data=dataPayload&&dataPayload.data?dataPayload.data:{};
         for(const key of SYNC_KEYS){
           if(key==='jb_orders')continue;
           if(data[key]!==undefined)localStorage.setItem(key,JSON.stringify(data[key]));
@@ -6712,9 +6718,16 @@ async function loadFromCloud(){
         let cloudOrders=[];
         if(ordRes.ok){
           const od=await ordRes.json();
-          cloudOrders=od.orders||[];
+          const isLocalOnly=!!(od&&od.localOnly);
+          cloudOrders=Array.isArray(od&&od.orders)?od.orders:[];
+          if(isLocalOnly||!cloudOrders.length){
+            // Never wipe local orders on local-only/no-data responses.
+            console.warn('[Remote] Skipping merge from localOnly/empty orders payload');
+            return false;
+          }
         } else {
-          cloudOrders=data.jb_orders||[];
+          cloudOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          if(!cloudOrders.length) return false;
         }
         // Smart merge: timestamp bazlı - hangisi daha yeniyse o kazanır
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
@@ -6775,6 +6788,19 @@ async function saveAllToCloud(){
     if(res.ok)toast('All data saved to Firebase!','ok');
     else toast('Firebase save error','err');
   }catch(e){toast('Connection error: '+e.message,'err');}
+}
+async function recoverOrdersNow(){
+  toast('Recovering orders...','info');
+  try{
+    const ok=await loadFromCloud();
+    if(ok && Array.isArray(orders) && orders.length){
+      toast(`✅ Recovered ${orders.length} orders`,'ok');
+    }else{
+      toast('⚠️ No remote orders found. Check Firebase Auth/Rules.','err');
+    }
+  }catch(err){
+    toast('❌ Recover failed: '+(err&&err.message?err.message:String(err)),'err');
+  }
 }
 function saveFirebaseSettings(){
   const enabledEl=document.getElementById('cfg-firebase-enabled');
@@ -7005,6 +7031,16 @@ function saveAuthSession(authUser){
   }catch(_e){}
 }
 
+function getFirebaseLoginCreds(){
+  const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
+  const mePw=me&&me.password?String(me.password):'';
+  if(meEmail&&mePw) return {email:meEmail,password:mePw};
+  const remEmail=String(localStorage.getItem('jb_remember_email')||'').trim().toLowerCase();
+  const remPw=String(localStorage.getItem('jb_remember_pw')||'');
+  if(remEmail&&remPw) return {email:remEmail,password:remPw};
+  return null;
+}
+
 async function ensureFirebaseAuthSession(){
   if(!_firebaseAuth) return;
   return new Promise(resolve=>{
@@ -7022,6 +7058,29 @@ async function ensureFirebaseAuthSession(){
       try{unsub();}catch(_e){}
     });
   });
+}
+
+async function ensureFirebaseOnlineAuth(){
+  if(!_firebaseAuth) return null;
+  if(_firebaseAuth.currentUser){
+    _health.authState='signed_in';
+    return _firebaseAuth.currentUser;
+  }
+  const creds=getFirebaseLoginCreds();
+  if(creds&&creds.email&&creds.password){
+    const u=await firebaseSignInForSession(creds.email,creds.password);
+    if(u) return u;
+  }
+  try{
+    const anon=await _firebaseAuth.signInAnonymously();
+    saveAuthSession(anon&&anon.user?anon.user:null);
+    _health.authState='anonymous';
+    return anon&&anon.user?anon.user:null;
+  }catch(err){
+    markError(err);
+    _health.authState=(err&&err.code==='auth/operation-not-allowed')?'auth_provider_disabled':'waiting_login';
+    return null;
+  }
 }
 
 async function firebaseSignInForSession(email,password){
@@ -7326,8 +7385,9 @@ async function subscribeFeedRealtime(opts={}){
 
 async function initFirebaseRealtime(opts={}){
   const silent=!!opts.silent;
+  const force=!!opts.force;
   if(!getFirebaseEnabled()) return false;
-  if(Date.now()<_firebaseRetryAt) return false;
+  if(!force && Date.now()<_firebaseRetryAt) return false;
   if(_firebaseInitPromise) return _firebaseInitPromise;
   _firebaseInitPromise=(async()=>{
     const cfg=getFirebaseConfig();
@@ -7833,7 +7893,7 @@ async function migrateAllToFirebase(){
 }
 
 async function connectFirebaseNow(){
-  await initFirebaseRealtime({silent:false});
+  await initFirebaseRealtime({silent:false,force:true});
 }
 
 // ── PWA ──
