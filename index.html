@@ -1278,7 +1278,7 @@ body.dark .modal-foot{background:#263548;}
             </div>
           </div>
           <div id="admin-feed-list">
-            <div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">📡 Connect to cloud to load feed</div>
+            <div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">📡 Loading feed...</div>
           </div>
         </div>
       </div>
@@ -1569,13 +1569,12 @@ body.dark .modal-foot{background:#263548;}
           </div>
           <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
         <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase-First Sync</div>
+          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase Sync</div>
           <div style="padding:13px 16px;">
-            <div class="fg" style="margin-bottom:10px;"><label class="fl">Legacy Worker URL (only for one-time migration)</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api..."></div>
-            <div class="fg" style="margin-bottom:10px;"><label class="fl">Legacy API Key (only for migration)</label><input type="password" class="fi" id="cfg-cloud-key" placeholder="Legacy worker API key"></div>
+            <div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:8px;">
+              Runtime is now Firebase/Firestore only. Legacy Cloudflare Worker sync is disabled.
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-primary" onclick="saveCloudSettings(document.getElementById('cfg-cloud-api').value,document.getElementById('cfg-cloud-key').value)">💾 Save Legacy</button>
-              <button class="btn btn-blue" onclick="importLegacyCloudToFirebase()">⬇️ Import Legacy Data</button>
               <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Firebase</button>
             </div>
           </div>
@@ -1587,7 +1586,7 @@ body.dark .modal-foot{background:#263548;}
               <label class="fl">Enable Firebase</label>
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);">
                 <input type="checkbox" id="cfg-firebase-enabled">
-                Realtime updates (Cloudflare Worker is bypassed)
+                Realtime updates
               </label>
             </div>
             <div class="fg" style="margin-bottom:10px;">
@@ -2027,12 +2026,12 @@ body.dark .modal-foot{background:#263548;}
 // JRSHOP PWA — Ana Uygulama
 // 
 // Mimari:
-//   - js/api.js     → Cloud API çağrıları (Cloudflare Workers)
+//   - js/api.js     → API yardımcıları (Firebase bridge)
 //   - js/auth.js    → Kullanıcı oturumu yönetimi
 //   - js/state.js   → Uygulama state yönetimi
 //   - index.html    → UI + uygulama mantığı
 //
-// Backend: Cloudflare Workers + D1 (jrshop-api.sagsozburhan1.workers.dev)
+// Backend: Firebase / Firestore bridge (/api/* intercept)
 // Deploy: Cloudflare Pages (joobuy.store)
 // ═══════════════════════════════════════════════════════════
 
@@ -2154,16 +2153,15 @@ function displayStatus(s){
 // ── DARK MODE ──
 function toggleDark(){const d=document.body.classList.toggle('dark');document.getElementById('dark-btn').textContent=d?'☀️':'🌙';localStorage.setItem('jb_dark',d?'1':'0');}
 (function(){
-  // Always ensure defaults are set
-  if(!localStorage.getItem('jb_cloud_api'))localStorage.setItem('jb_cloud_api','https://jrshop-api.sagsozburhan1.workers.dev');
-  if(!localStorage.getItem('jb_cloud_key'))localStorage.setItem('jb_cloud_key','JrShop2026');
+  // Firebase-first boot: keep API calls on current origin (/api/* bridge).
+  localStorage.setItem('jb_cloud_api',location.origin);
   const savedUsers=localStorage.getItem('jb_users');
   const hasUsers=savedUsers&&JSON.parse(savedUsers||'[]').length>0;
   if(!hasUsers){
     setTimeout(function(){
       const loginBtn=document.querySelector('.login-btn');
       if(loginBtn)loginBtn.textContent='Loading...';
-      fetch((localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev')+'/api/data',{headers:{'Authorization':'Bearer '+(localStorage.getItem('jb_cloud_key')||'')}})
+      fetch('/api/data')
       .then(function(r){return r.json();})
       .then(function(res){
         if(res.data){
@@ -2205,12 +2203,10 @@ function login(){
   const pw=document.getElementById('l-pw').value;
   const u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
   if(!u){
-    // Try loading from cloud first before showing error
-    const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
-    const k=localStorage.getItem('jb_cloud_key')||'JrShop2026';
+    // Firebase-first login retry
     const loginBtn=document.querySelector('.login-btn');
     if(loginBtn)loginBtn.textContent='Checking...';
-    fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}})
+    fetch('/api/data')
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
@@ -2264,10 +2260,8 @@ function login(){
   else{document.getElementById('topbar-right').style.display='none';goDash(document.querySelector('.ni'));startPendingPoll();
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
   setTimeout(function(){
-    // Ensure defaults are set
-    if(!localStorage.getItem('jb_cloud_api'))localStorage.setItem('jb_cloud_api','https://jrshop-api.sagsozburhan1.workers.dev');
-    if(!localStorage.getItem('jb_cloud_key'))localStorage.setItem('jb_cloud_key','JrShop2026');
-    fetch((localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev')+'/api/data',{headers:{'Authorization':'Bearer '+(localStorage.getItem('jb_cloud_key')||'')}})
+    localStorage.setItem('jb_cloud_api',location.origin);
+    fetch('/api/data')
     .then(function(r){return r.json();})
     .then(function(res){
       if(res.data){
@@ -3319,9 +3313,8 @@ async function deleteOrder(){
   closeDetail();render();updateBadges();
   toast('🗑️ Deleted','info');
   // Delete from cloud immediately
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(k)fetch(api+'/api/order/'+did,{method:'DELETE',headers:{'Authorization':'Bearer '+k}}).catch(()=>{});
+  const api=getApiBase();
+  fetch(api+'/api/order/'+did,{method:'DELETE',headers:getAuthHeaders()}).catch(()=>{});
 }
 
 // ── EDIT ORDER ──
@@ -3961,10 +3954,8 @@ async function downloadImage(src, name){
   const m=String(src||'').match(/\/api\/image\/([^?#]+)/);
   if(!m){toast('⚠️ Image URL invalid','err');return;}
   const id=decodeURIComponent(m[1]);
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||'';
-  const headers={};
-  if(k) headers['Authorization']='Bearer '+k;
+  const api=getApiBase();
+  const headers=getAuthHeaders();
   try{
     const res=await fetch(api+'/api/image/'+id,{headers});
     if(!res.ok) throw new Error('not found');
@@ -4163,8 +4154,7 @@ async function sendBulkMessage(resellerIdsStr, btn){
   
   if(btn){btn.disabled=true;btn.textContent='Sending...';}
   
-  const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-  const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+  const api=getApiBase();
   
   let sent = 0;
   for(const resId of resellerIds){
@@ -4172,13 +4162,13 @@ async function sendBulkMessage(resellerIdsStr, btn){
     if(!res) continue;
     
     try{
-      const r = await fetch(api+'/api/data', {headers:{'Authorization':'Bearer '+k}});
+      const r = await fetch(api+'/api/data', {headers:getAuthHeaders()});
       const {data} = await r.json();
       const chats = data.jb_chats || {};
       const chatKey = 'admin_'+resId;
       const chat = chats[chatKey] || [];
       chat.push({from:'admin', text, ts: Date.now()});
-      await fetch(api+'/api/sync', {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+k}, body:JSON.stringify({key:'jb_chats',value:chats})});
+      await fetch(api+'/api/sync', {method:'POST', headers:getAuthHeaders({'Content-Type':'application/json'}), body:JSON.stringify({key:'jb_chats',value:chats})});
       sent++;
     }catch(e){console.warn('Bulk msg error:', e);}
   }
@@ -4482,16 +4472,14 @@ async function handleImg(idx,input){
     });
     
     // Upload image through API bridge (Firebase mode supported)
-    const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || '';
+    const api=getApiBase();
     
     let imgSrc = null;
     let retries = 3;
     
     while(retries > 0 && !imgSrc){
       try{
-        const headers = { 'Content-Type': 'application/json' };
-        if(k) headers['Authorization'] = 'Bearer '+k;
+        const headers=getAuthHeaders({'Content-Type':'application/json'});
         const res = await fetch(api+'/api/image', {
           method: 'POST',
           headers,
@@ -4673,14 +4661,12 @@ function collectProducts(){const prods=[];document.querySelectorAll('.prod-item'
 
 // Ürün görsellerini worker'a upload et (base64 olanları)
 async function uploadProdImages(){
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||'';
+  const api=getApiBase();
   for(const idx in prodImages){
     const src=prodImages[idx];
     if(src && src.startsWith('data:')){
       try{
-        const headers={'Content-Type':'application/json'};
-        if(k) headers['Authorization']='Bearer '+k;
+        const headers=getAuthHeaders({'Content-Type':'application/json'});
         const res=await fetch(api+'/api/image',{
           method:'POST',
           headers,
@@ -4721,8 +4707,6 @@ function loadSettings(){
   if(g('cfg-alert-days')) g('cfg-alert-days').value=settings.alertDays||3;
   if(g('cfg-session-timeout')) g('cfg-session-timeout').value=settings.sessionTimeout||30;
   if(g('cfg-messenger-link')) g('cfg-messenger-link').value=settings.messengerLink||'';
-  if(g('cfg-cloud-api')) g('cfg-cloud-api').value=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  if(g('cfg-cloud-key')) g('cfg-cloud-key').value=localStorage.getItem('jb_cloud_key')||'';
   if(g('cfg-firebase-enabled')) g('cfg-firebase-enabled').checked=getFirebaseEnabled();
   if(g('cfg-firebase-config')) g('cfg-firebase-config').value=localStorage.getItem('jb_firebase_config')||'';
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
@@ -5053,8 +5037,8 @@ async function handleCatImg(input){
     });
     
     // Try to upload to cloud
-    const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const api = getApiBase();
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     
     if(k){
       try{
@@ -5203,8 +5187,8 @@ async function saveCatalogProduct(){
   
   // Upload image to cloud if it's base64
   if(imgUrl && imgUrl.startsWith('data:')){
-    const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const api = getApiBase();
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     if(k){
       toast('📤 Uploading image...','info');
       try{
@@ -5259,9 +5243,8 @@ async function shareCatalog(){
   try{
     // Load fresh from cloud first
     try{
-      const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-      const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-      const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+      const api=getApiBase();
+      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(res.ok){
         const {data}=await res.json();
         if(data.jb_catalog&&data.jb_catalog.length){catalog=data.jb_catalog;localStorage.setItem('jb_catalog',JSON.stringify(catalog));}
@@ -5271,7 +5254,7 @@ async function shareCatalog(){
     catalog=catalog||JSON.parse(localStorage.getItem('jb_catalog')||'[]');
     if(!catalog||!catalog.length){toast('Add products first!','err');return;}
     
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
+    const api=getApiBase();
     const k=localStorage.getItem('jb_cloud_key')||'';
     
     // Upload images to cloud first (convert base64 to URLs)
@@ -6033,7 +6016,7 @@ function sendOrder(){
   if(MESSENGER_LINK)window.open(MESSENGER_LINK,'_blank');
   alert('\u2705 Order code copied: '+orderCode);
   cart=[];updateCartBadge();
-  try{fetch('https://jrshop-api.sagsozburhan1.workers.dev/api/catalog-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orderData)});}catch(e){}
+  try{fetch('/api/catalog-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orderData)});}catch(e){}
 }
 init();
 <\/script>
@@ -6072,10 +6055,10 @@ function importOrderFromCode(){
   // Check if it's a short code (JR-XXXXXX)
   const shortCodeMatch = input.match(/JR-([A-Z0-9]{6})/i);
   if(shortCodeMatch){
-    // Fetch from cloud
+    // Fetch from Firebase bridge
     const code = 'JR-' + shortCodeMatch[1].toUpperCase();
     toast('🔍 Looking up order...','info');
-    fetch('https://jrshop-api.sagsozburhan1.workers.dev/api/catalog-order/'+code)
+    fetch('/api/catalog-order/'+code,{headers:getAuthHeaders()})
       .then(r => r.json())
       .then(data => {
         if(data && data.code){
@@ -6299,7 +6282,7 @@ async function handleROImg(idx,input){
     });
     
     // Upload image through API bridge (Firebase mode supported)
-    const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
+    const api = getApiBase();
     const k = localStorage.getItem('jb_cloud_key') || '';
     
     let imgSrc = null;
@@ -6447,16 +6430,15 @@ async function trackOrder(){
   // Load from cloud if orders empty
   if(!orders.length){
     try{
-      const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
-      const k=localStorage.getItem('jb_cloud_key')||'JrShop2026';
+      const api=getApiBase();
       // Önce /api/orders dene
       try{
-        const r1=await fetch(api+'/api/orders',{headers:{'Authorization':'Bearer '+k}});
+        const r1=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
         if(r1.ok){const d=await r1.json();orders=d.orders||[];}
       }catch(e){}
       // Yoksa /api/data dene
       if(!orders.length){
-        const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+        const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
         if(res.ok){const d=await res.json();orders=d.data&&d.data.jb_orders||d.jb_orders||[];}
       }
     }catch(e){}
@@ -6528,9 +6510,8 @@ async function trackOrder(){
 }
 
 
-// ── CLOUD SYNC ──
-const CLOUD_API_DEFAULT='https://jrshop-api.sagsozburhan1.workers.dev';
-const CLOUD_KEY_DEFAULT='JrShop2026';
+// ── REMOTE SYNC (Firebase bridge first) ──
+const CLOUD_API_DEFAULT=location.origin;
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
 function getApiBase(){
@@ -6538,6 +6519,12 @@ function getApiBase(){
   if(getFirebaseEnabled()) return location.origin;
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
   return CLOUD_API_DEFAULT;
+}
+function getAuthHeaders(extra){
+  const headers={...(extra||{})};
+  const k=(localStorage.getItem('jb_cloud_key')||'').trim();
+  if(k) headers.Authorization='Bearer '+k;
+  return headers;
 }
 function cloudSave(key,value){
   localStorage.setItem(key,value);
@@ -6548,8 +6535,7 @@ function cloudSave(key,value){
   }
 }
 async function syncToCloud(key,value){
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
+  const api=getApiBase();
   try{
     let parsed;try{parsed=JSON.parse(value);}catch{parsed=value;}
     // For cloud: strip base64 (too large), keep only http URLs
@@ -6563,16 +6549,14 @@ async function syncToCloud(key,value){
         }))
       }));
     }
-    await fetch(api+'/api/sync',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify({key,value:cloudValue})});
+    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
   }catch(e){}
 }
 
 async function uploadToCloud(){
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){toast('No API key set','err');return;}
+  const api=getApiBase();
   try{
-    toast('Uploading to cloud...','info');
+    toast('Syncing to Firebase...','info');
     // Upload non-order data
     const payload={};
     for(const key of SYNC_KEYS){
@@ -6580,7 +6564,7 @@ async function uploadToCloud(){
       const val=localStorage.getItem(key);
       if(val){try{payload[key]=JSON.parse(val);}catch{payload[key]=val;}}
     }
-    await fetch(api+'/api/data',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify(payload)});
+    await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
     // Upload all orders individually
     let saved=0;
     for(const o of orders){
@@ -6589,24 +6573,22 @@ async function uploadToCloud(){
         depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
       }))};
       try{
-        await fetch(api+'/api/order',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify({order:clean})});
+        await fetch(api+'/api/order',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})});
         saved++;
       }catch(e){}
     }
-    toast(`✅ Uploaded ${saved} orders`,'ok');
-  }catch(e){toast('Upload failed','err');}
+    toast(`✅ Synced ${saved} orders`,'ok');
+  }catch(e){toast('Sync failed','err');}
 }
 
 
 // Sessiz cloud sync - autoSync için, toast göstermez
 async function loadFromCloudSilent(){
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-    const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-    if(!k) return false;
+    const api=getApiBase();
 
     // Diğer verileri güncelle (kullanıcılar, katalog vs)
-    const dataRes=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!dataRes.ok) return false;
     const {data}=await dataRes.json();
     const KEYS=['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed'];
@@ -6615,7 +6597,7 @@ async function loadFromCloudSilent(){
     }
 
     // Siparişler: sadece cloud'da YENİ olan veya DAHA YENİ olanı al
-    const ordRes=await fetch(api+'/api/orders',{headers:{'Authorization':'Bearer '+k}});
+    const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
     const {orders:cloudOrders=[]}=await ordRes.json();
 
@@ -6658,19 +6640,16 @@ async function loadFromCloudSilent(){
 
 
 async function loadFromCloud(){
-  if(me&&me.role==='Admin') toast('⏳ Cloud yükleniyor...','info');
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-      const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-      if(!k){toast('⚠️ API key ayarlanmamış. Settings > Cloud Sync','err');return false;}
+    const api=getApiBase();
       try{
-        console.log('[Cloud] Loading data...');
+        console.log('[Remote] Loading data...');
         // Load settings & other data
-        const dataRes=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
-        console.log('[Cloud] Response status:', dataRes.status);
+        const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+        console.log('[Remote] Response status:', dataRes.status);
         if(!dataRes.ok){
           const errText = await dataRes.text().catch(()=>'');
-          console.error('[Cloud] Error response:', errText);
+          console.error('[Remote] Error response:', errText);
           return false;
         }
         const {data}=await dataRes.json();
@@ -6679,7 +6658,7 @@ async function loadFromCloud(){
           if(data[key]!==undefined)localStorage.setItem(key,JSON.stringify(data[key]));
         }
         // Load orders from dedicated endpoint (individual rows — no size limit)
-        const ordRes=await fetch(api+'/api/orders',{headers:{'Authorization':'Bearer '+k}});
+        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
         let cloudOrders=[];
         if(ordRes.ok){
           const od=await ordRes.json();
@@ -6725,30 +6704,26 @@ async function loadFromCloud(){
         notifSettings=JSON.parse(localStorage.getItem('jb_notif')||'{"shipped":true}');
         loadSettings();loadTemplates();loadNotifSettings();
         updateBadges();render();
-        console.log(`[Cloud] Loaded ${orders.length} orders`);
-        if(me&&me.role==='Admin') toast(`✅ Cloud yüklendi! ${orders.length} sipariş`,'ok');
+        console.log(`[Remote] Loaded ${orders.length} orders`);
         return true;
       }catch(e){
-        console.error('[Cloud] Error:', e);
-        if(me&&me.role==='Admin') toast('❌ Cloud yükleme hatası: '+e.message,'err');
+        console.error('[Remote] Error:', e);
         return false;
       }
   } catch(e) {
     console.error('[loadFromCloud]', e);
-    if(me&&me.role==='Admin') toast('❌ Cloud baglanti hatasi','err');
     return false;
   }
 }
 async function saveAllToCloud(){
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  toast('Uploading to cloud...','info');
+  const api=getApiBase();
+  toast('Syncing backup to Firebase...','info');
   try{
     const data={};
     for(const key of SYNC_KEYS){const val=localStorage.getItem(key);if(val)try{data[key]=JSON.parse(val);}catch{data[key]=val;}}
-    const res=await fetch(api+'/api/data',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify(data)});
-    if(res.ok)toast('All data saved to cloud!','ok');
-    else toast('Cloud save error','err');
+    const res=await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(data)});
+    if(res.ok)toast('All data saved to Firebase!','ok');
+    else toast('Firebase save error','err');
   }catch(e){toast('Connection error: '+e.message,'err');}
 }
 function saveFirebaseSettings(){
@@ -6781,12 +6756,6 @@ function saveFirebaseSettings(){
     toast('ℹ️ Firebase realtime kapatıldı','info');
   }
 }
-function saveCloudSettings(api,key){
-  localStorage.setItem('jb_cloud_api',api.trim().replace(/\/$/,''));
-  localStorage.setItem('jb_cloud_key',key.trim()||CLOUD_KEY_DEFAULT);
-  toast('Cloud settings saved!','ok');
-}
-
 async function syncSettingsToFirebase(){
   try{
     const ok=await initFirebaseRealtime({silent:true});
@@ -7200,43 +7169,6 @@ async function migrateAllToFirebase(){
     toast('❌ Firebase migration failed: '+e.message,'err');
   }
 }
-async function importLegacyCloudToFirebase(){
-  const api=(localStorage.getItem('jb_cloud_api')||'').trim().replace(/\/$/,'');
-  const key=(localStorage.getItem('jb_cloud_key')||'').trim();
-  if(!api||!key){
-    toast('⚠️ Legacy Worker URL / key gerekli','err');
-    return;
-  }
-  toast('⏳ Importing legacy worker data...','info');
-  try{
-    const connected=await initFirebaseRealtime({silent:false});
-    if(!connected) return;
-    const hdr={Authorization:'Bearer '+key};
-    const [dataRes,ordRes]=await Promise.all([
-      _nativeFetch(api+'/api/data',{headers:hdr}),
-      _nativeFetch(api+'/api/orders',{headers:hdr})
-    ]);
-    const dataJson=dataRes.ok?await dataRes.json():{data:{}};
-    const orderJson=ordRes.ok?await ordRes.json():{orders:[]};
-    const map={...(dataJson&&dataJson.data?dataJson.data:{})};
-    delete map.jb_orders;
-    await deleteFirebaseDataKey('jb_orders');
-    await writeFirebaseDataMap(map);
-    const incomingOrders=[...(orderJson&&orderJson.orders?orderJson.orders:[])];
-    if(incomingOrders.length){
-      await pushOrdersToFirebase(incomingOrders);
-      orders=mergeOrdersByFreshness(orders,incomingOrders);
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
-    }
-    Object.entries(map).forEach(([k,v])=>{
-      try{localStorage.setItem(k,JSON.stringify(v));}catch(_e){}
-    });
-    loadSettings();loadTemplates();loadNotifSettings();updateBadges();render();
-    toast(`✅ Legacy import finished (${incomingOrders.length} orders)`,'ok');
-  }catch(e){
-    toast('❌ Legacy import failed: '+(e&&e.message?e.message:e),'err');
-  }
-}
 
 async function connectFirebaseNow(){
   await initFirebaseRealtime({silent:false});
@@ -7388,12 +7320,11 @@ async function subscribeToPush(){
       });
     }
     // Save to server
-    const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
-    const k=localStorage.getItem('jb_cloud_key')||'';
+    const api=getApiBase();
     const subData=sub.toJSON();
     await fetch(api+'/api/push/subscribe',{
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
       body:JSON.stringify({
         userId:me?me.id:'',
         endpoint:subData.endpoint,
@@ -7413,11 +7344,10 @@ async function subscribeToPush(){
 
 async function sendPushToReseller(resellerId, title, body){
   try{
-    const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
-    const k=localStorage.getItem('jb_cloud_key')||'';
+    const api=getApiBase();
     await fetch(api+'/api/push/send',{
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
       body:JSON.stringify({userId:resellerId,title,body})
     });
   }catch(e){console.warn('Push send failed:',e);}
@@ -7426,14 +7356,13 @@ async function sendPushToReseller(resellerId, title, body){
 // Send push notification to all admins
 async function sendPushToAdmin(title, body){
   try{
-    const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
-    const k=localStorage.getItem('jb_cloud_key')||'';
+    const api=getApiBase();
     // Send to all admin users
     const admins = users.filter(u => u.role === 'Admin');
     for(const admin of admins){
       await fetch(api+'/api/push/send',{
         method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({userId:admin.id,title,body})
       });
     }
@@ -7743,16 +7672,14 @@ async function startPendingPoll(){
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
     try{
-      const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
-      const k=localStorage.getItem('jb_cloud_key')||'';
-      if(!k)return;
-      const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+      const api=getApiBase();
+      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(!res.ok)return;
       const {data}=await res.json();
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
-        const ordRes=await fetch(api+'/api/orders',{headers:{'Authorization':'Bearer '+k}});
+        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
         if(ordRes.ok){const od=await ordRes.json();newOrders=od.orders||[];}
         else{newOrders=data.jb_orders||[];}
       }catch{newOrders=data.jb_orders||[];}
@@ -7824,10 +7751,8 @@ function startGlobalChatPoll(){
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-    const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-    if(!k) return;
-    const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const api=getApiBase();
+    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
     // Check each reseller's chat key
@@ -7879,7 +7804,7 @@ async function pollAllChats(){
         // Sync read status to cloud
         await fetch(api+'/api/sync', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer '+k},
+          headers: getAuthHeaders({'Content-Type': 'application/json'}),
           body: JSON.stringify({key: 'jb_chat_'+_chatReseller, value: msgs})
         });
         renderMessages();
@@ -7939,10 +7864,8 @@ function renderChatList(filter=''){
 async function pollMessages(resellerId){
   if(!resellerId) return;
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-    const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-    if(!k) return;
-    const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const api=getApiBase();
+    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
     const newMsgs=data['jb_chat_'+resellerId]||[];
@@ -8006,8 +7929,8 @@ async function openChatWith(resellerId){
   if(hasUnread){
     // Sync to cloud
     try{
-      const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-      const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+      const api = getApiBase();
+      const k = (localStorage.getItem('jb_cloud_key') || '').trim();
       if(k){
         await fetch(api+'/api/sync', {
           method: 'POST',
@@ -8132,10 +8055,8 @@ function startResellerMessagePoll(){
 async function checkResellerUnreadMessages(){
   if(!me) return;
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-    const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-    if(!k) return;
-    const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const api=getApiBase();
+    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
     const msgs=data['jb_chat_'+me.id]||[];
@@ -8203,10 +8124,8 @@ function closeResellerChat(){
 async function loadResellerMessages(){
   if(!me) return;
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-    const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-    if(!k) return;
-    const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const api=getApiBase();
+    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
     let msgs=data['jb_chat_'+me.id]||[];
@@ -8227,7 +8146,7 @@ async function loadResellerMessages(){
       if(hasUnread){
         await fetch(api+'/api/sync', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer '+k},
+          headers: getAuthHeaders({'Content-Type': 'application/json'}),
           body: JSON.stringify({key: 'jb_chat_'+me.id, value: msgs})
         });
       }
@@ -8296,21 +8215,19 @@ async function sendChatMsg(){
   const text = inp?.value.trim();
   if(!text) return;
   inp.value = '';
-  const api = localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k = localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){ toast('API key gerekli','err'); return; }
+  const api=getApiBase();
   const msg = {id:'m'+Date.now(), from:'admin', to:_chatReseller, text, ts:Date.now()};
   if(!_messages[_chatReseller]) _messages[_chatReseller] = [];
   _messages[_chatReseller].push(msg);
   renderMessages();
   try{
-    const r = await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const r = await fetch(api+'/api/data',{headers:getAuthHeaders()});
     const {data} = await r.json();
     const msgs = data['jb_chat_'+_chatReseller] || [];
     msgs.push(msg);
     await fetch(api+'/api/sync',{
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({key:'jb_chat_'+_chatReseller, value:msgs})
     });
     // Push notification to reseller
@@ -8328,16 +8245,14 @@ async function sendResellerChatMsg(){
   inp.value='';
   const msg={id:'m'+Date.now(),from:me.id,to:'admin',text,ts:Date.now()};
   try{
-    const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-    const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-    if(!k) return;
+    const api=getApiBase();
     // Load existing messages first
-    const res=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     let msgs=[];
     if(res.ok){const {data}=await res.json();msgs=data['jb_chat_'+me.id]||[];}
     msgs.push(msg);
     // Save back
-    await fetch(api+'/api/sync',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),
       body:JSON.stringify({key:'jb_chat_'+me.id,value:msgs})});
     renderResellerMessages(msgs);
     // Push notification to admin
@@ -8919,12 +8834,10 @@ function renderResFeed(searchQuery=''){
   const feedEl=document.getElementById('res-feed-list');
   if(!feedEl)return;
   
-  // Load feed posts from cloud
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){feedEl.innerHTML='<div style="text-align:center;padding:60px 20px;color:var(--muted);"><div style="font-size:48px;margin-bottom:16px;">📡</div><div style="font-size:15px;font-weight:600;">Connect to cloud</div><div style="font-size:13px;margin-top:8px;">to see the latest posts</div></div>';return;}
+  // Load feed posts from Firebase bridge
+  const api=getApiBase();
   
-  fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}})
+  fetch(api+'/api/data',{headers:getAuthHeaders()})
     .then(r=>r.json())
     .then(({data})=>{
       let posts=data.jb_feed||[];
@@ -9411,9 +9324,7 @@ async function createFeedPost(){
   const text=document.getElementById('feed-post-text').value.trim();
   if(!text){toast('Write something first!','err');return;}
   
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){toast('No API key','err');return;}
+  const api=getApiBase();
   
   // Çoklu görsel upload
   const imgUrls=[];
@@ -9424,7 +9335,7 @@ async function createFeedPost(){
     for(const imgItem of allImgs){
       try{
         const r=await fetch(api+'/api/image',{method:'POST',
-          headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
           body:JSON.stringify({data:imgItem.data,type:'image/jpeg'})});
         if(r.ok){const d=await r.json();if(d.url||d.id)imgUrls.push(d.url||(api+'/api/image/'+d.id));}
       }catch(e){console.warn('Görsel upload hatası',e);}
@@ -9437,7 +9348,7 @@ async function createFeedPost(){
     toast('Uploading video...','info');
     try{
       const r = await fetch(api+'/api/image',{method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({data:_feedVideoData,type:'video/mp4'})});
       if(r.ok){
         const d = await r.json();
@@ -9471,13 +9382,13 @@ async function createFeedPost(){
   
   try{
     // Load existing posts
-    const r=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const r=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     const {data}=await r.json();
     const posts=data.jb_feed||[];
     posts.push(post);
     
     // Save back
-    await fetch(api+'/api/sync',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify({key:'jb_feed',value:posts})});
+    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})});
     
     toast('✅ Post published!','ok');
     document.getElementById('feed-post-text').value='';
@@ -9493,12 +9404,10 @@ async function renderAdminFeed(searchQuery=''){
   const el=document.getElementById('admin-feed-list');
   if(!el)return;
   
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);"><div style="font-size:40px;margin-bottom:12px;">⚙️</div>Set Cloud API key in Settings first</div>';return;}
+  const api=getApiBase();
   
   try{
-    const r=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const r=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!r.ok){el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);"><div style="font-size:40px;margin-bottom:12px;">❌</div>Connection error. Check API settings.</div>';return;}
     const {data}=await r.json();
     let posts=(data.jb_feed||[]).slice().reverse();
@@ -9549,14 +9458,12 @@ function filterAdminFeed(query){
 
 async function deleteFeedPost(postId){
   if(!confirm('Delete this post?'))return;
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k)return;
+  const api=getApiBase();
   try{
-    const r=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+    const r=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     const {data}=await r.json();
     const posts=(data.jb_feed||[]).filter(p=>p.id!==postId);
-    await fetch(api+'/api/sync',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify({key:'jb_feed',value:posts})});
+    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})});
     toast('🗑️ Deleted','info');
     renderAdminFeed();
   }catch(e){toast('Failed to delete','err');}
@@ -9569,14 +9476,12 @@ async function deleteFeedPost(postId){
 async function createHualeiShipment(orderId, depot){
   const order=orders.find(o=>o.id===orderId);
   if(!order){toast('Siparis bulunamadi','err');return;}
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){toast('API key gerekli','err');return;}
+  const api=getApiBase();
   toast('Hualei gonderiyor...','info');
   try{
     const res=await fetch(api+'/api/logistics/create',{
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
       body:JSON.stringify({order,depot:depot||1})
     });
     if(!res.ok)throw new Error('Sunucu hatasi: '+res.status);
@@ -9673,16 +9578,14 @@ function closeLogisticsModal(){
 
 async function sendChatImage(input){
   if(!input.files||!input.files[0]||!_chatReseller)return;
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){toast('API key gerekli','err');return;}
+  const api=getApiBase();
   toast('Uploading image...','info');;
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
       const compressed=await compressImage(e.target.result,600,0.7);
       const r=await fetch(api+'/api/image',{method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({data:compressed,type:'image/jpeg'})});
       if(!r.ok){
         const errText=await r.text().catch(()=>'');
@@ -9696,7 +9599,7 @@ async function sendChatImage(input){
       _messages[_chatReseller].push(msg);
       renderMessages();
       await fetch(api+'/api/sync',{method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({key:'jb_chat_'+_chatReseller,value:_messages[_chatReseller]})});
       toast('Image sent','ok');;
     }catch(err){toast('Failed to send image: '+err.message,'err');}
@@ -9872,9 +9775,7 @@ function stopResVoiceRecording(){
 
 // Send voice message
 async function sendVoiceMessage(audioBlob, from){
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){toast('API key gerekli','err');return;}
+  const api=getApiBase();
   
   toast('📤 Uploading voice...','info');
   
@@ -9888,7 +9789,7 @@ async function sendVoiceMessage(audioBlob, from){
         // Upload to cloud
         const r = await fetch(api+'/api/image', {
           method: 'POST',
-          headers: {'Content-Type':'application/json','Authorization':'Bearer '+k},
+          headers: getAuthHeaders({'Content-Type':'application/json'}),
           body: JSON.stringify({data: base64, type: 'audio/webm'})
         });
         
@@ -9912,17 +9813,17 @@ async function sendVoiceMessage(audioBlob, from){
           renderMessages();
           await fetch(api+'/api/sync', {
             method: 'POST',
-            headers: {'Content-Type':'application/json','Authorization':'Bearer '+k},
+            headers: getAuthHeaders({'Content-Type':'application/json'}),
             body: JSON.stringify({key: 'jb_chat_'+_chatReseller, value: _messages[_chatReseller]})
           });
         } else {
-          const res = await fetch(api+'/api/data', {headers: {'Authorization':'Bearer '+k}});
+          const res = await fetch(api+'/api/data', {headers:getAuthHeaders()});
           const {data} = await res.json();
           let msgs = data['jb_chat_'+me.id] || [];
           msgs.push(msg);
           await fetch(api+'/api/sync', {
             method: 'POST',
-            headers: {'Content-Type':'application/json','Authorization':'Bearer '+k},
+            headers: getAuthHeaders({'Content-Type':'application/json'}),
             body: JSON.stringify({key: 'jb_chat_'+me.id, value: msgs})
           });
           renderResellerMessages(msgs);
@@ -9941,16 +9842,14 @@ async function sendVoiceMessage(audioBlob, from){
 
 async function sendResChatImage(input){
   if(!input.files||!input.files[0]||!me)return;
-  const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(!k){toast('API key gerekli','err');return;}
+  const api=getApiBase();
   toast('Uploading image...','info');;
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
       const compressed=await compressImage(e.target.result,600,0.7);
       const r=await fetch(api+'/api/image',{method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({data:compressed,type:'image/jpeg'})});
       if(!r.ok){
         const errText=await r.text().catch(()=>'');
@@ -9960,12 +9859,12 @@ async function sendResChatImage(input){
       if(!d.id) throw new Error('Worker resim ID donmedi: '+JSON.stringify(d));
       const imgUrl=d.url || (api+'/api/image/'+d.id);
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
-      const rd=await fetch(api+'/api/data',{headers:{'Authorization':'Bearer '+k}});
+      const rd=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       let msgs=[];
       if(rd.ok){const dd=await rd.json();msgs=dd.data&&dd.data['jb_chat_'+me.id]||[];}
       msgs.push(msg);
       await fetch(api+'/api/sync',{method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({key:'jb_chat_'+me.id,value:msgs})});
       renderResellerMessages(msgs);
       toast('Image sent','ok');;
@@ -10279,8 +10178,8 @@ async function staffSaveTracking(){
   
   // 同步到云端
   try{
-    const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const api = getApiBase();
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     if(k){
       await fetch(api+'/api/sync', {
         method: 'POST',
@@ -10311,8 +10210,8 @@ async function staffCompleteOrder(){
   
   // 同步到云端
   try{
-    const api = localStorage.getItem('jb_cloud_api') || CLOUD_API_DEFAULT;
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const api = getApiBase();
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     if(k){
       await fetch(api+'/api/sync', {
         method: 'POST',
@@ -10544,7 +10443,7 @@ function fileToBase64(file){
 
 async function aiReadShippingLabel(base64,fileName){
   // Routes through Cloudflare Worker proxy — Anthropic key is a CF Secret, never exposed
-  const api=localStorage.getItem('jb_cloud_api')||'https://jrshop-api.sagsozburhan1.workers.dev';
+  const api=getApiBase();
   const k=localStorage.getItem('jb_cloud_key')||'';
   const response=await fetch(api+'/api/anthropic',{
     method:'POST',
@@ -10798,17 +10697,14 @@ async function saveOrders(){
   // updatedAt yoksa ts kullan (ilk kez kayıt)
   orders.forEach(o=>{ if(!o.updatedAt) o.updatedAt = o.ts || Date.now(); });
   // Base64 görselleri worker'a yükle
-  const _api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  const _k=localStorage.getItem('jb_cloud_key')||CLOUD_KEY_DEFAULT;
-  if(_k){
-    for(const o of orders){
-      for(const p of (o.products||[])){
-        if(p.img && p.img.startsWith('data:')){
-          try{
-            const _r=await fetch(_api+'/api/image',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+_k},body:JSON.stringify({data:p.img,type:'image/jpeg'})});
-            if(_r.ok){const _d=await _r.json();if(_d.url||_d.id)p.img=_d.url||(_api+'/api/image/'+_d.id);}
-          }catch(e){}
-        }
+  const _api=getApiBase();
+  for(const o of orders){
+    for(const p of (o.products||[])){
+      if(p.img && p.img.startsWith('data:')){
+        try{
+          const _r=await fetch(_api+'/api/image',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({data:p.img,type:'image/jpeg'})});
+          if(_r.ok){const _d=await _r.json();if(_d.url||_d.id)p.img=_d.url||(_api+'/api/image/'+_d.id);}
+        }catch(e){}
       }
     }
   }
@@ -10817,23 +10713,20 @@ async function saveOrders(){
       orders=orders.map(o=>({...o,status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status,updatedAt:o.updatedAt||o.ts||Date.now()}));
       // Save to localStorage (cache)
       localStorage.setItem('jb_orders',JSON.stringify(orders));
-      // Write changed orders to cloud individually when legacy key is available.
-      const api=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-      const k=localStorage.getItem('jb_cloud_key')||'';
-      if(k){
-        for(const o of orders){
-          const clean={...o,products:(o.products||[]).map(p=>({...p,
-            img:p.img||null,
-            depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
-          }))};
-          try{
-            const _sr=await fetch(api+'/api/order',{method:'POST',
-              headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},
-              body:JSON.stringify({order:clean})
-            });
-            if(!_sr.ok) console.warn('[saveOrders] cloud save failed for',o.id);
-          }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
-        }
+      // Write changed orders through Firebase bridge.
+      const api=getApiBase();
+      for(const o of orders){
+        const clean={...o,products:(o.products||[]).map(p=>({...p,
+          img:p.img||null,
+          depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
+        }))};
+        try{
+          const _sr=await fetch(api+'/api/order',{method:'POST',
+            headers:getAuthHeaders({'Content-Type':'application/json'}),
+            body:JSON.stringify({order:clean})
+          });
+          if(!_sr.ok) console.warn('[saveOrders] remote save failed for',o.id);
+        }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
       }
       if(getFirebaseEnabled()){
         pushOrdersToFirebase([...(orders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
