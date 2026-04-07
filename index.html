@@ -6964,6 +6964,10 @@ let _firebaseUnsubFeed=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
 let _firebaseRetryAt=0;
+let _firebaseAuthWatcherUnsub=null;
+let _firebaseReauthTimer=null;
+let _lastHealthErrorKey='';
+let _lastHealthErrorAt=0;
 const UPLOAD_TIMEOUT_MS=7000;
 const _health={
   firebaseConnected:false,
@@ -6998,9 +7002,19 @@ function markApiCall(){
   _health.apiCalls++;
 }
 function markError(err){
-  _health.apiErrors++;
   const code=err&&err.code?` [${err.code}]`:'';
-  _health.lastError=(err&&err.message?err.message:String(err||'unknown'))+code;
+  const msg=(err&&err.message?err.message:String(err||'unknown'))+code;
+  const key=String(msg||'unknown');
+  const now=Date.now();
+  // Avoid inflating error counter with the same repeating offline/auth error.
+  if(key===_lastHealthErrorKey && (now-_lastHealthErrorAt)<15000){
+    _health.lastError=msg;
+    return;
+  }
+  _lastHealthErrorKey=key;
+  _lastHealthErrorAt=now;
+  _health.apiErrors++;
+  _health.lastError=msg;
 }
 function renderHealthPanel(){
   const el=document.getElementById('firebase-health-panel');
@@ -7212,6 +7226,27 @@ async function ensureFirebaseAuthSession(){
       resolve(null);
       try{unsub();}catch(_e){}
     });
+  });
+}
+
+function ensureFirebaseAuthWatcher(){
+  if(!_firebaseAuth || _firebaseAuthWatcherUnsub) return;
+  _firebaseAuthWatcherUnsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
+    saveAuthSession(authUser||null);
+    if(authUser){
+      _health.authState='signed_in';
+      return;
+    }
+    _health.authState='waiting_login';
+    if(_firebaseReauthTimer) clearTimeout(_firebaseReauthTimer);
+    _firebaseReauthTimer=setTimeout(async()=>{
+      try{
+        const u=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+        if(u && (!_firebaseReady || !_health.ordersRealtime || !_health.feedRealtime)){
+          initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
+        }
+      }catch(_e){}
+    },700);
   });
 }
 
@@ -7505,6 +7540,14 @@ function disconnectFirebaseRealtime(){
     try{_firebaseUnsubFeed();}catch(e){}
     _firebaseUnsubFeed=null;
   }
+  if(_firebaseAuthWatcherUnsub){
+    try{_firebaseAuthWatcherUnsub();}catch(_e){}
+    _firebaseAuthWatcherUnsub=null;
+  }
+  if(_firebaseReauthTimer){
+    clearTimeout(_firebaseReauthTimer);
+    _firebaseReauthTimer=null;
+  }
   _firebaseReady=false;
   _health.firebaseConnected=false;
   _health.ordersRealtime=false;
@@ -7570,10 +7613,11 @@ async function initFirebaseRealtime(opts={}){
         await _firebaseAuth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL);
       }catch(_e){}
       await ensureFirebaseAuthSession();
+      ensureFirebaseAuthWatcher();
       const authedUser=await ensureFirebaseOnlineAuth({allowAnonymous:true});
       if(!authedUser){
         disconnectFirebaseRealtime();
-        _firebaseRetryAt=Date.now()+5000;
+        _firebaseRetryAt=Date.now()+30000;
         if(!silent){
           const hint=firebaseAuthHint({code:_health.authState,message:_health.lastError||''});
           toast('⚠️ Firebase auth gerekli. '+(hint?('Hint: '+hint):'Tekrar giriş yapın.'),'err');
@@ -8004,7 +8048,12 @@ window.fetch=async function(input,init){
   const rawUrl=typeof input==='string'?input:(input&&input.url?input.url:String(input||''));
   const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
   const body=(init&&Object.prototype.hasOwnProperty.call(init,'body'))?init.body:null;
-  markApiCall();
+  let isApiFetch=false;
+  try{
+    const u=new URL(rawUrl,location.origin);
+    isApiFetch=isApiPath(u.pathname);
+  }catch(_e){}
+  if(isApiFetch) markApiCall();
   if(shouldRouteApiToFirebase(rawUrl)){
     try{
       const handled=await handleFirebaseApiRequest(rawUrl,method,body);
@@ -8017,10 +8066,10 @@ window.fetch=async function(input,init){
   }
   try{
     const res=await _nativeFetch(input,init);
-    if(!res.ok) markError(new Error('HTTP '+res.status+' '+res.statusText));
+    if(!res.ok && isApiFetch) markError(new Error('HTTP '+res.status+' '+res.statusText));
     return res;
   }catch(e){
-    markError(e);
+    if(isApiFetch) markError(e);
     throw e;
   }
 };
