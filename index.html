@@ -1569,13 +1569,12 @@ body.dark .modal-foot{background:#263548;}
           </div>
           <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
         <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase-First Sync</div>
+          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase Sync</div>
           <div style="padding:13px 16px;">
-            <div class="fg" style="margin-bottom:10px;"><label class="fl">Legacy Worker URL (only for one-time migration)</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api..."></div>
-            <div class="fg" style="margin-bottom:10px;"><label class="fl">Legacy API Key (only for migration)</label><input type="password" class="fi" id="cfg-cloud-key" placeholder="Legacy worker API key"></div>
+            <div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:8px;">
+              Runtime is now Firebase/Firestore only. Legacy Cloudflare Worker sync is disabled.
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-primary" onclick="saveCloudSettings(document.getElementById('cfg-cloud-api').value,document.getElementById('cfg-cloud-key').value)">💾 Save Legacy</button>
-              <button class="btn btn-blue" onclick="importLegacyCloudToFirebase()">⬇️ Import Legacy Data</button>
               <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Firebase</button>
             </div>
           </div>
@@ -1587,7 +1586,7 @@ body.dark .modal-foot{background:#263548;}
               <label class="fl">Enable Firebase</label>
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);">
                 <input type="checkbox" id="cfg-firebase-enabled">
-                Realtime updates (Cloudflare Worker is bypassed)
+                Realtime updates
               </label>
             </div>
             <div class="fg" style="margin-bottom:10px;">
@@ -2156,7 +2155,6 @@ function toggleDark(){const d=document.body.classList.toggle('dark');document.ge
 (function(){
   // Firebase-first boot: keep API calls on current origin (/api/* bridge).
   localStorage.setItem('jb_cloud_api',location.origin);
-  if(!localStorage.getItem('jb_cloud_key'))localStorage.setItem('jb_cloud_key','firebase-local');
   const savedUsers=localStorage.getItem('jb_users');
   const hasUsers=savedUsers&&JSON.parse(savedUsers||'[]').length>0;
   if(!hasUsers){
@@ -2263,7 +2261,6 @@ function login(){
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
   setTimeout(function(){
     localStorage.setItem('jb_cloud_api',location.origin);
-    if(!localStorage.getItem('jb_cloud_key'))localStorage.setItem('jb_cloud_key','firebase-local');
     fetch('/api/data')
     .then(function(r){return r.json();})
     .then(function(res){
@@ -4710,8 +4707,6 @@ function loadSettings(){
   if(g('cfg-alert-days')) g('cfg-alert-days').value=settings.alertDays||3;
   if(g('cfg-session-timeout')) g('cfg-session-timeout').value=settings.sessionTimeout||30;
   if(g('cfg-messenger-link')) g('cfg-messenger-link').value=settings.messengerLink||'';
-  if(g('cfg-cloud-api')) g('cfg-cloud-api').value=localStorage.getItem('jb_cloud_api')||CLOUD_API_DEFAULT;
-  if(g('cfg-cloud-key')) g('cfg-cloud-key').value=localStorage.getItem('jb_cloud_key')||'';
   if(g('cfg-firebase-enabled')) g('cfg-firebase-enabled').checked=getFirebaseEnabled();
   if(g('cfg-firebase-config')) g('cfg-firebase-config').value=localStorage.getItem('jb_firebase_config')||'';
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
@@ -5043,7 +5038,7 @@ async function handleCatImg(input){
     
     // Try to upload to cloud
     const api = getApiBase();
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     
     if(k){
       try{
@@ -5193,7 +5188,7 @@ async function saveCatalogProduct(){
   // Upload image to cloud if it's base64
   if(imgUrl && imgUrl.startsWith('data:')){
     const api = getApiBase();
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     if(k){
       toast('📤 Uploading image...','info');
       try{
@@ -6517,7 +6512,6 @@ async function trackOrder(){
 
 // ── REMOTE SYNC (Firebase bridge first) ──
 const CLOUD_API_DEFAULT=location.origin;
-const CLOUD_KEY_DEFAULT='';
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
 function getApiBase(){
@@ -6762,12 +6756,6 @@ function saveFirebaseSettings(){
     toast('ℹ️ Firebase realtime kapatıldı','info');
   }
 }
-function saveCloudSettings(api,key){
-  localStorage.setItem('jb_cloud_api',api.trim().replace(/\/$/,''));
-  localStorage.setItem('jb_cloud_key',key.trim()||CLOUD_KEY_DEFAULT);
-  toast('Cloud settings saved!','ok');
-}
-
 async function syncSettingsToFirebase(){
   try{
     const ok=await initFirebaseRealtime({silent:true});
@@ -7179,43 +7167,6 @@ async function migrateAllToFirebase(){
     toast('✅ Firebase migration complete (orders + app data)','ok');
   }catch(e){
     toast('❌ Firebase migration failed: '+e.message,'err');
-  }
-}
-async function importLegacyCloudToFirebase(){
-  const api=(localStorage.getItem('jb_cloud_api')||'').trim().replace(/\/$/,'');
-  const key=(localStorage.getItem('jb_cloud_key')||'').trim();
-  if(!api||!key){
-    toast('⚠️ Legacy Worker URL / key gerekli','err');
-    return;
-  }
-  toast('⏳ Importing legacy worker data...','info');
-  try{
-    const connected=await initFirebaseRealtime({silent:false});
-    if(!connected) return;
-    const hdr={Authorization:'Bearer '+key};
-    const [dataRes,ordRes]=await Promise.all([
-      _nativeFetch(api+'/api/data',{headers:hdr}),
-      _nativeFetch(api+'/api/orders',{headers:hdr})
-    ]);
-    const dataJson=dataRes.ok?await dataRes.json():{data:{}};
-    const orderJson=ordRes.ok?await ordRes.json():{orders:[]};
-    const map={...(dataJson&&dataJson.data?dataJson.data:{})};
-    delete map.jb_orders;
-    await deleteFirebaseDataKey('jb_orders');
-    await writeFirebaseDataMap(map);
-    const incomingOrders=[...(orderJson&&orderJson.orders?orderJson.orders:[])];
-    if(incomingOrders.length){
-      await pushOrdersToFirebase(incomingOrders);
-      orders=mergeOrdersByFreshness(orders,incomingOrders);
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
-    }
-    Object.entries(map).forEach(([k,v])=>{
-      try{localStorage.setItem(k,JSON.stringify(v));}catch(_e){}
-    });
-    loadSettings();loadTemplates();loadNotifSettings();updateBadges();render();
-    toast(`✅ Legacy import finished (${incomingOrders.length} orders)`,'ok');
-  }catch(e){
-    toast('❌ Legacy import failed: '+(e&&e.message?e.message:e),'err');
   }
 }
 
@@ -7979,7 +7930,7 @@ async function openChatWith(resellerId){
     // Sync to cloud
     try{
       const api = getApiBase();
-      const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+      const k = (localStorage.getItem('jb_cloud_key') || '').trim();
       if(k){
         await fetch(api+'/api/sync', {
           method: 'POST',
@@ -10228,7 +10179,7 @@ async function staffSaveTracking(){
   // 同步到云端
   try{
     const api = getApiBase();
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     if(k){
       await fetch(api+'/api/sync', {
         method: 'POST',
@@ -10260,7 +10211,7 @@ async function staffCompleteOrder(){
   // 同步到云端
   try{
     const api = getApiBase();
-    const k = localStorage.getItem('jb_cloud_key') || CLOUD_KEY_DEFAULT;
+    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
     if(k){
       await fetch(api+'/api/sync', {
         method: 'POST',

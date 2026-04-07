@@ -1,5 +1,4 @@
-// JRSHOP Cloudflare Worker
-// API Key: JrShop2026
+// Legacy Cloudflare Worker (not used in Firebase-only runtime)
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
