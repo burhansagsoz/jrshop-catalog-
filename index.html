@@ -2208,6 +2208,27 @@ function shouldAcceptRemoteOrders(remoteOrders){
     return true;
   }
 }
+function shouldAcceptRemoteFeed(remoteFeed){
+  if(!Array.isArray(remoteFeed)) return false;
+  if(remoteFeed.length>0) return true;
+  try{
+    const localFeed=JSON.parse(localStorage.getItem('jb_feed')||'[]');
+    return !Array.isArray(localFeed)||localFeed.length===0;
+  }catch(_e){
+    return true;
+  }
+}
+function readFeedUpdatedAt(){
+  const n=Number(localStorage.getItem('jb_feed_updated_at')||0);
+  return Number.isFinite(n)?n:0;
+}
+function setFeedCache(posts,updatedAt){
+  const ts=Number(updatedAt)||Date.now();
+  try{
+    localStorage.setItem('jb_feed',JSON.stringify(Array.isArray(posts)?posts:[]));
+    localStorage.setItem('jb_feed_updated_at',String(ts));
+  }catch(_e){}
+}
 function safeApplyRemoteOrders(remoteOrders){
   if(!shouldAcceptRemoteOrders(remoteOrders)) return false;
   orders=Array.isArray(remoteOrders)?remoteOrders:[];
@@ -4692,12 +4713,12 @@ async function uploadProdImages(){
   }
 }
 async function saveOrder(){
-  await uploadProdImages();
   const name=document.getElementById('f-name').value.trim(),addr=document.getElementById('f-addr').value.trim(),city=document.getElementById('f-city').value.trim(),post=document.getElementById('f-post').value.trim(),ref=document.getElementById('f-ref').value.trim();
   if(!name||!addr||!city||!post||!ref){toast('⚠️ Fill required fields','err');return;}
   const prods=collectProducts();if(!prods.length){toast('⚠️ Add at least one product','err');return;}
   const o={id:'o'+Date.now()+Math.random().toString(36).substr(2,4),updatedAt:Date.now(),ref,name,phone:document.getElementById('f-phone').value.trim(),address:addr,city,state:document.getElementById('f-state').value.trim(),postcode:post,country:document.getElementById('f-country').value.trim()||'GB',email:document.getElementById('f-cemail').value.trim(),fblink:document.getElementById('f-fblink').value.trim(),supplierId:document.getElementById('f-supplier').value,resellerId:document.getElementById('f-reseller').value,products:prods,status:'New',ts:Date.now(),cnTracking:null,ukTracking:null,note:''};
-  orders.unshift(o);saveOrders();closeOrderModal();render();selectOrder(o.id);
+  // Local-first save for instant UX; media upload + cloud sync runs async.
+  orders.unshift(o);saveOrders([o.id]);closeOrderModal();render();selectOrder(o.id);
   logActivity('created',`Order created: ${esc(o.ref)} for ${esc(o.name)}`,o.id);
   toast('✅ Order saved!','ok');
 }
@@ -6457,7 +6478,7 @@ function submitResellerOrder(){
     note:'[RESELLER REQUEST] '+(document.getElementById('ro-note').value.trim()||''),
     pendingApproval:true
   };
-  orders.unshift(o);saveOrders();updateBadges();
+  orders.unshift(o);saveOrders([o.id]);updateBadges();
   logActivity('order_request',`Order request submitted by ${me.dname||me.email}: ${esc(o.ref)} for ${esc(name)}`,o.id);
   closeResellerOrderModal();renderResellerView();
   // Force immediate cloud sync so admin sees it
@@ -6730,7 +6751,12 @@ async function loadFromCloudSilent(){
     const {data}=await dataRes.json();
     const KEYS=['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed'];
     for(const key of KEYS){
-      if(data[key]!==undefined) localStorage.setItem(key,JSON.stringify(data[key]));
+      if(data[key]===undefined) continue;
+      if(key==='jb_feed'){
+        if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
+        continue;
+      }
+      localStorage.setItem(key,JSON.stringify(data[key]));
     }
 
     // Siparişler: sadece cloud'da YENİ olan veya DAHA YENİ olanı al
@@ -6798,11 +6824,21 @@ async function loadFromCloud(){
         const data=dataPayload&&dataPayload.data?dataPayload.data:{};
         for(const key of SYNC_KEYS){
           if(key==='jb_orders')continue;
-          if(data[key]!==undefined)localStorage.setItem(key,JSON.stringify(data[key]));
+          if(data[key]===undefined) continue;
+          if(key==='jb_feed'){
+            if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
+            continue;
+          }
+          localStorage.setItem(key,JSON.stringify(data[key]));
         }
         // Keep chat/feed local snapshots durable even when Firebase auth is unstable.
         ['jb_feed','jb_chat_index'].forEach(function(k){
-          if(data[k]!==undefined) localStorage.setItem(k,JSON.stringify(data[k]));
+          if(data[k]===undefined) return;
+          if(k==='jb_feed'){
+            if(shouldAcceptRemoteFeed(data[k])) setFeedCache(data[k],Date.now());
+            return;
+          }
+          localStorage.setItem(k,JSON.stringify(data[k]));
         });
         // Load orders from dedicated endpoint (individual rows — no size limit)
         const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
@@ -7572,7 +7608,13 @@ async function subscribeFeedRealtime(opts={}){
     _firebaseUnsubFeed=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc('jb_feed').onSnapshot(doc=>{
       const d=doc&&doc.data?doc.data():null;
       const list=Array.isArray(d&&d.value)?d.value:[];
-      try{localStorage.setItem('jb_feed',JSON.stringify(list));}catch(_e){}
+      const remoteTs=Number(d&&d.updatedAt||0);
+      const localTs=readFeedUpdatedAt();
+      if(remoteTs && localTs && remoteTs+1200<localTs){
+        // Ignore stale remote snapshot that could revert a recent local feed change.
+        return;
+      }
+      setFeedCache(list,remoteTs||Date.now());
       _health.feedRealtime=true;
       markSync('feed_snapshot');
       if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
@@ -9113,11 +9155,9 @@ function closeResellerChat(){
 async function loadResellerMessages(){
   if(!me) return;
   try{
-    const api=getApiBase();
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
-    let msgs=data['jb_chat_'+me.id]||[];
+    const chatKey='jb_chat_'+me.id;
+    let msgs=[];
+    try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
     
     // Mark admin messages as read if chat is open
     const isChatOpen = document.getElementById('res-chat-overlay')?.style.display === 'flex';
@@ -9133,10 +9173,11 @@ async function loadResellerMessages(){
       
       // Save read status to cloud
       if(hasUnread){
-        await fetch(api+'/api/sync', {
+        try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+        await fetch('/api/sync', {
           method: 'POST',
           headers: getAuthHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({key: 'jb_chat_'+me.id, value: msgs})
+          body: JSON.stringify({key: chatKey, value: msgs})
         });
       }
       
@@ -9206,25 +9247,28 @@ async function sendChatMsg(){
   inp.value = '';
   const api=getApiBase();
   const msg = {id:'m'+Date.now(), from:'admin', to:_chatReseller, text, ts:Date.now()};
+  const chatKey='jb_chat_'+_chatReseller;
   if(!_messages[_chatReseller]) _messages[_chatReseller] = [];
   _messages[_chatReseller].push(msg);
+  try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
   renderMessages();
   try{
-    const r = await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    const {data} = await r.json();
-    const msgs = data['jb_chat_'+_chatReseller] || [];
-    msgs.push(msg);
-    await fetch(api+'/api/sync',{
+    const msgs = (_messages[_chatReseller]||[]).slice();
+    const syncRes=await fetch(api+'/api/sync',{
       method:'POST',
       headers:getAuthHeaders({'Content-Type':'application/json'}),
-      body: JSON.stringify({key:'jb_chat_'+_chatReseller, value:msgs})
+      body: JSON.stringify({key:chatKey, value:msgs})
     });
+    if(!syncRes.ok) throw new Error('chat sync failed');
     // Push notification to reseller
     const reseller = users.find(u => u.id === _chatReseller);
     if(reseller){
       await sendPushToReseller(_chatReseller, '💬 New Message', `Admin: ${text.slice(0,50)}${text.length>50?'...':''}`);
     }
-  }catch(e){ console.error('[sendChatMsg]',e); }
+  }catch(e){
+    console.error('[sendChatMsg]',e);
+    persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]);
+  }
 }
 
 async function sendResellerChatMsg(){
@@ -9232,22 +9276,24 @@ async function sendResellerChatMsg(){
   const text=inp?.value.trim();
   if(!text||!me) return;
   inp.value='';
+  const chatKey='jb_chat_'+me.id;
   const msg={id:'m'+Date.now(),from:me.id,to:'admin',text,ts:Date.now()};
   try{
     const api=getApiBase();
-    // Load existing messages first
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     let msgs=[];
-    if(res.ok){const {data}=await res.json();msgs=data['jb_chat_'+me.id]||[];}
+    try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
     msgs.push(msg);
+    try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
     // Save back
-    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),
-      body:JSON.stringify({key:'jb_chat_'+me.id,value:msgs})});
+    const syncRes=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({key:chatKey,value:msgs})});
+    if(!syncRes.ok) throw new Error('chat sync failed');
     renderResellerMessages(msgs);
     // Push notification to admin
     await sendPushToAdmin('💬 New Message', `${me.dname||me.email}: ${text.slice(0,50)}${text.length>50?'...':''}`);
   }catch(e){
-    console.error('[loadResellerMessages]', e);
+    persistLocalSyncFallback(chatKey,JSON.parse(localStorage.getItem(chatKey)||'[]'));
+    console.error('[sendResellerChatMsg]', e);
   }
 }
 
@@ -10365,13 +10411,17 @@ async function createFeedPost(){
   };
   
   try{
-    // Realtime cache keeps feed current; append locally then sync.
+    // Local-first optimistic update to prevent UI rollback feel.
     const posts=getFeedPostsFromCache();
     posts.push(post);
-    
-    // Save back
-    await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})});
-    
+    setFeedCache(posts,Date.now());
+    if(me&&me.role==='Reseller') renderResFeed();
+    renderAdminFeed();
+    // Save back async
+    fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})})
+      .then(function(r){ if(!r.ok) throw new Error('sync failed'); })
+      .catch(function(err){ console.warn('[feed create sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
+
     toast('✅ Post published!','ok');
     document.getElementById('feed-post-text').value='';
     document.getElementById('feed-post-price').value='';
@@ -10435,8 +10485,10 @@ async function deleteFeedPost(postId){
   if(!confirm('Delete this post?'))return;
   try{
     const posts=getFeedPostsFromCache().filter(p=>p.id!==postId);
-    await fetch('/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})});
-    try{localStorage.setItem('jb_feed',JSON.stringify(posts));}catch(_e){}
+    setFeedCache(posts,Date.now());
+    fetch('/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})})
+      .then(function(r){ if(!r.ok) throw new Error('sync failed'); })
+      .catch(function(err){ console.warn('[feed delete sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
     toast('🗑️ Deleted','info');
     renderAdminFeed();
   }catch(e){toast('Failed to delete','err');}
@@ -10559,14 +10611,21 @@ async function sendChatImage(input){
       const uploaded=await uploadImageWithFallback(compressed,'image/jpeg');
       const imgUrl=uploaded&&uploaded.url?uploaded.url:compressed;
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+imgUrl,ts:Date.now()};
+      const chatKey='jb_chat_'+_chatReseller;
       if(!_messages[_chatReseller])_messages[_chatReseller]=[];
       _messages[_chatReseller].push(msg);
+      try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
       renderMessages();
-      await fetch('/api/sync',{method:'POST',
+      const syncRes=await fetch('/api/sync',{method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({key:'jb_chat_'+_chatReseller,value:_messages[_chatReseller]})});
+        body:JSON.stringify({key:chatKey,value:_messages[_chatReseller]})});
+      if(!syncRes.ok) throw new Error('chat image sync failed');
       toast('Image sent','ok');
-    }catch(err){toast('Failed to send image: '+err.message,'err');}
+    }catch(err){
+      const chatKey='jb_chat_'+_chatReseller;
+      persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]);
+      toast('Failed to send image: '+err.message,'err');
+    }
   };
   reader.readAsDataURL(input.files[0]);
   input.value='';
@@ -10772,24 +10831,29 @@ async function sendVoiceMessage(audioBlob, from){
         };
         
         if(from === 'admin'){
+          const chatKey='jb_chat_'+_chatReseller;
           if(!_messages[_chatReseller]) _messages[_chatReseller] = [];
           _messages[_chatReseller].push(msg);
+          try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
           renderMessages();
-          await fetch(api+'/api/sync', {
+          const syncRes=await fetch(api+'/api/sync', {
             method: 'POST',
             headers: getAuthHeaders({'Content-Type':'application/json'}),
-            body: JSON.stringify({key: 'jb_chat_'+_chatReseller, value: _messages[_chatReseller]})
+            body: JSON.stringify({key: chatKey, value: _messages[_chatReseller]})
           });
+          if(!syncRes.ok) throw new Error('voice chat sync failed');
         } else {
-          const res = await fetch(api+'/api/data', {headers:getAuthHeaders()});
-          const {data} = await res.json();
-          let msgs = data['jb_chat_'+me.id] || [];
+          const chatKey='jb_chat_'+me.id;
+          let msgs=[];
+          try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
           msgs.push(msg);
-          await fetch(api+'/api/sync', {
+          try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+          const syncRes=await fetch(api+'/api/sync', {
             method: 'POST',
             headers: getAuthHeaders({'Content-Type':'application/json'}),
-            body: JSON.stringify({key: 'jb_chat_'+me.id, value: msgs})
+            body: JSON.stringify({key: chatKey, value: msgs})
           });
+          if(!syncRes.ok) throw new Error('voice chat sync failed');
           renderResellerMessages(msgs);
         }
         
@@ -10814,16 +10878,24 @@ async function sendResChatImage(input){
       const imgUrl=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true});
       if(!imgUrl) throw new Error('Image upload unavailable');
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
-      const rd=await fetch('/api/data',{headers:getAuthHeaders()});
+      const chatKey='jb_chat_'+me.id;
       let msgs=[];
-      if(rd.ok){const dd=await rd.json();msgs=dd.data&&dd.data['jb_chat_'+me.id]||[];}
+      try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
       msgs.push(msg);
-      await fetch('/api/sync',{method:'POST',
+      try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+      const syncRes=await fetch('/api/sync',{method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({key:'jb_chat_'+me.id,value:msgs})});
+        body:JSON.stringify({key:chatKey,value:msgs})});
+      if(!syncRes.ok) throw new Error('chat image sync failed');
       renderResellerMessages(msgs);
       toast('Image sent','ok');
-    }catch(err){toast('Failed to send image: '+err.message,'err');}
+    }catch(err){
+      const chatKey='jb_chat_'+me.id;
+      let fallbackMsgs=[];
+      try{fallbackMsgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){fallbackMsgs=[];}
+      persistLocalSyncFallback(chatKey,fallbackMsgs);
+      toast('Failed to send image: '+err.message,'err');
+    }
   };
   reader.readAsDataURL(input.files[0]);
   input.value='';
@@ -11648,12 +11720,14 @@ function updateBadges(){
   const navPending=document.getElementById('nav-pending');
   if(navPending)navPending.style.display=(me&&me.role!=='Reseller'&&pendingCount>0)?'flex':'none';
 }
-async function saveOrders(){
+async function saveOrders(changedOrderIds){
   // updatedAt yoksa ts kullan (ilk kez kayıt)
   orders.forEach(o=>{ if(!o.updatedAt) o.updatedAt = o.ts || Date.now(); });
-  // Base64 görselleri worker'a yükle
+  const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):null;
+  const targetOrders=(changedSet?orders.filter(o=>changedSet.has(o.id)):orders);
+  // Base64 görselleri sadece değişen siparişlerde upload et
   const _api=getApiBase();
-  for(const o of orders){
+  for(const o of targetOrders){
     for(const p of (o.products||[])){
       if(p.img && p.img.startsWith('data:')){
         try{
@@ -11670,7 +11744,7 @@ async function saveOrders(){
       localStorage.setItem('jb_orders',JSON.stringify(orders));
       // Write changed orders through Firebase bridge.
       const api=getApiBase();
-      for(const o of orders){
+      for(const o of targetOrders){
         const clean={...o,products:(o.products||[]).map(p=>({...p,
           img:p.img||null,
           depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
@@ -11684,10 +11758,10 @@ async function saveOrders(){
         }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
       }
       if(getFirebaseEnabled()){
-        pushOrdersToFirebase([...(orders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
+        pushOrdersToFirebase([...(targetOrders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
       }
       markSync('orders_save');
-      writeAuditEvent('orders_save',{count:orders.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
+      writeAuditEvent('orders_save',{count:targetOrders.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
   } catch(e) {
     console.error('[saveOrders]', e);
   }
