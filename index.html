@@ -2198,6 +2198,22 @@ function getShelfStatus(o){
   return {arrived,total:prods.length,ready:arrived===prods.length&&prods.length>0};
 }
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
+function shouldAcceptRemoteOrders(remoteOrders){
+  if(!Array.isArray(remoteOrders)) return false;
+  if(remoteOrders.length>0) return true;
+  try{
+    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    return !Array.isArray(localOrders)||localOrders.length===0;
+  }catch(_e){
+    return true;
+  }
+}
+function safeApplyRemoteOrders(remoteOrders){
+  if(!shouldAcceptRemoteOrders(remoteOrders)) return false;
+  orders=Array.isArray(remoteOrders)?remoteOrders:[];
+  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  return true;
+}
 
 // ── AUTH ──
 async function login(){
@@ -2283,6 +2299,7 @@ async function login(){
         // Merge: cloud orders + local images (cloud strips base64)
     const cloudOrders=(res.data&&res.data.jb_orders)||[];
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    if(!shouldAcceptRemoteOrders(cloudOrders)) return;
     orders=cloudOrders.map(co=>({...co,status:co.status==='At Depott'?'At Depot':co.status==='Sent to Wechat'||co.status==='Sent to WeChat'?'Sent to Factory':co.status,
       products:(co.products||[]).map((cp,i)=>{
         const lo=localOrders.find(o=>o.id===co.id);
@@ -6475,12 +6492,20 @@ async function trackOrder(){
       // Önce /api/orders dene
       try{
         const r1=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-        if(r1.ok){const d=await r1.json();orders=d.orders||[];}
+        if(r1.ok){
+          const d=await r1.json();
+          const incoming=Array.isArray(d&&d.orders)?d.orders:[];
+          if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
+        }
       }catch(e){}
       // Yoksa /api/data dene
       if(!orders.length){
         const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-        if(res.ok){const d=await res.json();orders=d.data&&d.data.jb_orders||d.jb_orders||[];}
+        if(res.ok){
+          const d=await res.json();
+          const incoming=(d&&d.data&&Array.isArray(d.data.jb_orders))?d.data.jb_orders:(Array.isArray(d&&d.jb_orders)?d.jb_orders:[]);
+          if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
+        }
       }
     }catch(e){}
   }
