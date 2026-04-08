@@ -2716,12 +2716,13 @@ async function navOrders(status,el){
         const headers={};
         if(k) headers['Authorization']='Bearer '+k;
         let loaded=false;
+        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         const ordRes=await fetch(api+'/api/orders',{headers});
         if(ordRes.ok){
           const od=await ordRes.json();
-          if(Array.isArray(od.orders)){
-            orders=od.orders;
-            localStorage.setItem('jb_orders',JSON.stringify(orders));
+          if(Array.isArray(od.orders) && !(od&&od.localOnly)){
+            orders=mergeOrdersByFreshness(localOrders,od.orders);
+            localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
             updateBadges();
             loaded=true;
           }
@@ -2731,8 +2732,8 @@ async function navOrders(status,el){
           if(res.ok){
             const {data}=await res.json();
             if(data&&Array.isArray(data.jb_orders)){
-              orders=data.jb_orders;
-              localStorage.setItem('jb_orders',JSON.stringify(orders));
+              orders=mergeOrdersByFreshness(localOrders,data.jb_orders);
+              localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
               updateBadges();
             }
           }
@@ -8995,7 +8996,10 @@ let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
 async function startPendingPoll(){
-  if(getFirebaseEnabled() && _health.ordersRealtime) return;
+  if(getFirebaseEnabled() && _health.ordersRealtime){
+    if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}
+    return;
+  }
   if(_pendingPollInterval)clearInterval(_pendingPollInterval);
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
