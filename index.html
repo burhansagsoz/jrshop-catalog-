@@ -2198,6 +2198,46 @@ function getShelfStatus(o){
   return {arrived,total:prods.length,ready:arrived===prods.length&&prods.length>0};
 }
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
+let _ordersStorageWarnAt=0;
+function compactOrdersForStorage(list){
+  const arr=Array.isArray(list)?list:[];
+  const keepRemoteable=function(v){
+    return (typeof v==='string'&&/^(https?:|blob:)/i.test(v))?v:null;
+  };
+  return arr.map(function(o){
+    return {
+      ...o,
+      products:(o&&o.products||[]).map(function(p){
+        return {
+          ...p,
+          img:keepRemoteable(p&&p.img),
+          depotPhoto:keepRemoteable(p&&p.depotPhoto)
+        };
+      })
+    };
+  });
+}
+function persistOrdersLocalSafe(list){
+  const arr=Array.isArray(list)?list:[];
+  try{
+    localStorage.setItem('jb_orders',JSON.stringify(arr));
+    return true;
+  }catch(_e){
+    try{
+      const compact=compactOrdersForStorage(arr);
+      localStorage.setItem('jb_orders',JSON.stringify(compact));
+      const now=Date.now();
+      if(now-_ordersStorageWarnAt>20000){
+        _ordersStorageWarnAt=now;
+        toast('⚠️ Order images compacted to protect updates','info');
+      }
+      return true;
+    }catch(err2){
+      console.error('[persistOrdersLocalSafe]',err2&&err2.message?err2.message:err2);
+      return false;
+    }
+  }
+}
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
   if(remoteOrders.length>0) return true;
@@ -2207,6 +2247,12 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }catch(_e){
     return true;
   }
+}
+function persistOrdersState(nextOrders){
+  const arr=Array.isArray(nextOrders)?nextOrders:[];
+  orders=arr;
+  persistOrdersLocalSafe(arr);
+  return arr;
 }
 function mergeArrayByTs(localArr,remoteArr){
   const local=Array.isArray(localArr)?localArr:[];
@@ -2284,8 +2330,7 @@ function mergeFeedByTs(localFeed,remoteFeed){
 }
 function safeApplyRemoteOrders(remoteOrders){
   if(!shouldAcceptRemoteOrders(remoteOrders)) return false;
-  orders=Array.isArray(remoteOrders)?remoteOrders:[];
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  persistOrdersState(Array.isArray(remoteOrders)?remoteOrders:[]);
   return true;
 }
 
