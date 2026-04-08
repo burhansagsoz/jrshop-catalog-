@@ -6438,45 +6438,14 @@ async function handleROImg(idx,input){
     const compressed = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = e => {
-        compressImage(e.target.result, 800, 0.75).then(resolve).catch(reject);
+        compressImage(e.target.result, 640, 0.65).then(resolve).catch(reject);
       };
       reader.onerror = reject;
       reader.readAsDataURL(input.files[0]);
     });
-    
-    // Upload image through API bridge (Firebase mode supported)
-    const api = getApiBase();
-    const k = localStorage.getItem('jb_cloud_key') || '';
-    
-    let imgSrc = null;
-    let retries = 3;
-    
-    while(retries > 0 && !imgSrc){
-      try{
-        const headers = { 'Content-Type': 'application/json' };
-        if(k) headers['Authorization'] = 'Bearer '+k;
-        const res = await fetch(api+'/api/image', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ data: compressed, type: 'image/jpeg' })
-        });
-        
-        if(res.ok){
-          const data = await res.json();
-          if(data.url||data.id) imgSrc = data.url || (api + '/api/image/' + data.id);
-        }
-      }catch(uploadErr){
-        console.warn('Upload attempt failed:', uploadErr);
-      }
-      retries--;
-      if(!imgSrc && retries > 0) await new Promise(r => setTimeout(r, 1000));
-    }
-    
-    if(!imgSrc){
-      toast('⚠️ Image upload failed after retries', 'err');
-      if(label) label.innerHTML = '📷 Choose';
-      return;
-    }
+
+    // Fast-path: short timeout + data fallback for instant UX.
+    const imgSrc=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200})||compressed;
     
     window.roProdImages[idx] = imgSrc;
     window.roProdImages[String(idx)] = imgSrc;
@@ -6487,7 +6456,7 @@ async function handleROImg(idx,input){
     if(prevEl) prevEl.style.display = 'block';
     if(label) label.innerHTML = '📷 Change';
     
-    toast('✅ Image uploaded', 'ok');
+    toast('✅ Image ready', 'ok');
   }catch(err){
     console.error('handleROImg error:', err);
     toast('⚠️ Image upload failed: ' + err.message, 'err');
@@ -10536,12 +10505,15 @@ async function createFeedPost(){
   
   if(allImgs.length>0){
     toast('Uploading images...','info');
-    for(const imgItem of allImgs){
+    const uploaded=await Promise.all(allImgs.map(async function(imgItem){
       try{
-        const up=await uploadImageWithFallback(imgItem.data,'image/jpeg',{allowDataFallback:true});
-        if(up&&up.url){imgUrls.push(up.url);}
-      }catch(e){console.warn('Görsel upload hatası',e);}
-    }
+        const up=await uploadImageWithFallback(imgItem.data,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
+        return up&&up.url?up.url:null;
+      }catch(_e){
+        return null;
+      }
+    }));
+    uploaded.forEach(function(u){ if(u) imgUrls.push(u); });
   }
   
   // Video upload
@@ -10549,7 +10521,7 @@ async function createFeedPost(){
   if(_feedVideoData){
     toast('Uploading video...','info');
     try{
-      const up = await uploadImageWithFallback(_feedVideoData,'video/mp4',{allowDataFallback:true});
+      const up = await uploadImageWithFallback(_feedVideoData,'video/mp4',{allowDataFallback:true,timeoutMs:1800});
       if(up&&up.url){videoUrl=up.url;}
       else{toast('⚠️ Video upload failed, posting without video','err');}
     }catch(e){
