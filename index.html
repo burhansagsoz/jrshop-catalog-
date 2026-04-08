@@ -1599,6 +1599,7 @@ body.dark .modal-foot{background:#263548;}
               <button class="btn btn-primary" onclick="saveFirebaseSettings()">💾 Save Firebase</button>
               <button class="btn btn-blue" onclick="connectFirebaseNow()">🔌 Connect Now</button>
               <button class="btn btn-ghost" onclick="migrateAllToFirebase()">⬆️ Migrate Current Data</button>
+              <button class="btn btn-ghost" onclick="migrateOrderMediaRefsNow()">🧩 Migrate Order Media Refs</button>
             </div>
             <div id="firebase-health-panel" style="margin-top:10px;"></div>
           </div>
@@ -8570,6 +8571,58 @@ async function migrateAllToFirebase(){
   }catch(e){
     toast('❌ Firebase migration failed: '+e.message,'err');
   }
+}
+
+async function migrateOrderMediaRefsNow(){
+  const current=Array.isArray(orders)?orders:[];
+  if(!current.length){
+    toast('ℹ️ No orders to migrate','info');
+    return;
+  }
+  let inlineBefore=0;
+  current.forEach(function(o){
+    (o&&o.products||[]).forEach(function(p){
+      if(isInlineDataUrl(p&&p.img)) inlineBefore++;
+      if(isInlineDataUrl(p&&p.depotPhoto)) inlineBefore++;
+    });
+  });
+  if(!inlineBefore){
+    const queuedOnly=readMediaPromoteQueue().length;
+    if(queuedOnly>0){
+      flushMediaPromotionQueue().catch(()=>{});
+      toast(`ℹ️ No inline media left. Promotion queue: ${queuedOnly}`,'info');
+    }else{
+      toast('✅ Orders already use media refs','ok');
+    }
+    return;
+  }
+  if(!confirm(`Migrate inline order media to local refs now?\nInline media found: ${inlineBefore}\nThis improves stability and background sync.`)) return;
+  let converted=0;
+  const changedIds=[];
+  const migrated=current.map(function(o){
+    let changed=false;
+    const nextProducts=(o&&o.products||[]).map(function(p){
+      const item=p&&typeof p==='object'?p:{};
+      const nextImg=normalizeOrderMediaRef(item.img,'image/jpeg')||null;
+      const nextDepot=normalizeOrderMediaRef(item.depotPhoto,'image/jpeg')||null;
+      if(nextImg!==item.img){changed=true;converted++;}
+      if(nextDepot!==item.depotPhoto){changed=true;converted++;}
+      return {...item,img:nextImg,depotPhoto:nextDepot};
+    });
+    if(changed){
+      changedIds.push(o.id);
+      return {...o,products:nextProducts,updatedAt:Date.now()};
+    }
+    return o;
+  });
+  persistOrdersState(migrated);
+  if(changedIds.length){
+    await saveOrders(changedIds);
+  }
+  const queued=readMediaPromoteQueue().length;
+  flushMediaPromotionQueue().catch(()=>{});
+  logActivity('edited',`Order media migrated: ${converted} refs across ${changedIds.length} orders`,'');
+  toast(`✅ Media migrated: ${converted} refs (${changedIds.length} orders) · queue:${queued}`,'ok');
 }
 
 async function connectFirebaseNow(){
