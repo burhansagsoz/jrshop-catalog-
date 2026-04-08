@@ -3016,6 +3016,7 @@ function clearAcknowledgedAlerts(){
 // ── RENDER TABLE ──
 function filtered(){
   return orders.filter(o=>{
+    if(fStatus==='pending') return !!o.pendingApproval;
     if(fStatus==='Ready') return o.status==='At Depot'&&getShelfStatus(o).ready;
     if(fStatus==='Sent to Factory' && o.status!=='Sent to Factory' && o.status!=='Sent to Wechat') return false;
     if(fStatus!=='all' && fStatus!=='Sent to Factory' && o.status!==fStatus) return false;
@@ -3033,6 +3034,14 @@ function filtered(){
   });
 }
 function render(){
+  if(fStatus==='pending'){
+    const pendingCount=orders.filter(o=>o&&o.pendingApproval).length;
+    const badge=document.getElementById('pg-badge');
+    if(badge) badge.textContent=pendingCount+' pending';
+    updateBadges();
+    renderPendingInTable();
+    return;
+  }
   const list=filtered();
   const badge=document.getElementById('pg-badge');if(badge)badge.textContent=list.length+' order'+(list.length!==1?'s':'');
   updateBadges();

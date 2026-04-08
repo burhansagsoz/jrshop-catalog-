@@ -36,6 +36,12 @@
 (async function(){
   const stateEl=document.getElementById('state');
   const listEl=document.getElementById('list');
+  const LOADING_TEXT='Loading catalog...';
+  const loadingGuard=setTimeout(function(){
+    if(stateEl&&stateEl.style.display!=='none'&&stateEl.textContent===LOADING_TEXT){
+      stateEl.textContent='Catalog loading is taking longer than expected. Please refresh.';
+    }
+  },12000);
   const FIREBASE_CONFIG_DEFAULT={
     apiKey:"AIzaSyBidcdMLlFsEp6c6P_tqwMMtP9w3wLKtFE",
     authDomain:"jrshop-d732e.firebaseapp.com",
@@ -76,6 +82,15 @@
     const data=payload&&payload.data?payload.data:{};
     return Array.isArray(data.jb_catalog)?data.jb_catalog:[];
   }
+  function loadCatalogFromLocal(){
+    try{
+      const raw=localStorage.getItem('jb_catalog');
+      const list=raw?JSON.parse(raw):[];
+      return Array.isArray(list)?list:[];
+    }catch(_e){
+      return [];
+    }
+  }
   async function loadCatalogFromFirestore(){
     await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js');
     await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js');
@@ -110,15 +125,32 @@
     }).join('');
   }
   try{
+    const localProducts=loadCatalogFromLocal();
+    const hasLocal=Array.isArray(localProducts)&&localProducts.length>0;
+    if(hasLocal){
+      renderCatalog(localProducts);
+    }
     let products=[];
     try{
       products=await loadCatalogFromApi();
     }catch(_apiErr){
       products=await loadCatalogFromFirestore();
     }
-    renderCatalog(products);
+    if(Array.isArray(products)&&products.length){
+      renderCatalog(products);
+      try{localStorage.setItem('jb_catalog',JSON.stringify(products));}catch(_e){}
+    }else if(!hasLocal){
+      renderCatalog([]);
+    }
   }catch(_err){
-    stateEl.textContent='Catalog could not be loaded. Please try again.';
+    const localProducts=loadCatalogFromLocal();
+    if(Array.isArray(localProducts)&&localProducts.length){
+      renderCatalog(localProducts);
+    }else{
+      stateEl.textContent='Catalog could not be loaded. Please try again.';
+    }
+  }finally{
+    clearTimeout(loadingGuard);
   }
 })();
 </script>
