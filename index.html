@@ -9165,10 +9165,10 @@ let _resMsgPollInterval = null;
 let _lastResUnreadCount = 0;
 
 function startResellerMessagePoll(){
-  if(getFirebaseEnabled()) return;
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
-  // Check unread messages every 5 seconds
-  _resMsgPollInterval = setInterval(checkResellerUnreadMessages, 5000);
+  // Keep unread badge updated even when Firebase mode is enabled.
+  const pollMs=getFirebaseEnabled()?7000:5000;
+  _resMsgPollInterval = setInterval(checkResellerUnreadMessages, pollMs);
   checkResellerUnreadMessages(); // Initial check
 }
 
@@ -10690,8 +10690,8 @@ async function sendChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,600,0.7);
-      const uploaded=await uploadImageWithFallback(compressed,'image/jpeg');
+      const compressed=await compressImage(e.target.result,480,0.6);
+      const uploaded=await uploadImageWithFallback(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1800});
       const imgUrl=uploaded&&uploaded.url?uploaded.url:compressed;
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+imgUrl,ts:Date.now()};
       const chatKey='jb_chat_'+_chatReseller;
@@ -10957,8 +10957,8 @@ async function sendResChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,600,0.7);
-      const imgUrl=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true});
+      const compressed=await compressImage(e.target.result,480,0.6);
+      const imgUrl=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1800});
       if(!imgUrl) throw new Error('Image upload unavailable');
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
       const chatKey='jb_chat_'+me.id;
@@ -11808,14 +11808,14 @@ async function saveOrders(changedOrderIds){
   orders.forEach(o=>{ if(!o.updatedAt) o.updatedAt = o.ts || Date.now(); });
   const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):null;
   const targetOrders=(changedSet?orders.filter(o=>changedSet.has(o.id)):orders);
+  const uploadTimeoutMs=Math.max(1200,Math.floor(UPLOAD_TIMEOUT_MS*0.5));
   // Base64 görselleri sadece değişen siparişlerde upload et
-  const _api=getApiBase();
   for(const o of targetOrders){
     for(const p of (o.products||[])){
       if(p.img && p.img.startsWith('data:')){
         try{
-          const _r=await fetch(_api+'/api/image',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({data:p.img,type:'image/jpeg'})});
-          if(_r.ok){const _d=await _r.json();if(_d.url||_d.id)p.img=_d.url||(_api+'/api/image/'+_d.id);}
+          const uploaded=await uploadImageSmart(p.img,'image/jpeg',{allowDataFallback:true,timeoutMs:uploadTimeoutMs});
+          if(uploaded) p.img=uploaded;
         }catch(e){}
       }
     }
