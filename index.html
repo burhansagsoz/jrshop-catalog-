@@ -5560,7 +5560,10 @@ async function shareCatalog(){
     const api=getApiBase();
     
     // Upload images to cloud first (convert base64 to URLs)
-    toast('📤 Uploading images...','info');
+    const hasInlineCatalogImages=(catalog||[]).some(function(item){
+      return !!(item&&item.img&&String(item.img).startsWith('data:'));
+    });
+    toast(hasInlineCatalogImages?'📤 Uploading images...':'📦 Preparing catalog...','info');
     const cleanProducts = [];
     
     for(const p of catalog){

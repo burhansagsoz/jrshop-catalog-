@@ -120,7 +120,7 @@
       const priceRaw=String(p&&p.price||'').replace(/[^0-9.]/g,'');
       const price=priceRaw?('£'+Number(priceRaw).toFixed(2)):'-';
       return '<div class="card">'
-        +(img?('<img class="img" src="'+img+'" loading="lazy" onerror="this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\';"><div class="ph" style="display:none;">🛍️</div>'):('<div class="ph">🛍️</div>'))
+        +(img?("<img class=\"img\" src=\""+img+"\" loading=\"lazy\" onerror=\"this.style.display='none';this.nextElementSibling.style.display='flex';\"><div class=\"ph\" style=\"display:none;\">🛍️</div>"):('<div class="ph">🛍️</div>'))
         +'<div class="body"><div class="nm">'+name.replace(/[<>&]/g,'')+'</div><div class="ds">'+desc.replace(/[<>&]/g,'')+'</div><div class="pr">'+price+'</div></div></div>';
     }).join('');
   }
