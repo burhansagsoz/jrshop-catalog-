@@ -2588,8 +2588,8 @@ async function login(){
           }
         });
         // Critical: never overwrite local changes on login with stale cloud snapshot.
-        const cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
-        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+        const cloudOrders=scopeOrdersForCurrentUser(Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[]);
+        const localOrders=scopeOrdersForCurrentUser(JSON.parse(localStorage.getItem('jb_orders')||'[]'));
         if(cloudOrders.length){
           orders=mergeOrdersByFreshness(localOrders,cloudOrders).map(function(o){
             return {
@@ -2598,7 +2598,7 @@ async function login(){
             };
           });
         }else{
-          orders=Array.isArray(localOrders)?localOrders:[];
+          orders=localOrders;
         }
         persistOrdersState(orders);
         flushLocalSyncFallback().catch(function(){});
@@ -7084,13 +7084,13 @@ async function loadFromCloudSilent(){
     const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
     const ordPayload=await ordRes.json();
-    const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
+    const cloudOrders=scopeOrdersForCurrentUser(Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[]);
     // Guard: never treat fallback/no-data response as authoritative overwrite.
     if((ordPayload&&ordPayload.localOnly)||!cloudOrders.length){
       return false;
     }
 
-    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    const localOrders=scopeOrdersForCurrentUser(JSON.parse(localStorage.getItem('jb_orders')||'[]'));
     let changed=false;
 
     for(const co of cloudOrders){
@@ -7119,7 +7119,7 @@ async function loadFromCloudSilent(){
     }
 
     if(changed){
-      orders=localOrders;
+      orders=scopeOrdersForCurrentUser(localOrders);
       persistOrdersState(orders);
       render();
     }
@@ -7167,18 +7167,18 @@ async function loadFromCloud(){
         if(ordRes.ok){
           const od=await ordRes.json();
           const isLocalOnly=!!(od&&od.localOnly);
-          cloudOrders=Array.isArray(od&&od.orders)?od.orders:[];
+          cloudOrders=scopeOrdersForCurrentUser(Array.isArray(od&&od.orders)?od.orders:[]);
           if(isLocalOnly||!cloudOrders.length){
             // Never wipe local orders on local-only/no-data responses.
             console.warn('[Remote] Skipping merge from localOnly/empty orders payload');
             return false;
           }
         } else {
-          cloudOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          cloudOrders=scopeOrdersForCurrentUser(Array.isArray(data&&data.jb_orders)?data.jb_orders:[]);
           if(!cloudOrders.length) return false;
         }
         // Smart merge: timestamp bazlı - hangisi daha yeniyse o kazanır
-        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+        const localOrders=scopeOrdersForCurrentUser(JSON.parse(localStorage.getItem('jb_orders')||'[]'));
         orders=cloudOrders.map(co=>{
           const lo=localOrders.find(x=>x.id===co.id);
           if(!lo){
@@ -7205,7 +7205,7 @@ async function loadFromCloud(){
         });
         // Keep local-only orders (not yet synced to cloud)
         // Preserve ALL local orders not in cloud - they may not have been synced yet
-        const localOnly=localOrders.filter(lo=>!orders.find(o=>o.id===lo.id));
+        const localOnly=scopeOrdersForCurrentUser(localOrders).filter(lo=>!orders.find(o=>o.id===lo.id));
         orders=[...orders,...localOnly];
         persistOrdersState(orders);
         // Reload variables from localStorage
@@ -7782,16 +7782,12 @@ async function resolveRoleFromClaims(){
 async function resolveRoleFromFirestore(email){
   try{
     if(!_firebaseDb) return null;
-    const keys=[];
-    if(email) keys.push(String(email).toLowerCase());
     const uid=_firebaseAuth&&_firebaseAuth.currentUser&&_firebaseAuth.currentUser.uid;
-    if(uid) keys.push(String(uid));
-    for(const key of keys){
-      const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(key).get();
-      if(doc.exists){
-        const d=doc.data()||{};
-        if(d.role) return String(d.role);
-      }
+    if(!uid) return null;
+    const doc=await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(String(uid)).get();
+    if(doc.exists){
+      const d=doc.data()||{};
+      if(d.role) return String(d.role);
     }
     return null;
   }catch(_e){
@@ -7841,6 +7837,36 @@ async function applyFirebaseRoleMapping(userObj,email){
   return userObj.role||'';
 }
 
+function getCurrentAppUserId(){
+  const direct=me&&me.id?String(me.id):'';
+  if(direct) return direct;
+  try{
+    const payload=JSON.parse(localStorage.getItem('jb_firebase_role')||'{}');
+    if(payload&&payload.appUserId) return String(payload.appUserId);
+  }catch(_e){}
+  return '';
+}
+function isCurrentUserReseller(){
+  return String(me&&me.role||'').toLowerCase()==='reseller';
+}
+function scopeOrdersForCurrentUser(list){
+  const arr=Array.isArray(list)?list:[];
+  if(!isCurrentUserReseller()) return arr;
+  const resellerId=getCurrentAppUserId();
+  if(!resellerId) return [];
+  return arr.filter(function(o){
+    return String(o&&o.resellerId||'')===resellerId;
+  });
+}
+function getFirebaseOrdersRefForCurrentUser(){
+  const col=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS);
+  if(isCurrentUserReseller()){
+    const resellerId=getCurrentAppUserId();
+    if(resellerId) return col.where('resellerId','==',resellerId);
+  }
+  return col;
+}
+
 function normalizeAppRole(role){
   const r=String(role||'').toLowerCase();
   if(r==='admin') return 'Admin';
@@ -7886,10 +7912,13 @@ async function upsertFirebaseRoleForUser(appUser){
     displayName:appUser.dname||appUser.email||'',
     updatedAt:now
   };
-  if(emailKey){
-    await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(emailKey).set(payload,{merge:true});
-  }
   await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(payload.uid).set(payload,{merge:true});
+  if(emailKey){
+    // Optional legacy mirror; ignore if security rules only allow uid-keyed roles.
+    try{
+      await _firebaseDb.collection(FIREBASE_COLLECTION_USER_ROLES).doc(emailKey).set(payload,{merge:true});
+    }catch(_e){}
+  }
   localStorage.setItem('jb_firebase_role',JSON.stringify(payload));
   _health.authState='role:'+payload.role;
   markSync('role_sync');
@@ -8152,10 +8181,14 @@ async function initFirebaseRealtime(opts={}){
         return false;
       }
       if(_firebaseUnsubOrders){try{_firebaseUnsubOrders();}catch(e){}}
-      _firebaseUnsubOrders=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).onSnapshot(snap=>{
-        const incoming=snap.docs.map(firebaseDocToOrder);
-        const merged=mergeOrdersByFreshness(orders,incoming);
-        orders=merged;
+      _firebaseUnsubOrders=getFirebaseOrdersRefForCurrentUser().onSnapshot(snap=>{
+        const incoming=scopeOrdersForCurrentUser(snap.docs.map(firebaseDocToOrder));
+        if(isCurrentUserReseller()){
+          const localMine=scopeOrdersForCurrentUser(orders);
+          orders=mergeOrdersByFreshness(localMine,incoming);
+        }else{
+          orders=mergeOrdersByFreshness(orders,incoming);
+        }
         persistOrdersState(orders);
         _health.ordersRealtime=true;
         markSync('orders_snapshot');
@@ -8242,8 +8275,8 @@ async function writeFirebaseDataMap(map){
   }
 }
 async function readFirebaseOrders(){
-  const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).get();
-  const list=snap.docs.map(firebaseDocToOrder);
+  const snap=await getFirebaseOrdersRefForCurrentUser().get();
+  const list=scopeOrdersForCurrentUser(snap.docs.map(firebaseDocToOrder));
   return list.sort((a,b)=>(b.ts||0)-(a.ts||0));
 }
 async function saveMediaToFirebase(data,type,forcedId){
@@ -8436,14 +8469,16 @@ async function handleFirebaseApiRequest(url,method,body){
 
   if(path==='/api/data'&&m==='GET'){
     const localData=readLocalDataMap();
+    localData.jb_orders=scopeOrdersForCurrentUser(readLocalOrders());
     if(firebaseOnline){
       try{
         const remoteData=await readFirebaseDataMap();
         const merged={...localData,...remoteData};
         const remoteOrders=await readFirebaseOrders();
         if(Array.isArray(remoteOrders)){
-          merged.jb_orders=remoteOrders;
-          writeLocalJson('jb_orders',remoteOrders);
+          const scopedRemote=scopeOrdersForCurrentUser(remoteOrders);
+          merged.jb_orders=scopedRemote;
+          writeLocalJson('jb_orders',scopedRemote);
         }
         return jsonApiResponse({data:merged});
       }catch(err){
@@ -8498,7 +8533,7 @@ async function handleFirebaseApiRequest(url,method,body){
         markError(err);
       }
     }
-    return jsonApiResponse({orders:readLocalOrders(),localOnly:true});
+    return jsonApiResponse({orders:scopeOrdersForCurrentUser(readLocalOrders()),localOnly:true});
   }
   if(path==='/api/order'&&m==='POST'){
     const order=req&&req.order;
@@ -8676,7 +8711,7 @@ async function pushOrdersToFirebase(changedOrders){
     const connected=await initFirebaseRealtime({silent:true});
     if(!connected) return;
   }
-  const list=(changedOrders||[]).filter(o=>o&&o.id);
+  const list=scopeOrdersForCurrentUser((changedOrders||[]).filter(o=>o&&o.id));
   if(!list.length) return;
   const col=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS);
   const chunks=[];

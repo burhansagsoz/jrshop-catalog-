@@ -14,13 +14,16 @@ service firebase.storage {
       ) : null;
     }
     function isAdminOrStaff() {
-      return signedIn() && (role() == 'Admin' || role() == 'Staff' || role() == 'Reseller');
+      return signedIn() && (role() == 'Admin' || role() == 'Staff');
+    }
+    function isReseller() {
+      return signedIn() && role() == 'Reseller';
     }
 
     // Feed and app media files.
     match /media/{allPaths=**} {
       allow read: if signedIn();
-      allow write: if isAdminOrStaff();
+      allow write: if isAdminOrStaff() || isReseller();
     }
   }
 }
