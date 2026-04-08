@@ -2352,6 +2352,85 @@ function trackOrderMutation(kind,orderId,beforeOrder,afterOrder){
     }).catch(()=>{});
   }catch(_e){}
 }
+const ORDER_MUTATION_TRACK_TOP_LEVEL=['status','ukTracking','cnTracking','note','name','phone','address','city','postcode','country','state','email','fblink','supplierId','resellerId','pendingApproval','rejected','rejectNote','approvedAt','approvedBy'];
+const ORDER_MUTATION_TRACK_PRODUCT=['name','qty','price','variant','cnTracking','arrived','img','depotPhoto','nameCn','weight','value'];
+function readOrderFieldMutationMap(){
+  try{
+    const raw=localStorage.getItem(LOCAL_MUTATION_TS_KEY);
+    const map=raw?JSON.parse(raw):{};
+    return map&&typeof map==='object'?map:{};
+  }catch(_e){
+    return {};
+  }
+}
+function writeOrderFieldMutationMap(map){
+  try{
+    localStorage.setItem(LOCAL_MUTATION_TS_KEY,JSON.stringify(map&&typeof map==='object'?map:{}));
+  }catch(_e){}
+}
+function pruneOrderFieldMutationMap(map){
+  const m=map&&typeof map==='object'?map:{};
+  const ids=Object.keys(m);
+  const maxEntries=1500;
+  if(ids.length<=maxEntries) return m;
+  ids.sort((a,b)=>Number(m[a]&&m[a].__ts||0)-Number(m[b]&&m[b].__ts||0));
+  ids.slice(0,ids.length-maxEntries).forEach(function(id){delete m[id];});
+  return m;
+}
+function clearOrderFieldMutations(orderId){
+  const id=String(orderId||'').trim();
+  if(!id) return;
+  const map=readOrderFieldMutationMap();
+  if(!Object.prototype.hasOwnProperty.call(map,id)) return;
+  delete map[id];
+  writeOrderFieldMutationMap(map);
+}
+function markOrderFieldMutations(orderId,fieldPaths,ts){
+  const id=String(orderId||'').trim();
+  if(!id) return;
+  const stamp=Number(ts)||Date.now();
+  const paths=Array.isArray(fieldPaths)&&fieldPaths.length?fieldPaths:['*'];
+  const map=readOrderFieldMutationMap();
+  const rec=(map[id]&&typeof map[id]==='object')?map[id]:{};
+  paths.forEach(function(path){
+    rec[String(path||'*')]=stamp;
+  });
+  rec.__ts=stamp;
+  map[id]=rec;
+  writeOrderFieldMutationMap(pruneOrderFieldMutationMap(map));
+}
+function getOrderFieldMutationTs(mutationMap,orderId,fieldPath){
+  const id=String(orderId||'').trim();
+  if(!id) return 0;
+  const map=mutationMap&&typeof mutationMap==='object'?mutationMap:{};
+  const rec=map[id]&&typeof map[id]==='object'?map[id]:{};
+  return Math.max(
+    Number(rec[String(fieldPath||'')]||0),
+    Number(rec['*']||0),
+    Number(rec.__ts||0)
+  );
+}
+function collectChangedOrderFieldPaths(prevOrder,nextOrder){
+  const before=prevOrder&&typeof prevOrder==='object'?prevOrder:{};
+  const after=nextOrder&&typeof nextOrder==='object'?nextOrder:{};
+  if(!prevOrder) return ['*'];
+  const out=[];
+  ORDER_MUTATION_TRACK_TOP_LEVEL.forEach(function(k){
+    if(before[k]!==after[k]) out.push(k);
+  });
+  const prevProducts=Array.isArray(before.products)?before.products:[];
+  const nextProducts=Array.isArray(after.products)?after.products:[];
+  if(prevProducts.length!==nextProducts.length) out.push('products.length');
+  const max=Math.max(prevProducts.length,nextProducts.length);
+  for(let i=0;i<max;i++){
+    const bp=prevProducts[i]&&typeof prevProducts[i]==='object'?prevProducts[i]:{};
+    const np=nextProducts[i]&&typeof nextProducts[i]==='object'?nextProducts[i]:{};
+    ORDER_MUTATION_TRACK_PRODUCT.forEach(function(k){
+      if(bp[k]!==np[k]) out.push(`products.${i}.${k}`);
+    });
+  }
+  return out.length?[...new Set(out)]:['*'];
+}
 async function undoLastOrderMutation(){
   const log=readOrderMutationLog();
   if(!log.length){
@@ -7091,35 +7170,10 @@ async function loadFromCloudSilent(){
     }
 
     const localOrders=scopeOrdersForCurrentUser(JSON.parse(localStorage.getItem('jb_orders')||'[]'));
-    let changed=false;
-
-    for(const co of cloudOrders){
-      const lo=localOrders.find(x=>x.id===co.id);
-      if(!lo){
-        // Yeni sipariş (başka cihazdan eklenmiş) - ekle
-        localOrders.push(co);
-        changed=true;
-      } else {
-        const cloudTime=co.updatedAt||co.ts||0;
-        const localTime=lo.updatedAt||lo.ts||0;
-        if(cloudTime > localTime){
-          // Cloud daha yeni - güncelle (başka cihazdan değiştirilmiş)
-          const idx2=localOrders.indexOf(lo);
-          localOrders[idx2]={
-            ...co,
-            products:(co.products||[]).map(p=>{
-              const lp=lo.products?.find(x=>x.name===p.name);
-              return {...p, img:p.img||(lp?.img||null), depotPhoto:p.depotPhoto||(lp?.depotPhoto||null)};
-            })
-          };
-          changed=true;
-        }
-        // Local daha yeni veya eşit → dokunma (kullanıcı az önce değiştirdi)
-      }
-    }
-
+    const merged=mergeOrdersByFreshness(localOrders,cloudOrders);
+    const changed=orderCompareSnapshotList(localOrders)!==orderCompareSnapshotList(merged);
     if(changed){
-      orders=scopeOrdersForCurrentUser(localOrders);
+      orders=scopeOrdersForCurrentUser(merged);
       persistOrdersState(orders);
       render();
     }
@@ -7177,32 +7231,9 @@ async function loadFromCloud(){
           cloudOrders=scopeOrdersForCurrentUser(Array.isArray(data&&data.jb_orders)?data.jb_orders:[]);
           if(!cloudOrders.length) return false;
         }
-        // Smart merge: timestamp bazlı - hangisi daha yeniyse o kazanır
+        // Field-level smart merge to reduce cross-device conflict loss.
         const localOrders=scopeOrdersForCurrentUser(JSON.parse(localStorage.getItem('jb_orders')||'[]'));
-        orders=cloudOrders.map(co=>{
-          const lo=localOrders.find(x=>x.id===co.id);
-          if(!lo){
-            // Local'de yok - cloud'dan al, status düzelt
-            return {...co, status:co.status==='At Depott'?'At Depot':co.status==='Sent to Wechat'||co.status==='Sent to WeChat'?'Sent to Factory':co.status};
-          }
-          const localTime=lo.updatedAt||lo.ts||0;
-          const cloudTime=co.updatedAt||co.ts||0;
-          // Hangisi daha yeniyse onu al
-          const winner = localTime >= cloudTime ? lo : co;
-          const loser  = localTime >= cloudTime ? co : lo;
-          return {
-            ...winner,
-            status:winner.status==='At Depott'?'At Depot':winner.status==='Sent to Wechat'||winner.status==='Sent to WeChat'?'Sent to Factory':winner.status,
-            products:(winner.products||[]).map(p=>{
-              const lp=lo.products?.find(x=>x.name===p.name);
-              const cp=co.products?.find(x=>x.name===p.name);
-              return {...p,
-                img:p.img||(lp?.img||cp?.img||null),
-                depotPhoto:p.depotPhoto||(lp?.depotPhoto||cp?.depotPhoto||null)
-              };
-            })
-          };
-        });
+        orders=mergeOrdersByFreshness(localOrders,cloudOrders);
         // Keep local-only orders (not yet synced to cloud)
         // Preserve ALL local orders not in cloud - they may not have been synced yet
         const localOnly=scopeOrdersForCurrentUser(localOrders).filter(lo=>!orders.find(o=>o.id===lo.id));
@@ -8052,7 +8083,63 @@ function sanitizeOrderForRemote(order){
   return clean;
 }
 
+function pickPreferredValue(localValue,remoteValue,localTs,remoteTs,fieldMutationTs){
+  const lts=Number(localTs)||0;
+  const rts=Number(remoteTs)||0;
+  const mts=Number(fieldMutationTs)||0;
+  if(mts && mts>=rts && localValue!==undefined){
+    return localValue;
+  }
+  if(rts>lts){
+    return remoteValue!==undefined?remoteValue:localValue;
+  }
+  if(lts>rts){
+    return localValue!==undefined?localValue:remoteValue;
+  }
+  return localValue!==undefined?localValue:remoteValue;
+}
+function mergeOrderProductsByField(localOrder,remoteOrder,mutationMap,localTs,remoteTs){
+  const localProducts=Array.isArray(localOrder&&localOrder.products)?localOrder.products:[];
+  const remoteProducts=Array.isArray(remoteOrder&&remoteOrder.products)?remoteOrder.products:[];
+  const maxLen=Math.max(localProducts.length,remoteProducts.length);
+  const merged=[];
+  for(let i=0;i<maxLen;i++){
+    const lp=localProducts[i];
+    const rp=remoteProducts[i];
+    if(lp===undefined && rp===undefined) continue;
+    if(lp===undefined){merged.push({...rp});continue;}
+    if(rp===undefined){merged.push({...lp});continue;}
+    const fields=new Set([...Object.keys(lp||{}),...Object.keys(rp||{}),...ORDER_MUTATION_TRACK_PRODUCT]);
+    const out={};
+    fields.forEach(function(field){
+      const path='products.'+i+'.'+field;
+      const mts=getOrderFieldMutationTs(mutationMap,localOrder&&localOrder.id,path);
+      out[field]=pickPreferredValue(lp&&lp[field],rp&&rp[field],localTs,remoteTs,mts);
+    });
+    merged.push(out);
+  }
+  return merged;
+}
+function mergeSingleOrderConflict(localOrder,remoteOrder,mutationMap){
+  const lo=localOrder&&typeof localOrder==='object'?{...localOrder}:{};
+  const ro=remoteOrder&&typeof remoteOrder==='object'?{...remoteOrder}:{};
+  const localTs=Number(lo.updatedAt||lo.ts||0)||0;
+  const remoteTs=Number(ro.updatedAt||ro.ts||0)||0;
+  const merged={};
+  const fields=new Set([...Object.keys(lo),...Object.keys(ro),...ORDER_MUTATION_TRACK_TOP_LEVEL]);
+  fields.forEach(function(field){
+    if(field==='products') return;
+    const mts=getOrderFieldMutationTs(mutationMap,lo.id||ro.id,field);
+    merged[field]=pickPreferredValue(lo[field],ro[field],localTs,remoteTs,mts);
+  });
+  merged.id=String(lo.id||ro.id||'');
+  merged.status=normalizeStatus(merged.status||lo.status||ro.status);
+  merged.products=mergeOrderProductsByField(lo,ro,mutationMap,localTs,remoteTs);
+  merged.updatedAt=Math.max(localTs,remoteTs,Number(merged.updatedAt||0)||0,Number(merged.ts||0)||0);
+  return merged;
+}
 function mergeOrdersByFreshness(localOrders,incomingOrders){
+  const mutationMap=readOrderFieldMutationMap();
   const byId=new Map((localOrders||[]).map(o=>[o.id,{...o,status:normalizeStatus(o.status)}]));
   for(const incoming of (incomingOrders||[])){
     if(!incoming||!incoming.id) continue;
@@ -8062,17 +8149,7 @@ function mergeOrdersByFreshness(localOrders,incomingOrders){
       byId.set(cleanIncoming.id,cleanIncoming);
       continue;
     }
-    const incomingTs=cleanIncoming.updatedAt||cleanIncoming.ts||0;
-    const localTs=local.updatedAt||local.ts||0;
-    if(incomingTs>=localTs){
-      byId.set(cleanIncoming.id,{
-        ...cleanIncoming,
-        products:(cleanIncoming.products||[]).map(p=>{
-          const lp=(local.products||[]).find(x=>x.name===p.name);
-          return {...p,img:p.img||(lp&&lp.img)||null,depotPhoto:p.depotPhoto||(lp&&lp.depotPhoto)||null};
-        })
-      });
-    }
+    byId.set(cleanIncoming.id,mergeSingleOrderConflict(local,cleanIncoming,mutationMap));
   }
   return [...byId.values()].sort((a,b)=>(b.ts||0)-(a.ts||0));
 }
@@ -12461,6 +12538,14 @@ function orderCompareSnapshot(order){
   delete clean.updatedAt;
   return JSON.stringify(clean);
 }
+function orderCompareSnapshotList(list){
+  const arr=(Array.isArray(list)?list:[]).slice().sort((a,b)=>{
+    const ai=String(a&&a.id||'');
+    const bi=String(b&&b.id||'');
+    return ai.localeCompare(bi);
+  });
+  return JSON.stringify(arr.map(orderCompareSnapshot));
+}
 async function saveOrders(changedOrderIds){
   const incomingIds=Array.isArray(changedOrderIds)?changedOrderIds.filter(Boolean):[];
   if(_saveOrdersBusy){
@@ -12496,6 +12581,16 @@ async function saveOrders(changedOrderIds){
         changedSet.add(o.id);
       }
     }
+  }
+  const mutationStamp=Date.now();
+  for(const id of changedSet){
+    const before=prevById.get(id)||null;
+    const after=(orders||[]).find(o=>o&&o.id===id)||null;
+    const changedPaths=collectChangedOrderFieldPaths(before,after);
+    markOrderFieldMutations(id,changedPaths,mutationStamp);
+  }
+  for(const deletedId of deletedOrderIds){
+    clearOrderFieldMutations(deletedId);
   }
   // Ensure changed orders always get a fresh updatedAt, otherwise silent cloud merges can roll them back.
   for(const o of (orders||[])){
