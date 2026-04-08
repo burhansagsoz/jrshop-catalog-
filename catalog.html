@@ -36,12 +36,62 @@
 (async function(){
   const stateEl=document.getElementById('state');
   const listEl=document.getElementById('list');
-  try{
-    const r=await fetch('/api/data');
+  const FIREBASE_CONFIG_DEFAULT={
+    apiKey:"AIzaSyBidcdMLlFsEp6c6P_tqwMMtP9w3wLKtFE",
+    authDomain:"jrshop-d732e.firebaseapp.com",
+    projectId:"jrshop-d732e",
+    storageBucket:"jrshop-d732e.firebasestorage.app",
+    messagingSenderId:"391477157629",
+    appId:"1:391477157629:web:ec7a9ffb307deca6296894",
+    measurementId:"G-B1RG9Z0D79"
+  };
+  function fetchWithTimeout(url, ms){
+    const timeoutMs=Math.max(1000, Number(ms)||4500);
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(), timeoutMs);
+    return fetch(url,{signal:controller.signal}).finally(()=>clearTimeout(timer));
+  }
+  function loadScript(src){
+    return new Promise((resolve,reject)=>{
+      const existing=document.querySelector('script[data-src="'+src+'"]');
+      if(existing){
+        if(existing.getAttribute('data-loaded')==='1') return resolve();
+        existing.addEventListener('load',()=>resolve(),{once:true});
+        existing.addEventListener('error',()=>reject(new Error('script load error')),{once:true});
+        return;
+      }
+      const s=document.createElement('script');
+      s.src=src;
+      s.async=true;
+      s.setAttribute('data-src',src);
+      s.addEventListener('load',()=>{s.setAttribute('data-loaded','1');resolve();},{once:true});
+      s.addEventListener('error',()=>reject(new Error('script load error')),{once:true});
+      document.head.appendChild(s);
+    });
+  }
+  async function loadCatalogFromApi(){
+    const r=await fetchWithTimeout('/api/data', 4500);
     if(!r.ok) throw new Error('HTTP '+r.status);
     const payload=await r.json();
     const data=payload&&payload.data?payload.data:{};
-    const products=Array.isArray(data.jb_catalog)?data.jb_catalog:[];
+    return Array.isArray(data.jb_catalog)?data.jb_catalog:[];
+  }
+  async function loadCatalogFromFirestore(){
+    await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js');
+    await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js');
+    await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js');
+    if(!window.firebase||!window.firebase.firestore||!window.firebase.auth) throw new Error('Firebase unavailable');
+    const app=(window.firebase.apps&&window.firebase.apps.length)?window.firebase.app():window.firebase.initializeApp(FIREBASE_CONFIG_DEFAULT);
+    const auth=window.firebase.auth(app);
+    const db=window.firebase.firestore(app);
+    if(!auth.currentUser){
+      await auth.signInAnonymously();
+    }
+    const doc=await db.collection('app_data').doc('jb_catalog').get();
+    const value=doc.exists?(doc.data()||{}).value:[];
+    return Array.isArray(value)?value:[];
+  }
+  function renderCatalog(products){
     if(!products.length){
       stateEl.textContent='No products available yet.';
       return;
@@ -58,7 +108,16 @@
         +(img?('<img class="img" src="'+img+'" loading="lazy" onerror="this.style.display=\\'none\\';this.nextElementSibling.style.display=\\'flex\\';"><div class="ph" style="display:none;">🛍️</div>'):('<div class="ph">🛍️</div>'))
         +'<div class="body"><div class="nm">'+name.replace(/[<>&]/g,'')+'</div><div class="ds">'+desc.replace(/[<>&]/g,'')+'</div><div class="pr">'+price+'</div></div></div>';
     }).join('');
-  }catch(err){
+  }
+  try{
+    let products=[];
+    try{
+      products=await loadCatalogFromApi();
+    }catch(_apiErr){
+      products=await loadCatalogFromFirestore();
+    }
+    renderCatalog(products);
+  }catch(_err){
     stateEl.textContent='Catalog could not be loaded. Please try again.';
   }
 })();
