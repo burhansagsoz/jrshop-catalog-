@@ -572,12 +572,8 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
   }
 
   function buildOrderCode(){
-    const now=new Date();
-    const yy=String(now.getFullYear()).slice(2);
-    const mm=String(now.getMonth()+1).padStart(2,'0');
-    const dd=String(now.getDate()).padStart(2,'0');
-    const rnd=Math.random().toString(36).slice(2,6).toUpperCase();
-    return 'JR'+yy+mm+dd+'-'+rnd;
+    const rnd=Math.random().toString(36).slice(2,8).toUpperCase();
+    return 'JR-'+rnd;
   }
 
   async function copyAndSendToMessenger(){
@@ -652,6 +648,13 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
       const arr=JSON.parse(localStorage.getItem('catalog_orders')||'[]');
       arr.push(payload);
       localStorage.setItem('catalog_orders',JSON.stringify(arr));
+    }catch(_e){}
+    try{
+      await fetch('/api/catalog-order',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+      });
     }catch(_e){}
 
     if(messengerLink){
