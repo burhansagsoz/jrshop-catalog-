@@ -2344,6 +2344,12 @@ function trackOrderMutation(kind,orderId,beforeOrder,afterOrder){
     });
     if(log.length>ORDER_MUTATION_MAX) log.length=ORDER_MUTATION_MAX;
     writeOrderMutationLog(log);
+    writeAuditEvent('order_mutation',{
+      kind:kind||'update',
+      orderId:String(orderId),
+      beforeStatus:beforeOrder&&beforeOrder.status?String(beforeOrder.status):null,
+      afterStatus:afterOrder&&afterOrder.status?String(afterOrder.status):null
+    }).catch(()=>{});
   }catch(_e){}
 }
 async function undoLastOrderMutation(){
@@ -2388,6 +2394,11 @@ async function undoLastOrderMutation(){
   render();
   if(last.orderId) selectOrder(last.orderId);
   logActivity('edited',`Undo applied for ${esc(last.orderId)}`,last.orderId);
+  writeAuditEvent('order_undo',{
+    orderId:last.orderId||'',
+    kind:last.kind||'update',
+    actor:me&&me.email?me.email:'system'
+  }).catch(()=>{});
   toast('↩️ Last order change undone','ok');
 }
 function mergeArrayByTs(localArr,remoteArr){
@@ -2488,7 +2499,10 @@ async function login(){
   const pw=document.getElementById('l-pw').value;
   resetHealthCounters();
   cacheFirebaseLoginCreds(em,pw);
-  const u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
+  let u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
+  if(!u){
+    u=await loginWithFirebaseFallback(em,pw);
+  }
   if(!u){
     // Firebase-first login retry
     const loginBtn=document.querySelector('.login-btn');
@@ -2521,6 +2535,7 @@ async function login(){
         flushLocalSyncFallback().catch(()=>{});
       }
       await applyFirebaseRoleMapping(me,em);
+      upsertFirebaseRoleForUser(me).catch(()=>{});
     }catch(_e){}
   }
   // Remember me
@@ -2536,11 +2551,11 @@ async function login(){
   }
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').classList.add('on');
-  document.getElementById('sb-av').textContent=(u.dname||u.email)[0].toUpperCase();
-  document.getElementById('sb-em').textContent=u.email;
-  document.getElementById('sb-rl').textContent=u.role+(u.dname?' · '+u.dname:'');
+  document.getElementById('sb-av').textContent=(me.dname||me.email)[0].toUpperCase();
+  document.getElementById('sb-em').textContent=me.email;
+  document.getElementById('sb-rl').textContent=me.role+(me.dname?' · '+me.dname:'');
   // Update avatar with photo if exists
-  if(u.role==='Admin' || u.role==='Staff'){
+  if(me.role==='Admin' || me.role==='Staff'){
     updateAdminAvatar();
   }
   loadSettings();loadTemplates();loadNotifSettings();loadResFinance();updateBadges();renderNav();setTimeout(checkAutoBackup,5000);
@@ -6924,7 +6939,15 @@ function clearLocalSyncFallbackKey(key){
 async function flushLocalSyncFallback(){
   const map=readLocalSyncFallback();
   const entries=Object.entries(map||{});
-  if(!entries.length) return 0;
+  if(!entries.length){
+    try{
+      if(_health){
+        _health.fallbackQueue=0;
+        _health.pendingSyncKeys=[];
+      }
+    }catch(_e){}
+    return 0;
+  }
   let synced=0;
   for(const [key,entry] of entries){
     try{
@@ -6941,6 +6964,15 @@ async function flushLocalSyncFallback(){
       }
     }catch(_e){}
   }
+  try{
+    if(_health){
+      const remaining=readLocalSyncFallback();
+      _health.fallbackQueue=Object.keys(remaining||{}).length;
+      _health.pendingSyncKeys=Object.keys(remaining||{}).slice(0,8);
+      _health.lastFallbackFlushAt=Date.now();
+      _health.lastFallbackFlushCount=synced;
+    }
+  }catch(_e){}
   return synced;
 }
 function readLocalDataMap(){
@@ -7306,10 +7338,20 @@ const _health={
   lastError:'',
   authState:'signed_out',
   feedRealtime:false,
-  ordersRealtime:false
+  ordersRealtime:false,
+  mediaQueue:0,
+  fallbackQueue:0,
+  pendingSyncKeys:[],
+  lastMediaPromotionAt:0,
+  lastMediaPromotionCount:0,
+  lastFallbackFlushAt:0,
+  lastFallbackFlushCount:0
 };
 let _realtimeRenderTimer=null;
 let _lastOrdersSaveAuditAt=0;
+let _saveOrdersBusy=false;
+let _saveOrdersQueueFull=false;
+const _saveOrdersQueuedIds=new Set();
 const _nativeFetch=window.fetch.bind(window);
 
 function ensureFirebaseConfigDefaults(){
@@ -7349,12 +7391,62 @@ function markError(err){
   _health.apiErrors++;
   _health.lastError=msg;
 }
+function getFallbackQueueMeta(){
+  const map=readLocalSyncFallback();
+  const keys=Object.keys(map||{});
+  let oldestTs=0;
+  keys.forEach(function(k){
+    const ts=Number(map&&map[k]&&map[k].ts||0);
+    if(ts && (!oldestTs || ts<oldestTs)) oldestTs=ts;
+  });
+  return {count:keys.length,keys,oldestTs};
+}
+function refreshHealthDerivedStats(){
+  const fb=getFallbackQueueMeta();
+  _health.fallbackQueue=fb.count;
+  _health.pendingSyncKeys=fb.keys.slice(0,8);
+  _health.mediaQueue=readMediaPromoteQueue().length;
+  return fb;
+}
+function formatRelativeAge(ts){
+  if(!ts) return '-';
+  const s=Math.max(0,Math.floor((Date.now()-ts)/1000));
+  if(s<60) return s+'s';
+  const m=Math.floor(s/60);
+  if(m<60) return m+'m';
+  const h=Math.floor(m/60);
+  if(h<24) return h+'h';
+  return Math.floor(h/24)+'d';
+}
+async function retryPendingSyncNow(){
+  try{
+    await initFirebaseRealtime({silent:true,force:true});
+    const synced=await flushLocalSyncFallback();
+    const promoted=await flushMediaPromotionQueue();
+    refreshHealthDerivedStats();
+    renderHealthPanel();
+    toast(`♻️ Retry completed · sync:${synced} · media:${promoted}`,'ok');
+  }catch(e){
+    markError(e);
+    toast('Retry failed: '+(e&&e.message?e.message:String(e)),'err');
+  }
+}
+function isAdminFeedPageVisible(){
+  return !!document.getElementById('pg-feed')?.classList.contains('on');
+}
+function isResellerFeedPageVisible(){
+  return !!document.getElementById('res-pg-feed')?.classList.contains('active');
+}
 function renderHealthPanel(){
   const el=document.getElementById('firebase-health-panel');
   if(!el) return;
+  const fallbackMeta=refreshHealthDerivedStats();
   const fmtTs=_health.lastSyncAt?new Date(_health.lastSyncAt).toLocaleString('tr-TR'):'-';
   const lastAct=Array.isArray(activityLog)&&activityLog[0]?activityLog[0]:null;
   const lastActTxt=lastAct?`${lastAct.type||'activity'} · ${fmtDateTime(lastAct.ts)}`:'-';
+  const mediaTs=_health.lastMediaPromotionAt?new Date(_health.lastMediaPromotionAt).toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'}):'-';
+  const fallbackAge=formatRelativeAge(fallbackMeta.oldestTs);
+  const authHint=firebaseAuthStateHint(_health.authState);
   el.innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
@@ -7373,10 +7465,24 @@ function renderHealthPanel(){
         <div style="font-size:11px;color:var(--muted);">API</div>
         <div style="font-size:13px;font-weight:700;">${_health.apiCalls} calls / ${_health.apiErrors} errors</div>
       </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Pending Sync</div>
+        <div style="font-size:13px;font-weight:700;">${_health.fallbackQueue} key${_health.fallbackQueue===1?'':'s'} · oldest ${fallbackAge}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Media Queue</div>
+        <div style="font-size:13px;font-weight:700;">${_health.mediaQueue} pending · last ${_health.lastMediaPromotionCount} @ ${mediaTs}</div>
+      </div>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted);">Last sync: ${fmtTs} (${_health.lastSyncSource})</div>
     <div style="margin-top:4px;font-size:11px;color:var(--muted);">Last activity: ${esc(lastActTxt)}</div>
+    ${_health.pendingSyncKeys&&_health.pendingSyncKeys.length?`<div style="margin-top:4px;font-size:11px;color:var(--muted);">Pending keys: ${esc(_health.pendingSyncKeys.join(', '))}</div>`:''}
+    ${authHint?`<div style="margin-top:4px;font-size:11px;color:#fde68a;">Hint: ${esc(authHint)}</div>`:''}
     ${_health.lastError?`<div style="margin-top:6px;font-size:11px;color:#fca5a5;">Last error: ${esc(_health.lastError)}</div>`:''}
+    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-xs" onclick="retryPendingSyncNow()">♻️ Retry Pending Sync</button>
+      <button class="btn btn-blue btn-xs" onclick="connectFirebaseNow()">🔌 Reconnect</button>
+    </div>
   `;
 }
 setInterval(renderHealthPanel,5000);
@@ -7701,11 +7807,37 @@ function normalizeRoleName(role){
   return '';
 }
 
+function applyRoleToCurrentSession(role,email){
+  const normalized=normalizeRoleName(role);
+  if(!normalized) return;
+  const key=String(email||me&&me.email||'').trim().toLowerCase();
+  let changed=false;
+  users=(Array.isArray(users)?users:[]).map(function(u){
+    const isMatch=u&&u.email&&String(u.email).trim().toLowerCase()===key;
+    if(isMatch && u.role!==normalized){
+      changed=true;
+      return {...u,role:normalized};
+    }
+    return u;
+  });
+  if(changed){
+    try{localStorage.setItem('jb_users',JSON.stringify(users));}catch(_e){}
+  }
+  if(me && (!key || String(me.email||'').trim().toLowerCase()===key)){
+    me.role=normalized;
+    const sbRole=document.getElementById('sb-rl');
+    if(sbRole) sbRole.textContent=me.role+(me.dname?' · '+me.dname:'');
+  }
+}
+
 async function applyFirebaseRoleMapping(userObj,email){
   const roleFromClaims=await resolveRoleFromClaims();
   const roleFromDoc=await resolveRoleFromFirestore(email);
   const normalized=normalizeRoleName(roleFromClaims||roleFromDoc);
-  if(normalized) userObj.role=normalized;
+  if(normalized){
+    userObj.role=normalized;
+    applyRoleToCurrentSession(normalized,email||userObj&&userObj.email||'');
+  }
   return userObj.role||'';
 }
 
@@ -7773,6 +7905,40 @@ async function syncFirebaseIdentityForAppUser(appUser,password){
     return await upsertFirebaseRoleForUser(appUser);
   }catch(err){
     markError(err);
+    return null;
+  }
+}
+
+async function loginWithFirebaseFallback(email,password){
+  if(!getFirebaseEnabled()) return null;
+  try{
+    const ready=await initFirebaseRealtime({silent:true,force:true});
+    if(!ready) return null;
+    const fbUser=await firebaseSignInForSession(email,password);
+    if(!fbUser) return null;
+    const em=String(email||'').trim().toLowerCase();
+    const existing=(Array.isArray(users)?users:[]).find(function(u){
+      return u&&u.email&&String(u.email).trim().toLowerCase()===em;
+    });
+    const resolvedRole=normalizeRoleName((await resolveRoleFromClaims())||(await resolveRoleFromFirestore(em)))||(existing&&existing.role)||'Reseller';
+    if(existing){
+      applyRoleToCurrentSession(resolvedRole,em);
+      return users.find(u=>u&&u.email&&String(u.email).trim().toLowerCase()===em)||existing;
+    }
+    const dname=(em.split('@')[0]||'user').slice(0,24);
+    const created={
+      id:'u'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+      email:em,
+      password:String(password||''),
+      role:resolvedRole,
+      dname
+    };
+    users=[...(Array.isArray(users)?users:[]),created];
+    try{localStorage.setItem('jb_users',JSON.stringify(users));}catch(_e){}
+    applyRoleToCurrentSession(resolvedRole,em);
+    upsertFirebaseRoleForUser(created).catch(()=>{});
+    return created;
+  }catch(_e){
     return null;
   }
 }
@@ -7926,8 +8092,12 @@ async function subscribeFeedRealtime(opts={}){
       setFeedCache(list,remoteTs||Date.now());
       _health.feedRealtime=true;
       markSync('feed_snapshot');
-      if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
-      if(me&&me.role==='Admin') renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
+      if(me&&me.role==='Reseller'&&isResellerFeedPageVisible()){
+        renderResFeed(document.getElementById('res-feed-search')?.value||'');
+      }
+      if(me&&me.role==='Admin'&&isAdminFeedPageVisible()){
+        renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
+      }
     },err=>{
       _health.feedRealtime=false;
       markError(err);
@@ -8162,6 +8332,7 @@ function getLocalMedia(id){
 }
 async function flushMediaPromotionQueue(){
   const queue=readMediaPromoteQueue();
+  _health.mediaQueue=queue.length;
   if(!queue.length) return 0;
   let ready=false;
   try{
@@ -8197,6 +8368,10 @@ async function flushMediaPromotionQueue(){
     }
   }
   writeMediaPromoteQueue(remaining);
+  _health.mediaQueue=remaining.length;
+  _health.lastMediaPromotionAt=Date.now();
+  _health.lastMediaPromotionCount=promoted;
+  if(promoted>0) markSync('media_promote');
   return promoted;
 }
 function saveLocalCatalogOrder(code,payload){
@@ -9127,10 +9302,10 @@ let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
 async function startPendingPoll(){
-  if(getFirebaseEnabled() && _health.ordersRealtime) return;
   if(_pendingPollInterval)clearInterval(_pendingPollInterval);
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
+    if(getFirebaseEnabled() && _health.ordersRealtime) return;
     try{
       const api=getApiBase();
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
@@ -9193,7 +9368,7 @@ async function startPendingPoll(){
         }
       }
     }catch(e){}
-  },30000);
+  },getFirebaseEnabled()?45000:30000);
 }
 
 
@@ -9249,7 +9424,7 @@ async function startResellerChatRealtime(){
 // Start global poll when admin logs in - checks all reseller chats
 function startGlobalChatPoll(){
   if(_globalChatPoll) clearInterval(_globalChatPoll);
-  const pollMs=getFirebaseEnabled()?1200:5000;
+  const pollMs=getFirebaseEnabled()?3000:5000;
   _globalChatPoll = setInterval(pollAllChats, pollMs);
   pollAllChats(); // immediate first check
 }
@@ -9457,7 +9632,7 @@ async function openChatWith(resellerId){
   });
   // Start polling
   if(_chatPollInterval) clearInterval(_chatPollInterval);
-  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?12000:5000);
+  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?20000:5000);
   document.getElementById('chat-input')?.focus();
 }
 
@@ -9560,7 +9735,7 @@ let _lastResUnreadCount = 0;
 function startResellerMessagePoll(){
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
   // Keep unread badge updated even when Firebase mode is enabled.
-  const pollMs=getFirebaseEnabled()?3000:5000;
+  const pollMs=getFirebaseEnabled()?7000:5000;
   _resMsgPollInterval = setInterval(checkResellerUnreadMessages, pollMs);
   checkResellerUnreadMessages(); // Initial check
 }
@@ -9622,7 +9797,7 @@ function openResellerChat(){
   loadResellerMessages();
   if(_resChatInterval) clearInterval(_resChatInterval);
   // Keep a lightweight fallback poll only.
-  _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?2500:2000);
+  _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?7000:2500);
   // Clear unread badges when chat opened
   const badge = document.getElementById('res-chat-badge');
   if(badge) badge.style.display = 'none';
@@ -9682,6 +9857,8 @@ function renderResellerMessages(msgs){
   const el=document.getElementById('res-chat-messages')||document.getElementById('res-chat-msgs');
   if(!el){ console.warn('[renderResellerMessages] element bulunamadı'); return; }
   if(!msgs) msgs = [];
+  const prevLen=el.querySelectorAll('.msg-item').length;
+  const wasAtBottom=(el.scrollTop+el.clientHeight+24)>=el.scrollHeight;
   if(!msgs.length){el.innerHTML='<div style="text-align:center;color:var(--muted);font-size:13px;padding:20px;">No messages yet. Say hi! 👋</div>';return;}
   
   // Get admin photo
@@ -9721,7 +9898,8 @@ function renderResellerMessages(msgs){
       </div>
     </div>`;
   }).join('');
-  if(wasAtBottom || (typeof newLen!=="undefined" && newLen > prevLen)) el.scrollTop=el.scrollHeight;
+  const newLen=msgs.length;
+  if(wasAtBottom || newLen>prevLen) el.scrollTop=el.scrollHeight;
 }
 
 // Admin chat send - alias
@@ -9894,11 +10072,14 @@ function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
   warmFirebaseConnect();
   
-  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:30000;
+  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime&&_health.feedRealtime)?180000:30000;
   // Sync interval adapts when realtime is active.
   _autoSyncInterval = setInterval(() => {
     if(me && navigator.onLine){
-      loadFromCloudSilent().catch(()=>{});
+      const realtimeHealthy=getFirebaseEnabled()&&_health.ordersRealtime&&_health.feedRealtime;
+      if(!realtimeHealthy){
+        loadFromCloudSilent().catch(()=>{});
+      }
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
         flushLocalSyncFallback().catch(()=>{});
@@ -12246,6 +12427,16 @@ function orderCompareSnapshot(order){
   return JSON.stringify(clean);
 }
 async function saveOrders(changedOrderIds){
+  const incomingIds=Array.isArray(changedOrderIds)?changedOrderIds.filter(Boolean):[];
+  if(_saveOrdersBusy){
+    if(incomingIds.length){
+      incomingIds.forEach(id=>_saveOrdersQueuedIds.add(id));
+    }else{
+      _saveOrdersQueueFull=true;
+    }
+    return;
+  }
+  _saveOrdersBusy=true;
   const nowTs=Date.now();
   let previousOrders=[];
   try{
@@ -12339,9 +12530,23 @@ async function saveOrders(changedOrderIds){
         flushMediaPromotionQueue().catch(function(){});
       }
       markSync('orders_save');
-      writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
+      const auditNow=Date.now();
+      const shouldAudit=(auditNow-_lastOrdersSaveAuditAt)>5000||targetOrders.length>0||deletedOrderIds.length>0;
+      if(shouldAudit){
+        _lastOrdersSaveAuditAt=auditNow;
+        writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
+      }
   } catch(e) {
     console.error('[saveOrders]', e);
+  } finally {
+    _saveOrdersBusy=false;
+    const queuedFull=_saveOrdersQueueFull;
+    const queuedIds=[..._saveOrdersQueuedIds];
+    _saveOrdersQueueFull=false;
+    _saveOrdersQueuedIds.clear();
+    if(queuedFull || queuedIds.length){
+      setTimeout(()=>saveOrders(queuedFull?undefined:queuedIds),0);
+    }
   }
 }
 function saveUsers(){cloudSave('jb_users',JSON.stringify(users));}
