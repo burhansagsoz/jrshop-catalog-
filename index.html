@@ -2121,7 +2121,43 @@ let orders    = (()=>{
   return raw.map(o=>({...o, status: o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status}));
 })();
 let settings  = JSON.parse(localStorage.getItem('jb_settings')  || '{}');
-let users     = JSON.parse(localStorage.getItem('jb_users')     || JSON.stringify([{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}]));
+const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
+function normalizeUsersList(raw){
+  try{
+    let list=raw;
+    if(list===null||list===undefined) list=[];
+    if(!Array.isArray(list) && list && typeof list==='object'){
+      list=Object.values(list).filter(v=>v&&typeof v==='object');
+    }
+    if(!Array.isArray(list)) list=[];
+    const out=list
+      .filter(u=>u&&typeof u==='object')
+      .map(u=>({
+        ...u,
+        id:String(u.id||('u'+Date.now()+Math.random().toString(36).slice(2,6))),
+        email:String(u.email||'').trim(),
+        password:String(u.password||''),
+        role:String(u.role||'Reseller'),
+        dname:String(u.dname||'').trim()
+      }))
+      .filter(u=>u.email&&u.password);
+    return out.length?out:[...DEFAULT_BOOT_USERS];
+  }catch(_e){
+    return [...DEFAULT_BOOT_USERS];
+  }
+}
+function findUserForLogin(identifier,password){
+  const id=String(identifier||'').trim().toLowerCase();
+  const pw=String(password||'');
+  if(!id||!pw) return null;
+  const list=normalizeUsersList(users);
+  return list.find(function(u){
+    const em=String(u.email||'').trim().toLowerCase();
+    const dn=String(u.dname||'').trim().toLowerCase();
+    return (em===id || (dn&&dn===id)) && String(u.password||'')===pw;
+  })||null;
+}
+let users     = normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')     || JSON.stringify(DEFAULT_BOOT_USERS)));
 let suppliers = JSON.parse(localStorage.getItem('jb_suppliers') || '[]');
 let templates = JSON.parse(localStorage.getItem('jb_templates') || JSON.stringify({
   order_confirmation:"Hi {{name}} 👋\n\nYour order is confirmed! ✅\nRef: {{ref}}\nProducts: {{products}}\n\nWe'll send your tracking soon. Thank you! 🎉",
@@ -2168,7 +2204,7 @@ function toggleDark(){const d=document.body.classList.toggle('dark');document.ge
       .then(function(res){
         if(res.data){
           Object.keys(res.data).forEach(function(k){localStorage.setItem(k,JSON.stringify(res.data[k]));});
-          users=JSON.parse(localStorage.getItem('jb_users')||'[]');
+          users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
         scheduleFirebaseAutoConnect('boot');
           const savedEm=localStorage.getItem('jb_saved_email');
           const savedPwRaw=localStorage.getItem('jb_saved_pw');const savedPw=savedPwRaw?decodeURIComponent(atob(savedPwRaw)):'';
@@ -2353,7 +2389,8 @@ async function login(){
   const pw=document.getElementById('l-pw').value;
   resetHealthCounters();
   cacheFirebaseLoginCreds(em,pw);
-  const u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
+  users=normalizeUsersList(users);
+  let u=findUserForLogin(em,pw);
   if(!u){
     // Firebase-first login retry
     const loginBtn=document.querySelector('.login-btn');
@@ -2362,9 +2399,9 @@ async function login(){
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
-        users=res.data.jb_users;
+        users=normalizeUsersList(res.data.jb_users);
         localStorage.setItem('jb_users',JSON.stringify(users));
-        const u2=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
+        const u2=findUserForLogin(em,pw);
         if(u2){if(loginBtn)loginBtn.textContent='Sign In →';login();return;}
       }
       if(loginBtn)loginBtn.textContent='Sign In →';
@@ -2376,16 +2413,21 @@ async function login(){
     });
     return;
   }
-  me=u;
+  me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
   if(getFirebaseEnabled()){
     try{
       await initFirebaseRealtime({silent:true,force:true});
+      if(!isFirebaseAuthIdentityMatchingEmail(em) && _firebaseAuth && _firebaseAuth.currentUser){
+        try{await _firebaseAuth.signOut();}catch(_e){}
+      }
       const fbUser=await firebaseSignInForSession(em,pw);
       if(fbUser){
         await initFirebaseRealtime({silent:true,force:true});
         flushLocalSyncFallback().catch(()=>{});
       }
-      await applyFirebaseRoleMapping(me,em);
+      if(isFirebaseAuthIdentityMatchingEmail(em)){
+        await applyFirebaseRoleMapping(me,em);
+      }
     }catch(_e){}
   }
   // Remember me
@@ -2401,11 +2443,11 @@ async function login(){
   }
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').classList.add('on');
-  document.getElementById('sb-av').textContent=(u.dname||u.email)[0].toUpperCase();
-  document.getElementById('sb-em').textContent=u.email;
-  document.getElementById('sb-rl').textContent=u.role+(u.dname?' · '+u.dname:'');
+  document.getElementById('sb-av').textContent=(me.dname||me.email)[0].toUpperCase();
+  document.getElementById('sb-em').textContent=me.email;
+  document.getElementById('sb-rl').textContent=me.role+(me.dname?' · '+me.dname:'');
   // Update avatar with photo if exists
-  if(u.role==='Admin' || u.role==='Staff'){
+  if(me.role==='Admin' || me.role==='Staff'){
     updateAdminAvatar();
   }
   loadSettings();loadTemplates();loadNotifSettings();loadResFinance();updateBadges();renderNav();setTimeout(checkAutoBackup,5000);
@@ -2453,7 +2495,7 @@ async function login(){
         localStorage.setItem('jb_orders',JSON.stringify(orders));
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
-        users=JSON.parse(localStorage.getItem('jb_users')||'[]');
+        users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
         settings=JSON.parse(localStorage.getItem('jb_settings')||'{}');
         catalogCategories=JSON.parse(localStorage.getItem('jb_cat_categories')||'[]');
@@ -2462,7 +2504,7 @@ async function login(){
     }).catch(function(){});
   },1000);
 }
-function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}resetHealthCounters();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
+function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{if(_firebaseAuth&&_firebaseAuth.currentUser){_firebaseAuth.signOut().catch(()=>{});}}catch(_e){}try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}resetHealthCounters();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
 
 // ── SIDEBAR ──
 let _sbOpen=window.innerWidth>900;
@@ -7294,6 +7336,7 @@ function firebaseAuthHint(err){
   if(code==='auth/operation-not-allowed') return 'enable Email/Password and Anonymous in Firebase Auth Sign-in method';
   if(code==='auth/api-key-not-valid') return 'check Firebase apiKey in Settings';
   if(code==='auth/invalid-api-key') return 'check Firebase apiKey in Settings';
+  if(code==='auth/invalid-email') return 'fix saved login email format and sign in again';
   if(code==='auth/unauthorized-domain') return 'add this domain in Firebase Auth Authorized domains';
   if(code==='auth/network-request-failed') return 'network/firewall blocked Firebase';
   if(code==='auth/too-many-requests') return 'too many attempts, wait and retry';
@@ -7304,6 +7347,7 @@ function firebaseAuthStateHint(state){
   const s=String(state||'');
   if(s==='auth_provider_disabled') return 'Firebase Auth -> Sign-in method: enable Email/Password and Anonymous';
   if(s==='auth_invalid_api_key') return 'Firebase config API key invalid';
+  if(s==='auth_invalid_email') return 'Saved login email format is invalid; sign in again from login screen';
   if(s==='auth_unauthorized_domain') return 'Firebase Auth -> Authorized domains: add this domain';
   if(s==='auth_network_error') return 'Network blocked Firebase; try another connection';
   if(s==='auth_config_error') return 'Firebase Auth configuration missing';
@@ -7362,10 +7406,14 @@ function decodeSavedPassword(raw){
   if(!raw) return '';
   try{return decodeURIComponent(atob(String(raw)));}catch(_e){return '';}
 }
+function isValidAuthEmail(email){
+  const em=String(email||'').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em);
+}
 function cacheFirebaseLoginCreds(email,password){
   const em=String(email||'').trim().toLowerCase();
   const pw=String(password||'');
-  if(!em||!pw) return;
+  if(!isValidAuthEmail(em)||!pw) return;
   try{
     localStorage.setItem(FIREBASE_AUTH_EMAIL_KEY,em);
     localStorage.setItem(FIREBASE_AUTH_PASSWORD_KEY,encodeSavedPassword(pw));
@@ -7376,6 +7424,7 @@ function mapFirebaseAuthState(err,defaultState='auth_error'){
   if(!code) return defaultState;
   if(code==='auth/operation-not-allowed') return 'auth_provider_disabled';
   if(code==='auth/invalid-api-key') return 'auth_invalid_api_key';
+  if(code==='auth/invalid-email') return 'auth_invalid_email';
   if(code==='auth/unauthorized-domain') return 'auth_unauthorized_domain';
   if(code==='auth/network-request-failed') return 'auth_network_error';
   if(code==='auth/configuration-not-found') return 'auth_config_error';
@@ -7386,18 +7435,30 @@ function mapFirebaseAuthState(err,defaultState='auth_error'){
 function getFirebaseLoginCreds(){
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   const mePw=me&&me.password?String(me.password):'';
-  if(meEmail&&mePw) return {email:meEmail,password:mePw};
+  if(isValidAuthEmail(meEmail)&&mePw) return {email:meEmail,password:mePw};
   const remEmail=String(localStorage.getItem('jb_remember_email')||'').trim().toLowerCase();
   const remPw=String(localStorage.getItem('jb_remember_pw')||'');
-  if(remEmail&&remPw) return {email:remEmail,password:remPw};
+  if(isValidAuthEmail(remEmail)&&remPw) return {email:remEmail,password:remPw};
+  if(remEmail && !isValidAuthEmail(remEmail)){
+    try{
+      localStorage.removeItem('jb_remember_email');
+      localStorage.removeItem('jb_remember_pw');
+    }catch(_e){}
+  }
   const savedEmail=String(localStorage.getItem(FIREBASE_AUTH_EMAIL_KEY)||'').trim().toLowerCase();
   const savedPw=decodeSavedPassword(localStorage.getItem(FIREBASE_AUTH_PASSWORD_KEY)||'');
-  if(savedEmail&&savedPw) return {email:savedEmail,password:savedPw};
+  if(isValidAuthEmail(savedEmail)&&savedPw) return {email:savedEmail,password:savedPw};
+  if(savedEmail && !isValidAuthEmail(savedEmail)){
+    try{
+      localStorage.removeItem(FIREBASE_AUTH_EMAIL_KEY);
+      localStorage.removeItem(FIREBASE_AUTH_PASSWORD_KEY);
+    }catch(_e){}
+  }
   const formEmailEl=document.getElementById('l-em');
   const formPwEl=document.getElementById('l-pw');
   const formEmail=formEmailEl&&formEmailEl.value?String(formEmailEl.value).trim().toLowerCase():'';
   const formPw=formPwEl&&formPwEl.value?String(formPwEl.value):'';
-  if(formEmail&&formPw) return {email:formEmail,password:formPw};
+  if(isValidAuthEmail(formEmail)&&formPw) return {email:formEmail,password:formPw};
   return null;
 }
 
@@ -7473,7 +7534,7 @@ async function firebaseSignInForSession(email,password){
   if(!_firebaseAuth) return null;
   const em=String(email||'').trim().toLowerCase();
   const pw=String(password||'');
-  if(!em||!pw){
+  if(!isValidAuthEmail(em)||!pw){
     _health.authState='waiting_login';
     return null;
   }
@@ -7495,10 +7556,23 @@ async function firebaseSignInForSession(email,password){
         return null;
       }
     }
+    if(err&&err.code==='auth/invalid-email'){
+      _health.authState='auth_invalid_email';
+      return null;
+    }
     markError(err);
     _health.authState=mapFirebaseAuthState(err,'auth_error');
     return null;
   }
+}
+
+function isFirebaseAuthIdentityMatchingEmail(email){
+  const expected=String(email||'').trim().toLowerCase();
+  if(!expected) return false;
+  const authUser=_firebaseAuth&&_firebaseAuth.currentUser;
+  if(!authUser||authUser.isAnonymous) return false;
+  const current=String(authUser.email||'').trim().toLowerCase();
+  return !!current && current===expected;
 }
 
 async function resolveRoleFromClaims(){
