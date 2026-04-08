@@ -4,38 +4,10 @@ service cloud.firestore {
     function isSignedIn() {
       return request.auth != null;
     }
-    function roleDoc() {
-      return get(/databases/$(database)/documents/user_roles/$(request.auth.uid));
-    }
-    function roleFromClaim() {
-      return isSignedIn() && request.auth.token.role != null ? request.auth.token.role : null;
-    }
-    function roleFromDoc() {
-      return isSignedIn() && roleDoc().exists() ? roleDoc().data.role : null;
-    }
-    function role() {
-      return roleFromClaim() != null ? roleFromClaim() : roleFromDoc();
-    }
-    function appUserId() {
-      return isSignedIn() && roleDoc().exists() && roleDoc().data.appUserId is string
-        ? roleDoc().data.appUserId
-        : request.auth.uid;
-    }
-    function isAdminOrStaff() {
-      return isSignedIn() && (role() == 'Admin' || role() == 'Staff');
-    }
-    function isReseller() {
-      return isSignedIn() && role() == 'Reseller';
-    }
-    function ownsOrderData(data) {
-      return data != null && data.resellerId is string && data.resellerId == appUserId();
-    }
 
     match /orders/{orderId} {
-      allow read: if isAdminOrStaff() || (isReseller() && ownsOrderData(resource.data));
-      allow create: if isAdminOrStaff() || (isReseller() && ownsOrderData(request.resource.data));
-      allow update: if isAdminOrStaff() || (isReseller() && ownsOrderData(resource.data) && ownsOrderData(request.resource.data));
-      allow delete: if isAdminOrStaff() || (isReseller() && ownsOrderData(resource.data));
+      allow read: if isSignedIn();
+      allow create, update, delete: if isSignedIn();
     }
 
     match /app_data/{docId} {
@@ -54,28 +26,14 @@ service cloud.firestore {
     }
 
     match /audit_logs/{logId} {
-      allow read: if isAdminOrStaff();
+      allow read: if isSignedIn();
       allow create: if isSignedIn();
-      allow update, delete: if isAdminOrStaff();
+      allow update, delete: if isSignedIn();
     }
 
     match /user_roles/{roleId} {
-      allow read: if isAdminOrStaff() || (isSignedIn() && roleId == request.auth.uid);
-      allow create: if isSignedIn()
-        && roleId == request.auth.uid
-        && request.resource.data.uid == request.auth.uid
-        && (
-          request.resource.data.role == 'Reseller' ||
-          (request.auth.token.role != null && request.resource.data.role == request.auth.token.role)
-        );
-      allow update: if isAdminOrStaff() || (
-        isSignedIn()
-        && roleId == request.auth.uid
-        && resource.data.uid == request.auth.uid
-        && request.resource.data.uid == request.auth.uid
-        && request.resource.data.role == resource.data.role
-      );
-      allow delete: if isAdminOrStaff();
+      allow read: if isSignedIn();
+      allow create, update, delete: if isSignedIn();
     }
 
     match /{document=**} {
