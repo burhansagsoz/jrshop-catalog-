@@ -2169,7 +2169,17 @@ function toggleDark(){const d=document.body.classList.toggle('dark');document.ge
       .then(function(r){return r.json();})
       .then(function(res){
         if(res.data){
-          Object.keys(res.data).forEach(function(k){localStorage.setItem(k,JSON.stringify(res.data[k]));});
+          Object.keys(res.data).forEach(function(k){
+            if(k==='jb_orders') return;
+            if(k==='jb_feed' || k.indexOf('jb_chat_')===0){
+              mergeKeyWithLocalFirst(k,res.data[k]);
+              return;
+            }
+            const localRaw=localStorage.getItem(k);
+            if(localRaw===null){
+              localStorage.setItem(k,JSON.stringify(res.data[k]));
+            }
+          });
           users=JSON.parse(localStorage.getItem('jb_users')||'[]');
         scheduleFirebaseAutoConnect('boot');
           const savedEm=localStorage.getItem('jb_saved_email');
@@ -2668,7 +2678,11 @@ async function login(){
           if(k==='jb_feed' || k.indexOf('jb_chat_')===0){
             mergeKeyWithLocalFirst(k,res.data[k]);
           }else{
-            localStorage.setItem(k,JSON.stringify(res.data[k]));
+            const localRaw=localStorage.getItem(k);
+            // Prevent stale remote snapshot from wiping newer local edits after re-login.
+            if(localRaw===null){
+              localStorage.setItem(k,JSON.stringify(res.data[k]));
+            }
           }
         });
         // Critical: never overwrite local changes on login with stale cloud snapshot.
@@ -7183,7 +7197,7 @@ async function loadFromCloudSilent(){
         if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
         continue;
       }
-      localStorage.setItem(key,JSON.stringify(data[key]));
+      mergeKeyWithLocalFirst(key,data[key]);
     }
 
     // Siparişler: sadece cloud'da YENİ olan veya DAHA YENİ olanı al
@@ -7231,7 +7245,7 @@ async function loadFromCloud(){
             if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
             continue;
           }
-          localStorage.setItem(key,JSON.stringify(data[key]));
+          mergeKeyWithLocalFirst(key,data[key]);
         }
         // Keep chat/feed local snapshots durable even when Firebase auth is unstable.
         ['jb_feed','jb_chat_index'].forEach(function(k){
@@ -7240,7 +7254,7 @@ async function loadFromCloud(){
             if(shouldAcceptRemoteFeed(data[k])) setFeedCache(data[k],Date.now());
             return;
           }
-          localStorage.setItem(k,JSON.stringify(data[k]));
+          mergeKeyWithLocalFirst(k,data[k]);
         });
         // Load orders from dedicated endpoint (individual rows — no size limit)
         const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
@@ -8582,7 +8596,8 @@ async function handleFirebaseApiRequest(url,method,body){
 
   if(path==='/api/data'&&m==='GET'){
     const localData=readLocalDataMap();
-    localData.jb_orders=scopeOrdersForCurrentUser(readLocalOrders());
+    const localOrders=scopeOrdersForCurrentUser(readLocalOrders());
+    localData.jb_orders=localOrders;
     if(firebaseOnline){
       try{
         const remoteData=await readFirebaseDataMap();
@@ -8590,8 +8605,17 @@ async function handleFirebaseApiRequest(url,method,body){
         const remoteOrders=await readFirebaseOrders();
         if(Array.isArray(remoteOrders)){
           const scopedRemote=scopeOrdersForCurrentUser(remoteOrders);
-          merged.jb_orders=scopedRemote;
-          writeLocalJson('jb_orders',scopedRemote);
+          if(shouldAcceptRemoteOrders(scopedRemote)){
+            const mergedOrders=scopeOrdersForCurrentUser(mergeOrdersByFreshness(localOrders,scopedRemote));
+            merged.jb_orders=mergedOrders;
+            if(orderCompareSnapshotList(localOrders)!==orderCompareSnapshotList(mergedOrders)){
+              writeLocalJson('jb_orders',mergedOrders);
+            }
+          }else{
+            merged.jb_orders=localOrders;
+          }
+        }else{
+          merged.jb_orders=localOrders;
         }
         return jsonApiResponse({data:merged});
       }catch(err){
@@ -8637,16 +8661,23 @@ async function handleFirebaseApiRequest(url,method,body){
     }
   }
   if(path==='/api/orders'&&m==='GET'){
+    const localOrders=scopeOrdersForCurrentUser(readLocalOrders());
     if(firebaseOnline){
       try{
-        const remoteOrders=await readFirebaseOrders();
-        writeLocalJson('jb_orders',remoteOrders);
-        return jsonApiResponse({orders:remoteOrders});
+        const remoteOrders=scopeOrdersForCurrentUser(await readFirebaseOrders());
+        if(shouldAcceptRemoteOrders(remoteOrders)){
+          const mergedOrders=scopeOrdersForCurrentUser(mergeOrdersByFreshness(localOrders,remoteOrders));
+          if(orderCompareSnapshotList(localOrders)!==orderCompareSnapshotList(mergedOrders)){
+            writeLocalJson('jb_orders',mergedOrders);
+          }
+          return jsonApiResponse({orders:mergedOrders});
+        }
+        return jsonApiResponse({orders:localOrders,localOnly:true});
       }catch(err){
         markError(err);
       }
     }
-    return jsonApiResponse({orders:scopeOrdersForCurrentUser(readLocalOrders()),localOnly:true});
+    return jsonApiResponse({orders:localOrders,localOnly:true});
   }
   if(path==='/api/order'&&m==='POST'){
     const order=req&&req.order;
