@@ -3126,7 +3126,7 @@ function saveProductCN(orderId, prodIdx){
   saveOrders();logActivity('tracking',`CN tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)} - ${o.products[prodIdx].name||'Product '+(prodIdx+1)})`,o.id);
   selectOrder(orderId);toast('✅ CN tracking saved!','ok');
 }
-function saveUk(){const o=orders.find(x=>x.id===selId);if(!o)return;const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}o.ukTracking=val;if(o.status==='Sent to Factory')o.status='Shipped';saveOrders();logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);selectOrder(o.id);toast('✅ UK tracking saved!','ok');}
+function saveUk(){const o=orders.find(x=>x.id===selId);if(!o)return;const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}o.ukTracking=val;o.updatedAt=Date.now();if(o.status==='Sent to Factory')o.status='Shipped';saveOrders([o.id]);logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);selectOrder(o.id);toast('✅ UK tracking saved!','ok');}
 function saveNote(){const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();o.note=document.getElementById('d-note-input').value.trim();saveOrders();selectOrder(o.id);toast('✅ Note saved!','ok');}
 
@@ -4227,7 +4227,24 @@ function toggleSelectMode(){_selectMode=!_selectMode;_selected.clear();document.
 function toggleSelectAll(cb){const list=filtered();if(cb.checked)list.forEach(o=>_selected.add(o.id));else _selected.clear();updateBulkCount();render();}
 function toggleSelectOne(id,e){e.stopPropagation();if(_selected.has(id))_selected.delete(id);else _selected.add(id);updateBulkCount();render();}
 function updateBulkCount(){document.getElementById('bulk-count').textContent=_selected.size+' selected';}
-function applyBulkStatus(){const status=document.getElementById('bulk-status-select').value;if(!status){toast('⚠️ Select a status','err');return;}if(!_selected.size){toast('⚠️ Select orders first','err');return;}const count=_selected.size;orders.forEach(o=>{if(_selected.has(o.id))o.status=status;});saveOrders();clearBulkSelect();render();updateBadges();toast(`✅ ${count} orders → ${status}`,'ok');}
+function applyBulkStatus(){
+  const status=document.getElementById('bulk-status-select').value;
+  if(!status){toast('⚠️ Select a status','err');return;}
+  if(!_selected.size){toast('⚠️ Select orders first','err');return;}
+  const changedIds=[];
+  orders.forEach(o=>{
+    if(!_selected.has(o.id)) return;
+    o.status=status;
+    if(status==='Completed'&&!o.completedAt) o.completedAt=Date.now();
+    o.updatedAt=Date.now();
+    changedIds.push(o.id);
+  });
+  saveOrders(changedIds);
+  clearBulkSelect();
+  render();
+  updateBadges();
+  toast(`✅ ${changedIds.length} orders → ${status}`,'ok');
+}
 function clearBulkSelect(){_selected.clear();_selectMode=false;document.getElementById('select-btn').textContent='☑️ Select';document.getElementById('select-btn').className='btn btn-ghost btn-sm';const cb=document.getElementById('select-all');if(cb){cb.style.display='none';cb.checked=false;}document.getElementById('bulk-bar').classList.remove('on');render();}
 
 // ── BULK MESSAGE/EMAIL/DELETE ──
@@ -11852,11 +11869,48 @@ function updateBadges(){
   const navPending=document.getElementById('nav-pending');
   if(navPending)navPending.style.display=(me&&me.role!=='Reseller'&&pendingCount>0)?'flex':'none';
 }
+function orderCompareSnapshot(order){
+  const clean={
+    ...(order||{}),
+    status:normalizeStatus(order&&order.status),
+    products:((order&&order.products)||[]).map(p=>({...p}))
+  };
+  delete clean.updatedAt;
+  return JSON.stringify(clean);
+}
 async function saveOrders(changedOrderIds){
-  // updatedAt yoksa ts kullan (ilk kez kayıt)
-  orders.forEach(o=>{ if(!o.updatedAt) o.updatedAt = o.ts || Date.now(); });
-  const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):null;
-  const targetOrders=(changedSet?orders.filter(o=>changedSet.has(o.id)):orders);
+  const nowTs=Date.now();
+  let previousOrders=[];
+  try{
+    previousOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+  }catch(_e){
+    previousOrders=[];
+  }
+  const prevById=new Map((Array.isArray(previousOrders)?previousOrders:[]).filter(o=>o&&o.id).map(o=>[o.id,o]));
+  const currentIds=new Set((orders||[]).filter(o=>o&&o.id).map(o=>o.id));
+  const deletedOrderIds=[...prevById.keys()].filter(id=>!currentIds.has(id));
+
+  const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):new Set();
+  if(!changedSet.size){
+    for(const o of (orders||[])){
+      if(!o||!o.id) continue;
+      const prev=prevById.get(o.id);
+      if(!prev){
+        changedSet.add(o.id);
+        continue;
+      }
+      if(orderCompareSnapshot(prev)!==orderCompareSnapshot(o)){
+        changedSet.add(o.id);
+      }
+    }
+  }
+  // Ensure changed orders always get a fresh updatedAt, otherwise silent cloud merges can roll them back.
+  for(const o of (orders||[])){
+    if(!o||!o.id) continue;
+    if(changedSet.has(o.id)) o.updatedAt=nowTs;
+    else if(!o.updatedAt) o.updatedAt=o.ts||nowTs;
+  }
+  const targetOrders=orders.filter(o=>o&&o.id&&changedSet.has(o.id));
   const uploadTimeoutMs=Math.max(1200,Math.floor(UPLOAD_TIMEOUT_MS*0.5));
   // Base64 görselleri sadece değişen siparişlerde upload et
   for(const o of targetOrders){
@@ -11889,11 +11943,23 @@ async function saveOrders(changedOrderIds){
           if(!_sr.ok) console.warn('[saveOrders] remote save failed for',o.id);
         }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
       }
+      // Propagate deletions too; otherwise removed orders can reappear after reload.
+      for(const deletedId of deletedOrderIds){
+        try{
+          const _dr=await fetch(api+'/api/order/'+encodeURIComponent(deletedId),{
+            method:'DELETE',
+            headers:getAuthHeaders()
+          });
+          if(!_dr.ok) console.warn('[saveOrders] remote delete failed for',deletedId);
+        }catch(_e){
+          console.warn('[saveOrders] delete network error',_e.message);
+        }
+      }
       if(getFirebaseEnabled()){
         pushOrdersToFirebase([...(targetOrders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
       }
       markSync('orders_save');
-      writeAuditEvent('orders_save',{count:targetOrders.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
+      writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
   } catch(e) {
     console.error('[saveOrders]', e);
   }
