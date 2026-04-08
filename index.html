@@ -2370,7 +2370,13 @@ async function login(){
     .then(function(r){return r.json();})
     .then(function(res){
       if(res.data){
-        Object.keys(res.data).forEach(function(k){localStorage.setItem(k,JSON.stringify(res.data[k]));});
+        Object.keys(res.data).forEach(function(k){
+          if(k==='jb_feed' || k.indexOf('jb_chat_')===0){
+            mergeKeyWithLocalFirst(k,res.data[k]);
+          }else{
+            localStorage.setItem(k,JSON.stringify(res.data[k]));
+          }
+        });
         // Merge: cloud orders + local images (cloud strips base64)
     const cloudOrders=(res.data&&res.data.jb_orders)||[];
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
@@ -6725,7 +6731,9 @@ async function flushLocalSyncFallback(){
         headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({key,value:entry&&Object.prototype.hasOwnProperty.call(entry,'value')?entry.value:null})
       });
-      if(res.ok){
+      let payload={};
+      try{payload=await res.json();}catch(_e){payload={};}
+      if(res.ok && !(payload&&payload.localOnly)){
         clearLocalSyncFallbackKey(key);
         synced++;
       }
@@ -6781,7 +6789,9 @@ async function syncToCloud(key,value){
       }));
     }
     const res=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
-    if(res.ok) clearLocalSyncFallbackKey(key);
+    let payload={};
+    try{payload=await res.json();}catch(_e){payload={};}
+    if(res.ok && !(payload&&payload.localOnly)) clearLocalSyncFallbackKey(key);
     else persistLocalSyncFallback(key,parsed);
   }catch(e){
     persistLocalSyncFallback(key,parsed);
@@ -7774,6 +7784,7 @@ async function initFirebaseRealtime(opts={}){
       _firebaseReady=true;
       _health.firebaseConnected=true;
       _firebaseRetryAt=0;
+      flushLocalSyncFallback().catch(()=>{});
       if(!silent) toast('✅ Firebase realtime connected','ok');
       return true;
     }catch(e){
@@ -9332,12 +9343,7 @@ async function sendChatMsg(){
   renderMessages();
   try{
     const msgs = (_messages[_chatReseller]||[]).slice();
-    const syncRes=await fetch(api+'/api/sync',{
-      method:'POST',
-      headers:getAuthHeaders({'Content-Type':'application/json'}),
-      body: JSON.stringify({key:chatKey, value:msgs})
-    });
-    if(!syncRes.ok) throw new Error('chat sync failed');
+    await syncToCloud(chatKey,JSON.stringify(msgs));
     // Push notification to reseller
     const reseller = users.find(u => u.id === _chatReseller);
     if(reseller){
@@ -9497,6 +9503,7 @@ function startAutoSync(){
       loadFromCloudSilent().catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
+        flushLocalSyncFallback().catch(()=>{});
       }
     }
   }, syncMs);
@@ -10495,9 +10502,8 @@ async function createFeedPost(){
     setFeedCache(posts,Date.now());
     if(me&&me.role==='Reseller') renderResFeed();
     renderAdminFeed();
-    // Save back async
-    fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})})
-      .then(function(r){ if(!r.ok) throw new Error('sync failed'); })
+    // Save back async (localOnly responses are queued by syncToCloud)
+    syncToCloud('jb_feed',JSON.stringify(posts))
       .catch(function(err){ console.warn('[feed create sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
 
     toast('✅ Post published!','ok');
@@ -10564,8 +10570,7 @@ async function deleteFeedPost(postId){
   try{
     const posts=getFeedPostsFromCache().filter(p=>p.id!==postId);
     setFeedCache(posts,Date.now());
-    fetch('/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key:'jb_feed',value:posts})})
-      .then(function(r){ if(!r.ok) throw new Error('sync failed'); })
+    syncToCloud('jb_feed',JSON.stringify(posts))
       .catch(function(err){ console.warn('[feed delete sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
     toast('🗑️ Deleted','info');
     renderAdminFeed();
