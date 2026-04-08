@@ -2608,13 +2608,18 @@ async function login(){
   if(getFirebaseEnabled()){
     try{
       await initFirebaseRealtime({silent:true,force:true});
+      if(!isFirebaseAuthIdentityMatchingEmail(em) && _firebaseAuth && _firebaseAuth.currentUser){
+        try{await _firebaseAuth.signOut();}catch(_e){}
+      }
       const fbUser=await firebaseSignInForSession(em,pw);
       if(fbUser){
         await initFirebaseRealtime({silent:true,force:true});
         flushLocalSyncFallback().catch(()=>{});
       }
-      await applyFirebaseRoleMapping(me,em);
-      upsertFirebaseRoleForUser(me).catch(()=>{});
+      if(isFirebaseAuthIdentityMatchingEmail(em)){
+        await applyFirebaseRoleMapping(me,em);
+        upsertFirebaseRoleForUser(me).catch(()=>{});
+      }
     }catch(_e){}
   }
   // Remember me
@@ -2691,7 +2696,29 @@ async function login(){
     }).catch(function(){});
   },1000);
 }
-function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}resetHealthCounters();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
+function logout(){
+  stopPendingPoll();
+  if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}
+  if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}
+  if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+  stopFirebaseRealtime();
+  try{ if(_firebaseAuth&&_firebaseAuth.currentUser){ _firebaseAuth.signOut().catch(()=>{}); } }catch(_e){}
+  try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}
+  resetHealthCounters();
+  me=null;selId=null;
+  document.getElementById('login-screen').style.display='flex';
+  document.getElementById('app').classList.remove('on');
+  document.getElementById('l-em').value='';
+  document.getElementById('l-pw').value='';
+  document.getElementById('login-err').style.display='none';
+  stopCamera();
+  if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}
+  // Reset sidebar visibility for next login
+  const sb=document.getElementById('sidebar');
+  if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}
+  const menuBtn=document.querySelector('.topbar-menu-btn');
+  if(menuBtn) menuBtn.style.display='';
+}
 
 // ── SIDEBAR ──
 let _sbOpen=window.innerWidth>900;
@@ -7796,6 +7823,15 @@ async function firebaseSignInForSession(email,password){
     _health.authState=mapFirebaseAuthState(err,'auth_error');
     return null;
   }
+}
+
+function isFirebaseAuthIdentityMatchingEmail(email){
+  const expected=String(email||'').trim().toLowerCase();
+  if(!expected) return false;
+  const authUser=_firebaseAuth&&_firebaseAuth.currentUser;
+  if(!authUser||authUser.isAnonymous) return false;
+  const current=String(authUser.email||'').trim().toLowerCase();
+  return !!current && current===expected;
 }
 
 async function resolveRoleFromClaims(){
