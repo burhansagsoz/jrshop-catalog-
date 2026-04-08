@@ -2169,6 +2169,7 @@ function toggleDark(){const d=document.body.classList.toggle('dark');document.ge
         if(res.data){
           Object.keys(res.data).forEach(function(k){localStorage.setItem(k,JSON.stringify(res.data[k]));});
           users=JSON.parse(localStorage.getItem('jb_users')||'[]');
+        scheduleFirebaseAutoConnect('boot');
           const savedEm=localStorage.getItem('jb_saved_email');
           const savedPwRaw=localStorage.getItem('jb_saved_pw');const savedPw=savedPwRaw?decodeURIComponent(atob(savedPwRaw)):'';
           const emEl=document.getElementById('l-em');
@@ -2198,6 +2199,46 @@ function getShelfStatus(o){
   return {arrived,total:prods.length,ready:arrived===prods.length&&prods.length>0};
 }
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
+let _ordersStorageWarnAt=0;
+function compactOrdersForStorage(list){
+  const arr=Array.isArray(list)?list:[];
+  const keepRemoteable=function(v){
+    return (typeof v==='string'&&/^(https?:|blob:)/i.test(v))?v:null;
+  };
+  return arr.map(function(o){
+    return {
+      ...o,
+      products:(o&&o.products||[]).map(function(p){
+        return {
+          ...p,
+          img:keepRemoteable(p&&p.img),
+          depotPhoto:keepRemoteable(p&&p.depotPhoto)
+        };
+      })
+    };
+  });
+}
+function persistOrdersLocalSafe(list){
+  const arr=Array.isArray(list)?list:[];
+  try{
+    localStorage.setItem('jb_orders',JSON.stringify(arr));
+    return true;
+  }catch(_e){
+    try{
+      const compact=compactOrdersForStorage(arr);
+      localStorage.setItem('jb_orders',JSON.stringify(compact));
+      const now=Date.now();
+      if(now-_ordersStorageWarnAt>20000){
+        _ordersStorageWarnAt=now;
+        toast('⚠️ Order images compacted to protect updates','info');
+      }
+      return true;
+    }catch(err2){
+      console.error('[persistOrdersLocalSafe]',err2&&err2.message?err2.message:err2);
+      return false;
+    }
+  }
+}
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
   if(remoteOrders.length>0) return true;
@@ -2207,6 +2248,12 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }catch(_e){
     return true;
   }
+}
+function persistOrdersState(nextOrders){
+  const arr=Array.isArray(nextOrders)?nextOrders:[];
+  orders=arr;
+  persistOrdersLocalSafe(arr);
+  return arr;
 }
 function mergeArrayByTs(localArr,remoteArr){
   const local=Array.isArray(localArr)?localArr:[];
@@ -2284,9 +2331,20 @@ function mergeFeedByTs(localFeed,remoteFeed){
 }
 function safeApplyRemoteOrders(remoteOrders){
   if(!shouldAcceptRemoteOrders(remoteOrders)) return false;
-  orders=Array.isArray(remoteOrders)?remoteOrders:[];
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  persistOrdersState(Array.isArray(remoteOrders)?remoteOrders:[]);
   return true;
+}
+function scheduleFirebaseAutoConnect(reason){
+  if(!getFirebaseEnabled()) return;
+  const delayMs=reason==='boot'?180:80;
+  setTimeout(function(){
+    initFirebaseRealtime({silent:true,force:true}).then(function(ok){
+      if(ok) flushLocalSyncFallback().catch(()=>{});
+    }).catch(()=>{});
+  },delayMs);
+}
+function warmFirebaseConnect(){
+  scheduleFirebaseAutoConnect('warm');
 }
 
 // ── AUTH ──
@@ -2364,6 +2422,7 @@ async function login(){
   else if(me.role==='Staff') goDepotStaff();
   else{document.getElementById('topbar-right').style.display='none';goDash(document.querySelector('.ni'));startPendingPoll();
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
+  scheduleFirebaseAutoConnect('login');
   setTimeout(function(){
     localStorage.setItem('jb_cloud_api',location.origin);
     fetch('/api/data')
@@ -9574,6 +9633,7 @@ let _autoSyncVisibilityBound=false;
 
 function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
+  warmFirebaseConnect();
   
   const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:30000;
   // Sync interval adapts when realtime is active.
