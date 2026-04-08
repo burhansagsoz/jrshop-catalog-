@@ -2203,10 +2203,68 @@ function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
 let _ordersStorageWarnAt=0;
 const ORDER_MUTATION_LOG_KEY='jb_order_mutlog';
 const ORDER_MUTATION_MAX=60;
+const MEDIA_PROMOTE_QUEUE_KEY='jb_media_promote_queue';
+function isInlineDataUrl(v){
+  return typeof v==='string'&&/^data:/i.test(v);
+}
+function readMediaPromoteQueue(){
+  try{
+    const raw=localStorage.getItem(MEDIA_PROMOTE_QUEUE_KEY);
+    const arr=raw?JSON.parse(raw):[];
+    return Array.isArray(arr)?arr:[];
+  }catch(_e){
+    return [];
+  }
+}
+function writeMediaPromoteQueue(list){
+  try{
+    localStorage.setItem(MEDIA_PROMOTE_QUEUE_KEY,JSON.stringify(Array.isArray(list)?list:[]));
+  }catch(_e){}
+}
+function enqueueMediaPromotion(id){
+  const mediaId=String(id||'').trim();
+  if(!mediaId) return;
+  const q=readMediaPromoteQueue();
+  if(q.includes(mediaId)) return;
+  q.push(mediaId);
+  if(q.length>1200) q.splice(0,q.length-1200);
+  writeMediaPromoteQueue(q);
+}
+function normalizeOrderMediaRef(src,type='image/jpeg'){
+  const val=String(src||'');
+  if(!val) return null;
+  if(/^https?:\/\//i.test(val)||/^blob:/i.test(val)||/^\/api\/image\//i.test(val)) return val;
+  if(!isInlineDataUrl(val)) return val;
+  try{
+    const saved=saveLocalMedia(val,type);
+    if(saved&&saved.id){
+      enqueueMediaPromotion(saved.id);
+      return '/api/image/'+saved.id;
+    }
+  }catch(_e){}
+  return val;
+}
+function materializeOrderMediaForLocal(order){
+  const o=order&&typeof order==='object'?order:{};
+  return {
+    ...o,
+    products:(o.products||[]).map(function(p){
+      const item=p&&typeof p==='object'?p:{};
+      return {
+        ...item,
+        img:normalizeOrderMediaRef(item.img,'image/jpeg')||null,
+        depotPhoto:normalizeOrderMediaRef(item.depotPhoto,'image/jpeg')||null
+      };
+    })
+  };
+}
+function materializeOrdersForLocal(list){
+  return (Array.isArray(list)?list:[]).map(materializeOrderMediaForLocal);
+}
 function compactOrdersForStorage(list){
   const arr=Array.isArray(list)?list:[];
   const keepRemoteable=function(v){
-    return (typeof v==='string'&&/^(https?:|blob:)/i.test(v))?v:null;
+    return (typeof v==='string'&&(/^(https?:|blob:)/i.test(v)||/^\/api\/image\//i.test(v)||/^media:/i.test(v)))?v:null;
   };
   return arr.map(function(o){
     return {
@@ -2222,10 +2280,10 @@ function compactOrdersForStorage(list){
   });
 }
 function persistOrdersLocalSafe(list){
-  const arr=Array.isArray(list)?list:[];
+  const arr=materializeOrdersForLocal(list);
   try{
     localStorage.setItem('jb_orders',JSON.stringify(arr));
-    return true;
+    return arr;
   }catch(_e){
     try{
       const compact=compactOrdersForStorage(arr);
@@ -2235,10 +2293,10 @@ function persistOrdersLocalSafe(list){
         _ordersStorageWarnAt=now;
         toast('⚠️ Order images compacted to protect updates','info');
       }
-      return true;
+      return compact;
     }catch(err2){
       console.error('[persistOrdersLocalSafe]',err2&&err2.message?err2.message:err2);
-      return false;
+      return arr;
     }
   }
 }
@@ -2254,9 +2312,9 @@ function shouldAcceptRemoteOrders(remoteOrders){
 }
 function persistOrdersState(nextOrders){
   const arr=Array.isArray(nextOrders)?nextOrders:[];
-  orders=arr;
-  persistOrdersLocalSafe(arr);
-  return arr;
+  const persisted=persistOrdersLocalSafe(arr);
+  orders=Array.isArray(persisted)?persisted:arr;
+  return orders;
 }
 function readOrderMutationLog(){
   try{
@@ -7951,6 +8009,7 @@ async function initFirebaseRealtime(opts={}){
       }
       _firebaseRetryAt=0;
       flushLocalSyncFallback().catch(()=>{});
+      flushMediaPromotionQueue().catch(()=>{});
       if(!silent) toast('✅ Firebase realtime connected','ok');
       return true;
     }catch(e){
@@ -8016,8 +8075,8 @@ async function readFirebaseOrders(){
   const list=snap.docs.map(firebaseDocToOrder);
   return list.sort((a,b)=>(b.ts||0)-(a.ts||0));
 }
-async function saveMediaToFirebase(data,type){
-  const id='m'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+async function saveMediaToFirebase(data,type,forcedId){
+  const id=(forcedId&&String(forcedId).trim())||('m'+Date.now().toString(36)+Math.random().toString(36).slice(2,8));
   try{
     const up=await ensureStorageUpload(data,type);
     if(up&&up.url&&/^https?:\/\//i.test(up.url)){
@@ -8099,6 +8158,45 @@ function saveLocalMedia(data,type){
 function getLocalMedia(id){
   const map=parseLocalJson(LOCAL_MEDIA_MAP_KEY,{})||{};
   return map[id]||null;
+}
+async function flushMediaPromotionQueue(){
+  const queue=readMediaPromoteQueue();
+  if(!queue.length) return 0;
+  let ready=false;
+  try{
+    ready=await initFirebaseRealtime({silent:true});
+  }catch(_e){
+    ready=false;
+  }
+  if(!ready||!_firebaseDb) return 0;
+  const remaining=[];
+  let promoted=0;
+  for(const mediaId of queue){
+    try{
+      const local=getLocalMedia(mediaId);
+      if(!local){
+        promoted++;
+        continue;
+      }
+      if(local.url && /^https?:\/\//i.test(local.url)){
+        promoted++;
+        continue;
+      }
+      const saved=await saveMediaToFirebase(local.data||'',local.type||'image/jpeg',mediaId);
+      if(saved&&saved.url&&/^https?:\/\//i.test(saved.url)){
+        const map=parseLocalJson(LOCAL_MEDIA_MAP_KEY,{})||{};
+        if(map[mediaId]){
+          map[mediaId]={url:saved.url,type:local.type||'image/jpeg',ts:Date.now(),promoted:true};
+          writeLocalJson(LOCAL_MEDIA_MAP_KEY,map);
+        }
+      }
+      promoted++;
+    }catch(_e){
+      remaining.push(mediaId);
+    }
+  }
+  writeMediaPromoteQueue(remaining);
+  return promoted;
 }
 function saveLocalCatalogOrder(code,payload){
   const map=parseLocalJson(LOCAL_CATALOG_ORDERS_KEY,{})||{};
@@ -9751,6 +9849,7 @@ function startAutoSync(){
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
         flushLocalSyncFallback().catch(()=>{});
+        flushMediaPromotionQueue().catch(()=>{});
       }
     }
   }, syncMs);
@@ -12184,6 +12283,7 @@ async function saveOrders(changedOrderIds){
       if(queuedFallback) persistLocalSyncFallback('jb_orders',orders);
       if(getFirebaseEnabled()){
         pushOrdersToFirebase([...(targetOrders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
+        flushMediaPromotionQueue().catch(function(){});
       }
       markSync('orders_save');
       writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
