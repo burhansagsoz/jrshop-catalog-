@@ -4588,27 +4588,20 @@ function addProdItem(){
 async function handleImg(idx,input){
   if(!input.files||!input.files[0])return;
   const lbl=document.getElementById('img-lbl-'+idx);
-  if(lbl)lbl.innerHTML='⏳ Uploading...';
+  if(lbl)lbl.innerHTML='⏳ Preparing...';
   
   try{
     const compressed = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = e => {
-        compressImage(e.target.result, 800, 0.75).then(resolve).catch(reject);
+        compressImage(e.target.result, 560, 0.58).then(resolve).catch(reject);
       };
       reader.onerror = reject;
       reader.readAsDataURL(input.files[0]);
     });
     
-    // Upload image with timeout and automatic fallback.
-    const imgSrc=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:15000});
-    
-    if(!imgSrc){
-      toast('⚠️ Image upload failed', 'err');
-      if(lbl){lbl.style.display='flex';lbl.innerHTML='📷 Choose';}
-      return;
-    }
-    
+    // Instant UX: show local compressed image first.
+    const imgSrc=compressed;
     prodImages[idx] = imgSrc;
     if(lbl){lbl.style.display='none';}
     
@@ -4628,7 +4621,18 @@ async function handleImg(idx,input){
       prev.appendChild(btn);
     }
     
-    toast('✅ Image uploaded', 'ok');
+    // Background upgrade to remote URL for cross-device sync.
+    setTimeout(async function(){
+      try{
+        const uploaded=await uploadImageSmart(imgSrc,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+        if(!uploaded || uploaded===imgSrc) return;
+        prodImages[idx]=uploaded;
+        const imgEl=document.getElementById('img-img-'+idx);
+        if(imgEl) imgEl.src=uploaded;
+      }catch(_e){}
+    },0);
+    
+    toast('⚡ Image ready', 'ok');
   }catch(err){
     console.error('handleImg error:', err);
     if(lbl){lbl.style.display='flex';lbl.innerHTML='📷 Choose';}
@@ -4797,13 +4801,13 @@ function runProdImageUploadAsync(orderId){
       if(idx<0) return;
       const order=orders[idx];
       let changed=false;
-      for(const p of (order.products||[])){
-        if(!p||!p.img||!String(p.img).startsWith('data:')) continue;
+      await Promise.all((order.products||[]).map(async function(p){
+        if(!p||!p.img||!String(p.img).startsWith('data:')) return;
         try{
-          const up=await uploadImageWithFallback(String(p.img),'image/jpeg',{allowDataFallback:true,timeoutMs:3500});
+          const up=await uploadImageWithFallback(String(p.img),'image/jpeg',{allowDataFallback:true,timeoutMs:450});
           if(up&&up.url&&up.url!==p.img){ p.img=up.url; changed=true; }
         }catch(_e){}
-      }
+      }));
       if(changed){
         order.updatedAt=Date.now();
         orders[idx]=order;
@@ -6448,21 +6452,21 @@ async function handleROImg(idx,input){
   if(!window.roProdImages)window.roProdImages={};
   
   const label = document.getElementById('ro-img-lbl-'+idx)||document.querySelector(`label[for="ro-img-${idx}"]`);
-  if(label) label.innerHTML = '⏳ Uploading...';
+  if(label) label.innerHTML = '⏳ Preparing...';
   
   try{
     // Compress image
     const compressed = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = e => {
-        compressImage(e.target.result, 640, 0.65).then(resolve).catch(reject);
+        compressImage(e.target.result, 520, 0.55).then(resolve).catch(reject);
       };
       reader.onerror = reject;
       reader.readAsDataURL(input.files[0]);
     });
 
-    // Fast-path: short timeout + data fallback for instant UX.
-    const imgSrc=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200})||compressed;
+    // Instant UX: use compressed local data first.
+    const imgSrc=compressed;
     
     window.roProdImages[idx] = imgSrc;
     window.roProdImages[String(idx)] = imgSrc;
@@ -6473,7 +6477,19 @@ async function handleROImg(idx,input){
     if(prevEl) prevEl.style.display = 'block';
     if(label) label.innerHTML = '📷 Change';
     
-    toast('✅ Image ready', 'ok');
+    // Upload in background and replace preview when remote URL is ready.
+    setTimeout(async function(){
+      try{
+        const uploaded=await uploadImageSmart(imgSrc,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+        if(!uploaded || uploaded===imgSrc) return;
+        window.roProdImages[idx]=uploaded;
+        window.roProdImages[String(idx)]=uploaded;
+        const liveImg=document.getElementById('ro-img-img-'+idx);
+        if(liveImg) liveImg.src=uploaded;
+      }catch(_e){}
+    },0);
+    
+    toast('⚡ Image ready', 'ok');
   }catch(err){
     console.error('handleROImg error:', err);
     toast('⚠️ Image upload failed: ' + err.message, 'err');
@@ -10422,7 +10438,7 @@ function previewFeedImgs(input){
     const reader=new FileReader();
     reader.onload=async function(e){
       try{
-        const compressed=await compressImage(e.target.result,800,0.75);
+        const compressed=await compressImage(e.target.result,520,0.55);
         _feedImgs.push({data:compressed,url:null});
         const idx=_feedImgs.length-1;
         const wrap=document.createElement('div');
@@ -10510,42 +10526,46 @@ function clearFeedVideo(){
   if(inp) inp.value = '';
 }
 
+async function upgradeFeedPostMediaAsync(postId){
+  const posts=getFeedPostsFromCache();
+  const idx=posts.findIndex(p=>p&&p.id===postId);
+  if(idx<0) return;
+  const post=posts[idx];
+  let changed=false;
+  const upgradedImgs=await Promise.all((post.imgs||[]).map(async function(src){
+    const v=String(src||'');
+    if(!/^data:/i.test(v)) return src;
+    try{
+      const up=await uploadImageSmart(v,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+      if(up&&up!==v){changed=true;return up;}
+    }catch(_e){}
+    return src;
+  }));
+  let upgradedVideo=post.video||null;
+  if(/^data:/i.test(String(upgradedVideo||''))){
+    try{
+      const vup=await uploadImageSmart(String(upgradedVideo),'video/mp4',{allowDataFallback:true,timeoutMs:700});
+      if(vup&&vup!==upgradedVideo){upgradedVideo=vup;changed=true;}
+    }catch(_e){}
+  }
+  if(!changed) return;
+  const next={...post,imgs:upgradedImgs,img:upgradedImgs[0]||null,video:upgradedVideo};
+  posts[idx]=next;
+  setFeedCache(posts,Date.now());
+  renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
+  if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
+  syncToCloud('jb_feed',JSON.stringify(posts))
+    .catch(function(err){ console.warn('[feed media upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
+}
+
 async function createFeedPost(){
   const text=document.getElementById('feed-post-text').value.trim();
   if(!text){toast('Write something first!','err');return;}
   
-  const api=getApiBase();
-  
-  // Çoklu görsel upload
-  const imgUrls=[];
+  // Instant UX: publish with local compressed media immediately.
   const allImgs=_feedImgs.length>0?_feedImgs:(_feedImgData?[{data:_feedImgData}]:[]);
-  
-  if(allImgs.length>0){
-    toast('Uploading images...','info');
-    const uploaded=await Promise.all(allImgs.map(async function(imgItem){
-      try{
-        const up=await uploadImageWithFallback(imgItem.data,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
-        return up&&up.url?up.url:null;
-      }catch(_e){
-        return null;
-      }
-    }));
-    uploaded.forEach(function(u){ if(u) imgUrls.push(u); });
-  }
-  
-  // Video upload
-  let videoUrl = null;
-  if(_feedVideoData){
-    toast('Uploading video...','info');
-    try{
-      const up = await uploadImageWithFallback(_feedVideoData,'video/mp4',{allowDataFallback:true,timeoutMs:1800});
-      if(up&&up.url){videoUrl=up.url;}
-      else{toast('⚠️ Video upload failed, posting without video','err');}
-    }catch(e){
-      console.error('[Feed] Video upload error:', e);
-      toast('⚠️ Video upload error','err');
-    }
-  }
+  const imgUrls=allImgs.map(function(imgItem){return imgItem&&imgItem.data?imgItem.data:null;}).filter(Boolean);
+  const videoUrl=_feedVideoData||null;
   
   const post={
     id:'post_'+Date.now(),
@@ -10571,6 +10591,8 @@ async function createFeedPost(){
     // Save back async (localOnly responses are queued by syncToCloud)
     syncToCloud('jb_feed',JSON.stringify(posts))
       .catch(function(err){ console.warn('[feed create sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
+    // Convert media to remote URLs in background; user does not wait.
+    upgradeFeedPostMediaAsync(post.id).catch(function(_e){});
 
     toast('✅ Post published!','ok');
     document.getElementById('feed-post-text').value='';
@@ -10752,32 +10774,44 @@ function closeLogisticsModal(){
 
 async function sendChatImage(input){
   if(!input.files||!input.files[0]||!_chatReseller)return;
-  toast('Uploading image...','info');
+  const file=input.files[0];
+  input.value='';
+  toast('⚡ Preparing image...','info');
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,480,0.6);
-      const uploaded=await uploadImageWithFallback(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1800});
-      const imgUrl=uploaded&&uploaded.url?uploaded.url:compressed;
-      const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+imgUrl,ts:Date.now()};
+      const compressed=await compressImage(e.target.result,360,0.5);
+      const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+_chatReseller;
       if(!_messages[_chatReseller])_messages[_chatReseller]=[];
       _messages[_chatReseller].push(msg);
       try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
       renderMessages();
-      const syncRes=await fetch('/api/sync',{method:'POST',
-        headers:getAuthHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({key:chatKey,value:_messages[_chatReseller]})});
-      if(!syncRes.ok) throw new Error('chat image sync failed');
-      toast('Image sent','ok');
+      syncToCloud(chatKey,JSON.stringify(_messages[_chatReseller]))
+        .catch(function(err){ console.warn('[chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]); });
+      toast('✅ Image sent','ok');
+      // Background upload: replace local data URL with remote URL when ready.
+      setTimeout(async function(){
+        try{
+          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+          if(!uploaded || uploaded===compressed) return;
+          const msgs=_messages[_chatReseller]||[];
+          const found=msgs.find(m=>m&&m.id===msg.id);
+          if(!found) return;
+          found.text='[img]'+uploaded;
+          try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+          renderMessages();
+          syncToCloud(chatKey,JSON.stringify(msgs))
+            .catch(function(err){ console.warn('[chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
+        }catch(_e){}
+      },0);
     }catch(err){
       const chatKey='jb_chat_'+_chatReseller;
       persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]);
       toast('Failed to send image: '+err.message,'err');
     }
   };
-  reader.readAsDataURL(input.files[0]);
-  input.value='';
+  reader.readAsDataURL(file);
 }
 
 // ══ VOICE MESSAGE FUNCTIONS ══
@@ -11019,25 +11053,39 @@ async function sendVoiceMessage(audioBlob, from){
 
 async function sendResChatImage(input){
   if(!input.files||!input.files[0]||!me)return;
-  toast('Uploading image...','info');
+  const file=input.files[0];
+  input.value='';
+  toast('⚡ Preparing image...','info');
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,480,0.6);
-      const imgUrl=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1800});
-      if(!imgUrl) throw new Error('Image upload unavailable');
-      const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
+      const compressed=await compressImage(e.target.result,360,0.5);
+      const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+me.id;
       let msgs=[];
       try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
       msgs.push(msg);
       try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-      const syncRes=await fetch('/api/sync',{method:'POST',
-        headers:getAuthHeaders({'Content-Type':'application/json'}),
-        body:JSON.stringify({key:chatKey,value:msgs})});
-      if(!syncRes.ok) throw new Error('chat image sync failed');
       renderResellerMessages(msgs);
-      toast('Image sent','ok');
+      syncToCloud(chatKey,JSON.stringify(msgs))
+        .catch(function(err){ console.warn('[res chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
+      toast('✅ Image sent','ok');
+      // Background upload: replace local data URL with remote URL when ready.
+      setTimeout(async function(){
+        try{
+          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+          if(!uploaded || uploaded===compressed) return;
+          let live=[];
+          try{live=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){live=[];}
+          const found=live.find(m=>m&&m.id===msg.id);
+          if(!found) return;
+          found.text='[img]'+uploaded;
+          try{localStorage.setItem(chatKey,JSON.stringify(live));}catch(_e){}
+          renderResellerMessages(live);
+          syncToCloud(chatKey,JSON.stringify(live))
+            .catch(function(err){ console.warn('[res chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,live); });
+        }catch(_e){}
+      },0);
     }catch(err){
       const chatKey='jb_chat_'+me.id;
       let fallbackMsgs=[];
@@ -11046,8 +11094,7 @@ async function sendResChatImage(input){
       toast('Failed to send image: '+err.message,'err');
     }
   };
-  reader.readAsDataURL(input.files[0]);
-  input.value='';
+  reader.readAsDataURL(file);
 }
 
 function insertOrderRefToChat(){
@@ -11911,17 +11958,16 @@ async function saveOrders(changedOrderIds){
     else if(!o.updatedAt) o.updatedAt=o.ts||nowTs;
   }
   const targetOrders=orders.filter(o=>o&&o.id&&changedSet.has(o.id));
-  const uploadTimeoutMs=Math.max(1200,Math.floor(UPLOAD_TIMEOUT_MS*0.5));
+  const uploadTimeoutMs=450;
   // Base64 görselleri sadece değişen siparişlerde upload et
   for(const o of targetOrders){
-    for(const p of (o.products||[])){
-      if(p.img && p.img.startsWith('data:')){
-        try{
-          const uploaded=await uploadImageSmart(p.img,'image/jpeg',{allowDataFallback:true,timeoutMs:uploadTimeoutMs});
-          if(uploaded) p.img=uploaded;
-        }catch(e){}
-      }
-    }
+    await Promise.all((o.products||[]).map(async function(p){
+      if(!p||!p.img||!String(p.img).startsWith('data:')) return;
+      try{
+        const uploaded=await uploadImageSmart(p.img,'image/jpeg',{allowDataFallback:true,timeoutMs:uploadTimeoutMs});
+        if(uploaded) p.img=uploaded;
+      }catch(_e){}
+    }));
   }
   try{
     // Keep per-order updatedAt so merge logic can resolve conflicts correctly.
