@@ -5,86 +5,35 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function roleDocPath() {
-      return /databases/$(database)/documents/user_roles/$(request.auth.uid);
-    }
-
-    function roleFromDoc() {
-      return exists(roleDocPath()) ? get(roleDocPath()).data.role : null;
-    }
-
-    function isAdmin() {
-      return isSignedIn() && (
-        request.auth.token.role == 'Admin' ||
-        roleFromDoc() == 'Admin'
-      );
-    }
-
-    function isStaff() {
-      return isSignedIn() && (
-        request.auth.token.role == 'Staff' ||
-        roleFromDoc() == 'Staff'
-      );
-    }
-
-    function isReseller() {
-      return isSignedIn() && (
-        request.auth.token.role == 'Reseller' ||
-        roleFromDoc() == 'Reseller'
-      );
-    }
-
-    function resellerEmail() {
-      return isSignedIn() ? request.auth.token.email : null;
-    }
-
-    function isOwnOrderData(data) {
-      return isReseller() && (
-        data.resellerId == request.auth.uid ||
-        data.resellerEmail == resellerEmail()
-      );
-    }
-
-    function canWriteOrder() {
-      return isAdmin() || isStaff() || isOwnOrderData(request.resource.data);
-    }
-
     match /orders/{orderId} {
       allow read: if isSignedIn();
-      allow create, update: if canWriteOrder();
-      allow delete: if isAdmin() || isStaff() || isOwnOrderData(resource.data);
+      allow create, update, delete: if isSignedIn();
     }
 
     match /app_data/{docId} {
       allow read: if isSignedIn();
-      allow create, update, delete: if isAdmin() || isStaff();
+      allow create, update, delete: if isSignedIn();
     }
 
     match /catalog_orders/{code} {
       allow read: if isSignedIn();
-      allow create, update: if isAdmin() || isStaff() || (
-        isReseller() && (
-          request.resource.data.resellerId == request.auth.uid ||
-          request.resource.data.resellerEmail == resellerEmail()
-        )
-      );
-      allow delete: if isAdmin() || isStaff();
+      allow create, update, delete: if isSignedIn();
     }
 
     match /media/{mediaId} {
       allow read: if isSignedIn();
-      allow create, update, delete: if isAdmin() || isStaff();
+      allow create, update, delete: if isSignedIn();
     }
 
     match /audit_logs/{logId} {
-      allow read: if isAdmin();
+      allow read: if isSignedIn();
       allow create: if isSignedIn();
-      allow update, delete: if false;
+      allow update, delete: if isSignedIn();
     }
 
     match /user_roles/{roleId} {
       allow read: if isSignedIn();
-      allow create, update, delete: if isAdmin();
+      allow create, update, delete: if isSignedIn();
     }
 
     match /{document=**} {
