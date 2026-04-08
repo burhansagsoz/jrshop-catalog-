@@ -7299,6 +7299,7 @@ function firebaseAuthHint(err){
   if(code==='auth/operation-not-allowed') return 'enable Email/Password and Anonymous in Firebase Auth Sign-in method';
   if(code==='auth/api-key-not-valid') return 'check Firebase apiKey in Settings';
   if(code==='auth/invalid-api-key') return 'check Firebase apiKey in Settings';
+  if(code==='auth/invalid-email') return 'fix saved login email format and sign in again';
   if(code==='auth/unauthorized-domain') return 'add this domain in Firebase Auth Authorized domains';
   if(code==='auth/network-request-failed') return 'network/firewall blocked Firebase';
   if(code==='auth/too-many-requests') return 'too many attempts, wait and retry';
@@ -7309,6 +7310,7 @@ function firebaseAuthStateHint(state){
   const s=String(state||'');
   if(s==='auth_provider_disabled') return 'Firebase Auth -> Sign-in method: enable Email/Password and Anonymous';
   if(s==='auth_invalid_api_key') return 'Firebase config API key invalid';
+  if(s==='auth_invalid_email') return 'Saved login email format is invalid; sign in again from login screen';
   if(s==='auth_unauthorized_domain') return 'Firebase Auth -> Authorized domains: add this domain';
   if(s==='auth_network_error') return 'Network blocked Firebase; try another connection';
   if(s==='auth_config_error') return 'Firebase Auth configuration missing';
@@ -7367,10 +7369,14 @@ function decodeSavedPassword(raw){
   if(!raw) return '';
   try{return decodeURIComponent(atob(String(raw)));}catch(_e){return '';}
 }
+function isValidAuthEmail(email){
+  const em=String(email||'').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em);
+}
 function cacheFirebaseLoginCreds(email,password){
   const em=String(email||'').trim().toLowerCase();
   const pw=String(password||'');
-  if(!em||!pw) return;
+  if(!isValidAuthEmail(em)||!pw) return;
   try{
     localStorage.setItem(FIREBASE_AUTH_EMAIL_KEY,em);
     localStorage.setItem(FIREBASE_AUTH_PASSWORD_KEY,encodeSavedPassword(pw));
@@ -7381,6 +7387,7 @@ function mapFirebaseAuthState(err,defaultState='auth_error'){
   if(!code) return defaultState;
   if(code==='auth/operation-not-allowed') return 'auth_provider_disabled';
   if(code==='auth/invalid-api-key') return 'auth_invalid_api_key';
+  if(code==='auth/invalid-email') return 'auth_invalid_email';
   if(code==='auth/unauthorized-domain') return 'auth_unauthorized_domain';
   if(code==='auth/network-request-failed') return 'auth_network_error';
   if(code==='auth/configuration-not-found') return 'auth_config_error';
@@ -7391,18 +7398,30 @@ function mapFirebaseAuthState(err,defaultState='auth_error'){
 function getFirebaseLoginCreds(){
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   const mePw=me&&me.password?String(me.password):'';
-  if(meEmail&&mePw) return {email:meEmail,password:mePw};
+  if(isValidAuthEmail(meEmail)&&mePw) return {email:meEmail,password:mePw};
   const remEmail=String(localStorage.getItem('jb_remember_email')||'').trim().toLowerCase();
   const remPw=String(localStorage.getItem('jb_remember_pw')||'');
-  if(remEmail&&remPw) return {email:remEmail,password:remPw};
+  if(isValidAuthEmail(remEmail)&&remPw) return {email:remEmail,password:remPw};
+  if(remEmail && !isValidAuthEmail(remEmail)){
+    try{
+      localStorage.removeItem('jb_remember_email');
+      localStorage.removeItem('jb_remember_pw');
+    }catch(_e){}
+  }
   const savedEmail=String(localStorage.getItem(FIREBASE_AUTH_EMAIL_KEY)||'').trim().toLowerCase();
   const savedPw=decodeSavedPassword(localStorage.getItem(FIREBASE_AUTH_PASSWORD_KEY)||'');
-  if(savedEmail&&savedPw) return {email:savedEmail,password:savedPw};
+  if(isValidAuthEmail(savedEmail)&&savedPw) return {email:savedEmail,password:savedPw};
+  if(savedEmail && !isValidAuthEmail(savedEmail)){
+    try{
+      localStorage.removeItem(FIREBASE_AUTH_EMAIL_KEY);
+      localStorage.removeItem(FIREBASE_AUTH_PASSWORD_KEY);
+    }catch(_e){}
+  }
   const formEmailEl=document.getElementById('l-em');
   const formPwEl=document.getElementById('l-pw');
   const formEmail=formEmailEl&&formEmailEl.value?String(formEmailEl.value).trim().toLowerCase():'';
   const formPw=formPwEl&&formPwEl.value?String(formPwEl.value):'';
-  if(formEmail&&formPw) return {email:formEmail,password:formPw};
+  if(isValidAuthEmail(formEmail)&&formPw) return {email:formEmail,password:formPw};
   return null;
 }
 
@@ -7478,7 +7497,7 @@ async function firebaseSignInForSession(email,password){
   if(!_firebaseAuth) return null;
   const em=String(email||'').trim().toLowerCase();
   const pw=String(password||'');
-  if(!em||!pw){
+  if(!isValidAuthEmail(em)||!pw){
     _health.authState='waiting_login';
     return null;
   }
@@ -7499,6 +7518,10 @@ async function firebaseSignInForSession(email,password){
         _health.authState=mapFirebaseAuthState(createErr,'auth_error');
         return null;
       }
+    }
+    if(err&&err.code==='auth/invalid-email'){
+      _health.authState='auth_invalid_email';
+      return null;
     }
     markError(err);
     _health.authState=mapFirebaseAuthState(err,'auth_error');
