@@ -5,153 +5,711 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JRSHOP Catalog</title>
 <style>
-  *{box-sizing:border-box}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background:#f8fafc;color:#0f172a;margin:0}
-  .top{position:sticky;top:0;background:#fff;border-bottom:1px solid #e2e8f0;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px;z-index:9}
-  .brand{font-weight:800}
-  .btn{display:inline-flex;align-items:center;justify-content:center;padding:8px 12px;border-radius:10px;border:1px solid #e2e8f0;background:#fff;color:#0f172a;text-decoration:none;font-weight:700;cursor:pointer}
-  .btn-accent{background:#f97316;color:#fff;border-color:#f97316}
-  .wrap{max-width:1100px;margin:0 auto;padding:14px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-  .card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden}
-  .img{width:100%;aspect-ratio:1/1;object-fit:cover;background:#eef2f7}
-  .ph{width:100%;aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;color:#94a3b8;background:#eef2f7;font-size:26px}
-  .body{padding:10px}
-  .nm{font-size:14px;font-weight:800}
-  .ds{font-size:12px;color:#64748b;margin-top:5px;min-height:30px}
-  .pr{margin-top:8px;font-weight:900;color:#f97316}
-  .empty{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:26px;text-align:center;color:#64748b}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background:#f4f6fb;color:#0f172a}
+.top{position:sticky;top:0;z-index:20;background:linear-gradient(135deg,#1f2937,#111827);color:#fff;padding:14px 14px 12px;border-bottom:1px solid rgba(255,255,255,.08)}
+.top-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.brand{font-weight:900;letter-spacing:.2px}
+.sub{font-size:12px;opacity:.75;margin-top:3px}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:9px 13px;border-radius:10px;border:1px solid #dbe1ea;background:#fff;color:#111827;text-decoration:none;font-weight:700;cursor:pointer}
+.btn-pri{background:#f97316;border-color:#f97316;color:#fff}
+.btn-ghost{background:#fff}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.wrap{max-width:1100px;margin:0 auto;padding:14px}
+.empty{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:30px;text-align:center;color:#64748b}
+.toolbar{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.search{flex:1;min-width:220px;display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px}
+.search input{width:100%;border:none;outline:none;background:transparent;font-size:14px}
+.cat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.cat-card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 14px;cursor:pointer}
+.cat-name{font-size:14px;font-weight:800}
+.cat-count{margin-top:6px;font-size:12px;color:#64748b}
+.prod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.prod{background:#fff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.img-wrap{width:100%;aspect-ratio:1/1;background:#eef2f7;display:flex;align-items:center;justify-content:center}
+.img-wrap img{width:100%;height:100%;object-fit:cover}
+.ph{font-size:28px;color:#94a3b8}
+.body{padding:10px 11px 12px}
+.name{font-size:14px;font-weight:800}
+.desc{margin-top:5px;font-size:12px;color:#64748b;min-height:30px}
+.price{margin-top:8px;font-size:18px;font-weight:900;color:#f97316}
+.stock{display:inline-block;margin-top:6px;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
+.in{background:#dcfce7;color:#166534}
+.out{background:#fee2e2;color:#991b1b}
+.prod-actions{display:flex;gap:8px;padding:0 11px 11px}
+.prod-actions .btn{flex:1}
+.float-cart{position:fixed;right:16px;bottom:18px;z-index:25;display:none}
+.sheet-back{position:fixed;inset:0;background:rgba(2,6,23,.45);z-index:40;display:none;align-items:flex-end;justify-content:center}
+.sheet-back.on{display:flex}
+.sheet{background:#fff;width:100%;max-width:650px;max-height:92vh;border-radius:18px 18px 0 0;overflow:auto;padding:16px}
+.drag{width:42px;height:4px;background:#dbe3ef;border-radius:99px;margin:0 auto 12px}
+.hrow{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.opt-wrap{margin-top:10px}
+.opt-title{font-size:12px;font-weight:800;color:#334155;margin-bottom:6px}
+.chips{display:flex;gap:7px;flex-wrap:wrap}
+.chip{padding:7px 12px;border:1.5px solid #dbe3ef;border-radius:10px;background:#fff;font-size:13px;font-weight:700;cursor:pointer}
+.chip.on{border-color:#f97316;background:#fff7ed;color:#f97316}
+.qty{display:flex;align-items:center;gap:10px;margin-top:10px}
+.qty button{width:34px;height:34px;border:1px solid #dbe3ef;border-radius:10px;background:#fff;font-size:18px;cursor:pointer}
+.qty b{font-size:18px;min-width:26px;text-align:center}
+.cart-item{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #eef2f7}
+.cart-item:last-child{border-bottom:none}
+.tiny{font-size:12px;color:#64748b}
+.sum{margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0}
+.sum-row{display:flex;justify-content:space-between;margin-bottom:6px}
+.sum-row.total{font-size:20px;font-weight:900;color:#f97316;margin-top:6px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.form-grid .full{grid-column:1/-1}
+.fi{width:100%;padding:10px 12px;border:1px solid #dbe3ef;border-radius:10px;font-size:14px;outline:none}
+.toast{position:fixed;left:50%;bottom:85px;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px;z-index:60;opacity:0;transition:.2s}
+.toast.on{opacity:1}
+@media (max-width:640px){
+  .prod-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .form-grid{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
   <div class="top">
-    <div class="brand">JRSHOP Catalog</div>
-    <a class="btn" href="./index.html">Open App</a>
+    <div class="top-row">
+      <div>
+        <div class="brand">JRSHOP Catalog</div>
+        <div class="sub">Choose category → product → variant → address → copy & send</div>
+      </div>
+      <a class="btn btn-ghost" href="./index.html">Open App</a>
+    </div>
   </div>
+
   <div class="wrap">
     <div id="state" class="empty">Loading catalog...</div>
-    <div id="list" class="grid" style="display:none;"></div>
+
+    <div id="shop" style="display:none;">
+      <div class="toolbar">
+        <button class="btn" id="back-cats" style="display:none;" onclick="showCategories()">← Categories</button>
+        <div class="search"><span>🔍</span><input id="search" placeholder="Search products..." oninput="renderProducts()"></div>
+      </div>
+
+      <div id="cats" class="cat-grid"></div>
+      <div id="products" class="prod-grid" style="display:none;"></div>
+    </div>
   </div>
+
+  <button id="float-cart" class="btn btn-pri float-cart" onclick="openCart()">🛒 <span id="cart-count">0</span></button>
+
+  <div id="prod-sheet-back" class="sheet-back" onclick="if(event.target===this)closeProductSheet()">
+    <div class="sheet">
+      <div class="drag"></div>
+      <div id="prod-sheet-content"></div>
+    </div>
+  </div>
+
+  <div id="cart-sheet-back" class="sheet-back" onclick="if(event.target===this)closeCart()">
+    <div class="sheet">
+      <div class="drag"></div>
+      <div class="hrow">
+        <h3 style="margin:0">🛒 Your Cart</h3>
+        <button class="btn" onclick="closeCart()">Close</button>
+      </div>
+      <div id="cart-list" style="margin-top:8px;"></div>
+      <div id="cart-summary" class="sum"></div>
+      <div class="hrow" style="margin-top:10px;">
+        <button class="btn" onclick="clearCart()">Clear</button>
+        <button id="go-checkout" class="btn btn-pri" onclick="openCheckout()" disabled>Checkout</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="checkout-sheet-back" class="sheet-back" onclick="if(event.target===this)closeCheckout()">
+    <div class="sheet">
+      <div class="drag"></div>
+      <div class="hrow">
+        <h3 style="margin:0">Customer Details</h3>
+        <button class="btn" onclick="closeCheckout()">Close</button>
+      </div>
+      <p class="tiny" style="margin:8px 0 12px;">Payment is handled manually in Messenger after seller review.</p>
+      <div class="form-grid">
+        <input class="fi full" id="co-name" placeholder="Full Name *">
+        <input class="fi" id="co-phone" placeholder="Phone *">
+        <input class="fi" id="co-email" placeholder="Email *">
+        <input class="fi full" id="co-addr" placeholder="Address *">
+        <input class="fi" id="co-city" placeholder="City *">
+        <input class="fi" id="co-post" placeholder="Postcode *">
+        <textarea class="fi full" id="co-note" placeholder="Notes (optional)" rows="3"></textarea>
+      </div>
+      <div style="margin-top:12px;">
+        <button class="btn btn-pri" style="width:100%;" onclick="copyAndSendToMessenger()">📋 Copy & Send to Messenger</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
 <script>
-(async function(){
+(function(){
   const stateEl=document.getElementById('state');
-  const listEl=document.getElementById('list');
-  const LOADING_TEXT='Loading catalog...';
-  const loadingGuard=setTimeout(function(){
-    if(stateEl&&stateEl.style.display!=='none'&&stateEl.textContent===LOADING_TEXT){
-      stateEl.textContent='Catalog loading is taking longer than expected. Please refresh.';
-    }
-  },12000);
-  const FIREBASE_CONFIG_DEFAULT={
-    apiKey:"AIzaSyBidcdMLlFsEp6c6P_tqwMMtP9w3wLKtFE",
-    authDomain:"jrshop-d732e.firebaseapp.com",
-    projectId:"jrshop-d732e",
-    storageBucket:"jrshop-d732e.firebasestorage.app",
-    messagingSenderId:"391477157629",
-    appId:"1:391477157629:web:ec7a9ffb307deca6296894",
-    measurementId:"G-B1RG9Z0D79"
-  };
+  const shopEl=document.getElementById('shop');
+  const catsEl=document.getElementById('cats');
+  const productsEl=document.getElementById('products');
+  const backCatsBtn=document.getElementById('back-cats');
+  const searchEl=document.getElementById('search');
+  const floatCartBtn=document.getElementById('float-cart');
+  const cartCountEl=document.getElementById('cart-count');
+  const cartListEl=document.getElementById('cart-list');
+  const cartSummaryEl=document.getElementById('cart-summary');
+  const goCheckoutBtn=document.getElementById('go-checkout');
+
+  let products=[];
+  let categories=[];
+  let activeCategory='';
+  let cart=[];
+  let currentProduct=null;
+  let selectedOptions={};
+  let qty=1;
+  let messengerLink='https://www.messenger.com';
+
+  function toast(msg){
+    const el=document.getElementById('toast');
+    if(!el) return;
+    el.textContent=String(msg||'');
+    el.classList.add('on');
+    setTimeout(()=>el.classList.remove('on'),2200);
+  }
+
   function fetchWithTimeout(url, ms){
-    const timeoutMs=Math.max(1000, Number(ms)||4500);
+    const timeoutMs=Math.max(1200,Number(ms)||6000);
     const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(), timeoutMs);
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
     return fetch(url,{signal:controller.signal}).finally(()=>clearTimeout(timer));
   }
-  function loadScript(src){
-    return new Promise((resolve,reject)=>{
-      const existing=document.querySelector('script[data-src="'+src+'"]');
-      if(existing){
-        if(existing.getAttribute('data-loaded')==='1') return resolve();
-        existing.addEventListener('load',()=>resolve(),{once:true});
-        existing.addEventListener('error',()=>reject(new Error('script load error')),{once:true});
+
+  function esc(s){
+    return String(s==null?'':s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+  }
+
+  function money(v){
+    const n=Number(v)||0;
+    return '£'+n.toFixed(2);
+  }
+
+  function parsePrice(raw){
+    const str=String(raw==null?'':raw).replace(/[^0-9.]/g,'');
+    const n=Number(str);
+    return Number.isFinite(n)?n:0;
+  }
+
+  function normalizeOpt(x){
+    if(typeof x==='string') return {value:x,label:x};
+    if(x&&typeof x==='object'){
+      const val=String(x.value||x.label||x.name||'').trim();
+      if(!val) return null;
+      return {value:val,label:val};
+    }
+    return null;
+  }
+
+  function extractOptionGroups(p){
+    const groups=[];
+    function pushGroup(name,list){
+      const opts=(Array.isArray(list)?list:[]).map(normalizeOpt).filter(Boolean);
+      const uniq=[...new Map(opts.map(o=>[o.value,o])).values()];
+      if(uniq.length) groups.push({name:String(name||'Option'),options:uniq});
+    }
+    if(Array.isArray(p.sizes)) pushGroup('Size',p.sizes);
+    if(Array.isArray(p.colors)) pushGroup('Color',p.colors);
+
+    const variants=Array.isArray(p.variants)?p.variants:[];
+    variants.forEach(v=>{
+      if(typeof v==='string'){
+        pushGroup('Variant',[v]);
         return;
       }
-      const s=document.createElement('script');
-      s.src=src;
-      s.async=true;
-      s.setAttribute('data-src',src);
-      s.addEventListener('load',()=>{s.setAttribute('data-loaded','1');resolve();},{once:true});
-      s.addEventListener('error',()=>reject(new Error('script load error')),{once:true});
-      document.head.appendChild(s);
+      if(!v||typeof v!=='object') return;
+      if(Array.isArray(v.options)){
+        pushGroup(v.name||v.label||v.type||'Option',v.options);
+      }else{
+        const one=normalizeOpt(v);
+        if(one) pushGroup('Variant',[one]);
+      }
     });
+
+    const merged={};
+    groups.forEach(g=>{
+      const key=g.name.toLowerCase();
+      if(!merged[key]) merged[key]={name:g.name,options:[]};
+      merged[key].options.push(...g.options);
+    });
+    return Object.values(merged).map(g=>({
+      name:g.name,
+      options:[...new Map(g.options.map(o=>[o.value,o])).values()]
+    }));
   }
-  async function loadCatalogFromApi(){
-    const r=await fetchWithTimeout('/api/data', 4500);
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const payload=await r.json();
-    const data=payload&&payload.data?payload.data:{};
-    return Array.isArray(data.jb_catalog)?data.jb_catalog:[];
+
+  function normalizeProduct(p){
+    const name=String(p&&p.name||'').trim();
+    if(!name) return null;
+    const image=String(p&&p.img||'').trim();
+    const safeImg=/^(https?:|data:|blob:|\/api\/image\/)/.test(image)?image:'';
+    const category=String(p&&p.category||'General').trim()||'General';
+    return {
+      id:String(p&&p.id||('p_'+Math.random().toString(36).slice(2,8))),
+      name,
+      desc:String(p&&p.desc||'').trim(),
+      category,
+      price:parsePrice(p&&p.price),
+      inStock:p&&p.inStock!==false,
+      img:safeImg,
+      optionGroups:extractOptionGroups(p||{})
+    };
   }
-  function loadCatalogFromLocal(){
+
+  function loadLocalCatalog(){
     try{
       const raw=localStorage.getItem('jb_catalog');
-      const list=raw?JSON.parse(raw):[];
-      return Array.isArray(list)?list:[];
+      const arr=raw?JSON.parse(raw):[];
+      return Array.isArray(arr)?arr:[];
     }catch(_e){
       return [];
     }
   }
-  async function loadCatalogFromFirestore(){
-    await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js');
-    await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js');
-    await loadScript('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js');
-    if(!window.firebase||!window.firebase.firestore||!window.firebase.auth) throw new Error('Firebase unavailable');
-    const app=(window.firebase.apps&&window.firebase.apps.length)?window.firebase.app():window.firebase.initializeApp(FIREBASE_CONFIG_DEFAULT);
-    const auth=window.firebase.auth(app);
-    const db=window.firebase.firestore(app);
-    if(!auth.currentUser){
-      await auth.signInAnonymously();
-    }
-    const doc=await db.collection('app_data').doc('jb_catalog').get();
-    const value=doc.exists?(doc.data()||{}).value:[];
-    return Array.isArray(value)?value:[];
+
+  async function loadRemoteData(){
+    const res=await fetchWithTimeout('/api/data',7000);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload=await res.json();
+    const data=payload&&payload.data?payload.data:{};
+    return {
+      catalog:Array.isArray(data.jb_catalog)?data.jb_catalog:[],
+      categories:Array.isArray(data.jb_cat_categories)?data.jb_cat_categories:[],
+      settings:(data.jb_settings&&typeof data.jb_settings==='object')?data.jb_settings:{}
+    };
   }
-  function renderCatalog(products){
-    if(!products.length){
-      stateEl.textContent='No products available yet.';
-      return;
-    }
-    stateEl.style.display='none';
-    listEl.style.display='grid';
-    listEl.innerHTML=products.map(function(p){
-      const name=String(p&&p.name||'Product');
-      const desc=String(p&&p.desc||'');
-      const img=(p&&p.img&&/^(https?:|data:|blob:|\/api\/image\/)/.test(String(p.img)))?String(p.img):'';
-      const priceRaw=String(p&&p.price||'').replace(/[^0-9.]/g,'');
-      const price=priceRaw?('£'+Number(priceRaw).toFixed(2)):'-';
-      return '<div class="card">'
-        +(img?("<img class=\"img\" src=\""+img+"\" loading=\"lazy\" onerror=\"this.style.display='none';this.nextElementSibling.style.display='flex';\"><div class=\"ph\" style=\"display:none;\">🛍️</div>"):('<div class="ph">🛍️</div>'))
-        +'<div class="body"><div class="nm">'+name.replace(/[<>&]/g,'')+'</div><div class="ds">'+desc.replace(/[<>&]/g,'')+'</div><div class="pr">'+price+'</div></div></div>';
+
+  function deriveCategories(list,fromServer){
+    const fromProducts=[...new Set((list||[]).map(p=>p.category).filter(Boolean))];
+    const merged=[...(Array.isArray(fromServer)?fromServer:[]),...fromProducts];
+    const uniq=[...new Set(merged.map(c=>String(c||'').trim()).filter(Boolean))];
+    return uniq.length?uniq:['General'];
+  }
+
+  function showCategories(){
+    activeCategory='';
+    backCatsBtn.style.display='none';
+    catsEl.style.display='grid';
+    productsEl.style.display='none';
+    searchEl.value='';
+    renderCategories();
+  }
+  window.showCategories=showCategories;
+
+  function renderCategories(){
+    const counts={};
+    categories.forEach(c=>counts[c]=0);
+    products.forEach(p=>{counts[p.category]=(counts[p.category]||0)+1;});
+    const allCount=products.length;
+    const cards=[
+      {name:'All Products',count:allCount}
+    ].concat(categories.map(c=>({name:c,count:counts[c]||0})));
+    catsEl.innerHTML=cards.map(function(c){
+      return `<button class="cat-card" onclick="openCategory('${esc(c.name)}')">
+        <div class="cat-name">${esc(c.name)}</div>
+        <div class="cat-count">${c.count} products</div>
+      </button>`;
     }).join('');
   }
-  try{
-    const localProducts=loadCatalogFromLocal();
-    const hasLocal=Array.isArray(localProducts)&&localProducts.length>0;
-    if(hasLocal){
-      renderCatalog(localProducts);
-    }
-    let products=[];
-    try{
-      products=await loadCatalogFromApi();
-    }catch(_apiErr){
-      products=await loadCatalogFromFirestore();
-    }
-    if(Array.isArray(products)&&products.length){
-      renderCatalog(products);
-      try{localStorage.setItem('jb_catalog',JSON.stringify(products));}catch(_e){}
-    }else if(!hasLocal){
-      renderCatalog([]);
-    }
-  }catch(_err){
-    const localProducts=loadCatalogFromLocal();
-    if(Array.isArray(localProducts)&&localProducts.length){
-      renderCatalog(localProducts);
-    }else{
-      stateEl.textContent='Catalog could not be loaded. Please try again.';
-    }
-  }finally{
-    clearTimeout(loadingGuard);
+
+  function openCategory(cat){
+    activeCategory=cat==='All Products'?'':cat;
+    backCatsBtn.style.display='inline-flex';
+    catsEl.style.display='none';
+    productsEl.style.display='grid';
+    renderProducts();
   }
+  window.openCategory=openCategory;
+
+  function productMatchesQuery(p,q){
+    if(!q) return true;
+    const hay=(p.name+' '+p.desc+' '+p.category).toLowerCase();
+    return hay.indexOf(q)>=0;
+  }
+
+  function renderProducts(){
+    const q=String(searchEl.value||'').trim().toLowerCase();
+    const list=products.filter(function(p){
+      if(activeCategory && p.category!==activeCategory) return false;
+      return productMatchesQuery(p,q);
+    });
+    if(!list.length){
+      productsEl.innerHTML='<div class="empty" style="grid-column:1/-1;">No products found in this category.</div>';
+      return;
+    }
+    productsEl.innerHTML=list.map(function(p){
+      const img=p.img?`<img src="${esc(p.img)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ph" style="display:none;">🛍️</div>`:'<div class="ph">🛍️</div>';
+      const stock=p.inStock?'<span class="stock in">In stock</span>':'<span class="stock out">Out of stock</span>';
+      return `<div class="prod">
+        <div class="img-wrap">${img}</div>
+        <div class="body">
+          <div class="name">${esc(p.name)}</div>
+          <div class="desc">${esc(p.desc||'')}</div>
+          <div class="price">${money(p.price)}</div>
+          ${stock}
+        </div>
+        <div class="prod-actions">
+          <button class="btn" onclick="openProductSheet('${esc(p.id)}')">Details</button>
+          <button class="btn btn-pri" ${p.inStock?'':'disabled'} onclick="quickAdd('${esc(p.id)}')">Add</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  window.renderProducts=renderProducts;
+
+  function findProduct(id){
+    return products.find(p=>p.id===id)||null;
+  }
+
+  function openProductSheet(id){
+    const p=findProduct(id);
+    if(!p) return;
+    currentProduct=p;
+    qty=1;
+    selectedOptions={};
+    (p.optionGroups||[]).forEach(g=>{
+      if(g.options&&g.options[0]) selectedOptions[g.name]=g.options[0].value;
+    });
+    drawProductSheet();
+    document.getElementById('prod-sheet-back').classList.add('on');
+  }
+  window.openProductSheet=openProductSheet;
+
+  function closeProductSheet(){
+    document.getElementById('prod-sheet-back').classList.remove('on');
+  }
+  window.closeProductSheet=closeProductSheet;
+
+  function setOption(group,val){
+    selectedOptions[group]=val;
+    drawProductSheet();
+  }
+  window.setOption=setOption;
+
+  function setQty(delta){
+    qty=Math.max(1,qty+delta);
+    drawProductSheet();
+  }
+  window.setQty=setQty;
+
+  function optionSummary(opts){
+    const keys=Object.keys(opts||{});
+    if(!keys.length) return '';
+    return keys.map(k=>k+': '+opts[k]).join(', ');
+  }
+
+  function drawProductSheet(){
+    if(!currentProduct) return;
+    const p=currentProduct;
+    const img=p.img?`<img src="${esc(p.img)}" style="width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:12px;margin:8px 0 10px;">`:'';
+    const groups=(p.optionGroups||[]).map(g=>{
+      const chips=(g.options||[]).map(o=>{
+        const on=selectedOptions[g.name]===o.value;
+        return `<button class="chip ${on?'on':''}" onclick="setOption('${esc(g.name)}','${esc(o.value)}')">${esc(o.label)}</button>`;
+      }).join('');
+      return `<div class="opt-wrap">
+        <div class="opt-title">${esc(g.name)}</div>
+        <div class="chips">${chips}</div>
+      </div>`;
+    }).join('');
+    const html=`<div class="hrow">
+      <h3 style="margin:0">${esc(p.name)}</h3>
+      <button class="btn" onclick="closeProductSheet()">Close</button>
+    </div>
+    ${img}
+    <div class="tiny">${esc(p.desc||'')}</div>
+    <div style="margin-top:8px;font-size:22px;font-weight:900;color:#f97316;">${money(p.price)}</div>
+    ${groups}
+    <div class="qty">
+      <button onclick="setQty(-1)">−</button><b>${qty}</b><button onclick="setQty(1)">+</button>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn btn-pri" style="width:100%;" ${p.inStock?'':'disabled'} onclick="addCurrentToCart()">Add to Cart</button>
+    </div>`;
+    document.getElementById('prod-sheet-content').innerHTML=html;
+  }
+
+  function cartKeyFor(product,opts){
+    return product.id+'|'+JSON.stringify(opts||{});
+  }
+
+  function addToCart(product,opts,count){
+    const key=cartKeyFor(product,opts);
+    const existing=cart.find(i=>i.key===key);
+    if(existing){
+      existing.qty+=count;
+    }else{
+      cart.push({
+        key,
+        id:product.id,
+        name:product.name,
+        price:product.price,
+        qty:count,
+        img:product.img||'',
+        options:{...(opts||{})}
+      });
+    }
+    updateCartUi();
+  }
+
+  function addCurrentToCart(){
+    if(!currentProduct) return;
+    addToCart(currentProduct,selectedOptions,qty);
+    closeProductSheet();
+    toast('Added to cart');
+  }
+  window.addCurrentToCart=addCurrentToCart;
+
+  function quickAdd(id){
+    const p=findProduct(id);
+    if(!p) return;
+    const opts={};
+    (p.optionGroups||[]).forEach(g=>{
+      if(g.options&&g.options[0]) opts[g.name]=g.options[0].value;
+    });
+    addToCart(p,opts,1);
+    toast('Added to cart');
+  }
+  window.quickAdd=quickAdd;
+
+  function updateCartUi(){
+    const count=cart.reduce((s,i)=>s+(Number(i.qty)||0),0);
+    cartCountEl.textContent=String(count);
+    floatCartBtn.style.display=count?'inline-flex':'none';
+    goCheckoutBtn.disabled=!count;
+    renderCart();
+  }
+
+  function openCart(){
+    renderCart();
+    document.getElementById('cart-sheet-back').classList.add('on');
+  }
+  window.openCart=openCart;
+
+  function closeCart(){
+    document.getElementById('cart-sheet-back').classList.remove('on');
+  }
+  window.closeCart=closeCart;
+
+  function setCartQty(i,delta){
+    if(!cart[i]) return;
+    cart[i].qty=Math.max(0,(Number(cart[i].qty)||0)+delta);
+    if(cart[i].qty===0) cart.splice(i,1);
+    updateCartUi();
+  }
+  window.setCartQty=setCartQty;
+
+  function removeCartItem(i){
+    cart.splice(i,1);
+    updateCartUi();
+  }
+  window.removeCartItem=removeCartItem;
+
+  function clearCart(){
+    cart=[];
+    updateCartUi();
+  }
+  window.clearCart=clearCart;
+
+  function renderCart(){
+    if(!cart.length){
+      cartListEl.innerHTML='<div class="empty">Your cart is empty.</div>';
+      cartSummaryEl.innerHTML='';
+      return;
+    }
+    cartListEl.innerHTML=cart.map(function(item,i){
+      const opts=optionSummary(item.options);
+      const img=item.img?`<img src="${esc(item.img)}" style="width:52px;height:52px;border-radius:10px;object-fit:cover;">`:'<div class="ph" style="width:52px;height:52px;border-radius:10px;background:#eef2f7;font-size:20px;">🛍️</div>';
+      return `<div class="cart-item">
+        ${img}
+        <div style="flex:1;">
+          <div style="font-size:13px;font-weight:800;">${esc(item.name)}</div>
+          ${opts?`<div class="tiny">${esc(opts)}</div>`:''}
+          <div style="margin-top:4px;font-size:13px;font-weight:800;color:#f97316;">${money(item.price*item.qty)}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button class="btn" style="padding:4px 8px;" onclick="setCartQty(${i},-1)">−</button>
+          <b style="min-width:16px;text-align:center;">${item.qty}</b>
+          <button class="btn" style="padding:4px 8px;" onclick="setCartQty(${i},1)">+</button>
+          <button class="btn" style="padding:4px 8px;" onclick="removeCartItem(${i})">✕</button>
+        </div>
+      </div>`;
+    }).join('');
+    const subtotal=cart.reduce((s,i)=>s+((Number(i.price)||0)*(Number(i.qty)||0)),0);
+    cartSummaryEl.innerHTML=`
+      <div class="sum-row"><span>Items</span><span>${cart.reduce((s,i)=>s+(Number(i.qty)||0),0)}</span></div>
+      <div class="sum-row total"><span>Total</span><span>${money(subtotal)}</span></div>
+    `;
+  }
+
+  function openCheckout(){
+    if(!cart.length){
+      toast('Cart is empty');
+      return;
+    }
+    closeCart();
+    document.getElementById('checkout-sheet-back').classList.add('on');
+  }
+  window.openCheckout=openCheckout;
+
+  function closeCheckout(){
+    document.getElementById('checkout-sheet-back').classList.remove('on');
+  }
+  window.closeCheckout=closeCheckout;
+
+  function getInput(id){
+    return String((document.getElementById(id)&&document.getElementById(id).value)||'').trim();
+  }
+
+  function buildOrderCode(){
+    const now=new Date();
+    const yy=String(now.getFullYear()).slice(2);
+    const mm=String(now.getMonth()+1).padStart(2,'0');
+    const dd=String(now.getDate()).padStart(2,'0');
+    const rnd=Math.random().toString(36).slice(2,6).toUpperCase();
+    return 'JR'+yy+mm+dd+'-'+rnd;
+  }
+
+  async function copyAndSendToMessenger(){
+    const name=getInput('co-name');
+    const phone=getInput('co-phone');
+    const email=getInput('co-email');
+    const addr=getInput('co-addr');
+    const city=getInput('co-city');
+    const post=getInput('co-post');
+    const note=getInput('co-note');
+    if(!name||!phone||!email||!addr||!city||!post){
+      toast('Please fill all required fields');
+      return;
+    }
+    if(!cart.length){
+      toast('Cart is empty');
+      return;
+    }
+    const code=buildOrderCode();
+    const total=cart.reduce((s,i)=>s+((Number(i.price)||0)*(Number(i.qty)||0)),0);
+    const lines=cart.map(function(i,idx){
+      const opts=optionSummary(i.options);
+      return `${idx+1}) ${i.name}${opts?' ('+opts+')':''} x${i.qty} = ${money(i.price*i.qty)}`;
+    });
+    const message=[
+      'JRSHOP ORDER',
+      'Order Code: '+code,
+      '',
+      'Customer:',
+      'Name: '+name,
+      'Phone: '+phone,
+      'Email: '+email,
+      'Address: '+addr+', '+city+' '+post,
+      note?('Note: '+note):'',
+      '',
+      'Items:',
+      ...lines,
+      '',
+      'TOTAL: '+money(total)
+    ].filter(Boolean).join('\n');
+
+    try{
+      await navigator.clipboard.writeText(message);
+      toast('Order copied. Opening Messenger...');
+    }catch(_e){
+      const ta=document.createElement('textarea');
+      ta.value=message;
+      ta.style.position='fixed';
+      ta.style.left='-9999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try{document.execCommand('copy');}catch(__e){}
+      document.body.removeChild(ta);
+      toast('Order copied');
+    }
+
+    const payload={
+      code,
+      name,
+      phone,
+      email,
+      address:addr,
+      city,
+      postcode:post,
+      note,
+      products:cart.map(i=>({name:i.name,qty:i.qty,price:i.price,options:i.options})),
+      total,
+      ts:Date.now()
+    };
+    try{
+      const arr=JSON.parse(localStorage.getItem('catalog_orders')||'[]');
+      arr.push(payload);
+      localStorage.setItem('catalog_orders',JSON.stringify(arr));
+    }catch(_e){}
+
+    if(messengerLink){
+      try{window.open(messengerLink,'_blank');}catch(_e){}
+    }
+    cart=[];
+    updateCartUi();
+    closeCheckout();
+  }
+  window.copyAndSendToMessenger=copyAndSendToMessenger;
+
+  async function boot(){
+    const loadingGuard=setTimeout(function(){
+      if(stateEl&&stateEl.style.display!=='none'&&stateEl.textContent==='Loading catalog...'){
+        stateEl.textContent='Catalog loading is taking longer than expected. Please refresh.';
+      }
+    },12000);
+
+    try{
+      const local=loadLocalCatalog().map(normalizeProduct).filter(Boolean);
+      if(local.length){
+        products=local;
+        categories=deriveCategories(products,[]);
+        stateEl.style.display='none';
+        shopEl.style.display='block';
+        renderCategories();
+      }
+      try{
+        const remote=await loadRemoteData();
+        const normalized=(remote.catalog||[]).map(normalizeProduct).filter(Boolean);
+        if(normalized.length){
+          products=normalized;
+          categories=deriveCategories(products,remote.categories||[]);
+          messengerLink=String(remote.settings&&remote.settings.messengerLink||messengerLink||'').trim()||'https://www.messenger.com';
+          try{localStorage.setItem('jb_catalog',JSON.stringify(remote.catalog||[]));}catch(_e){}
+          stateEl.style.display='none';
+          shopEl.style.display='block';
+          if(activeCategory){
+            renderProducts();
+          }else{
+            renderCategories();
+          }
+        }else if(!products.length){
+          stateEl.textContent='No products available yet.';
+        }
+      }catch(_remoteErr){
+        if(!products.length){
+          stateEl.textContent='Catalog could not be loaded. Please try again.';
+        }
+      }
+    }catch(_e){
+      stateEl.textContent='Catalog could not be loaded. Please try again.';
+    }finally{
+      clearTimeout(loadingGuard);
+    }
+  }
+
+  boot();
 })();
 </script>
 </body>
