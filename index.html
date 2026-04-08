@@ -7150,6 +7150,7 @@ let _firebaseUnsubFeed=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
 let _firebaseRetryAt=0;
+let _firebaseSkipPasswordAuthUntil=0;
 let _firebaseAuthWatcherUnsub=null;
 let _firebaseReauthTimer=null;
 let _lastHealthErrorKey='';
@@ -7449,7 +7450,8 @@ async function ensureFirebaseOnlineAuth(opts={}){
     return _firebaseAuth.currentUser;
   }
   const creds=getFirebaseLoginCreds();
-  if(creds&&creds.email&&creds.password){
+  const allowPasswordAttempt=Date.now()>=_firebaseSkipPasswordAuthUntil;
+  if(allowPasswordAttempt && creds&&creds.email&&creds.password){
     const u=await firebaseSignInForSession(creds.email,creds.password);
     if(u) return u;
   }
@@ -7458,6 +7460,8 @@ async function ensureFirebaseOnlineAuth(opts={}){
       const anon=await _firebaseAuth.signInAnonymously();
       saveAuthSession(anon&&anon.user?anon.user:null);
       _health.authState='anonymous';
+      _health.lastError='';
+      _lastHealthErrorKey='';
       return anon&&anon.user?anon.user:null;
     }catch(err){
       markError(err);
@@ -7481,6 +7485,9 @@ async function firebaseSignInForSession(email,password){
     const cred=await _firebaseAuth.signInWithEmailAndPassword(em,pw);
     saveAuthSession(cred&&cred.user?cred.user:null);
     _health.authState='signed_in';
+    _health.lastError='';
+    _lastHealthErrorKey='';
+    _firebaseSkipPasswordAuthUntil=0;
     return cred&&cred.user?cred.user:null;
   }catch(err){
     if(err&&err.code==='auth/user-not-found'){
@@ -7488,12 +7495,24 @@ async function firebaseSignInForSession(email,password){
         const created=await _firebaseAuth.createUserWithEmailAndPassword(em,pw);
         saveAuthSession(created&&created.user?created.user:null);
         _health.authState='signed_in';
+        _health.lastError='';
+        _lastHealthErrorKey='';
+        _firebaseSkipPasswordAuthUntil=0;
         return created&&created.user?created.user:null;
       }catch(createErr){
         markError(createErr);
         _health.authState=mapFirebaseAuthState(createErr,'auth_error');
         return null;
       }
+    }
+    const code=String(err&&err.code||'');
+    const msg=String(err&&err.message||'');
+    const softAuthFail=code==='auth/wrong-password'||code==='auth/invalid-credential'||/credential.*incorrect|malformed|expired/i.test(msg);
+    if(softAuthFail){
+      // Password-signin mismatch should not block runtime; fallback to anonymous/session restore.
+      _firebaseSkipPasswordAuthUntil=Date.now()+10*60*1000;
+      _health.authState='waiting_login';
+      return null;
     }
     markError(err);
     _health.authState=mapFirebaseAuthState(err,'auth_error');
@@ -7844,6 +7863,10 @@ async function initFirebaseRealtime(opts={}){
       await subscribeFeedRealtime({silent:true});
       _firebaseReady=true;
       _health.firebaseConnected=true;
+      if(_health.authState==='signed_in'||_health.authState==='anonymous'){
+        _health.lastError='';
+        _lastHealthErrorKey='';
+      }
       _firebaseRetryAt=0;
       flushLocalSyncFallback().catch(()=>{});
       if(!silent) toast('✅ Firebase realtime connected','ok');
