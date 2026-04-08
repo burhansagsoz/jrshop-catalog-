@@ -2414,19 +2414,21 @@ async function login(){
     return;
   }
   me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
+  const firebaseEmail=String(me.email||em||'').trim().toLowerCase();
+  cacheFirebaseLoginCreds(firebaseEmail,pw);
   if(getFirebaseEnabled()){
     try{
       await initFirebaseRealtime({silent:true,force:true});
-      if(!isFirebaseAuthIdentityMatchingEmail(em) && _firebaseAuth && _firebaseAuth.currentUser){
+      if(!isFirebaseAuthIdentityMatchingEmail(firebaseEmail) && _firebaseAuth && _firebaseAuth.currentUser){
         try{await _firebaseAuth.signOut();}catch(_e){}
       }
-      const fbUser=await firebaseSignInForSession(em,pw);
+      const fbUser=await firebaseSignInForSession(firebaseEmail,pw);
       if(fbUser){
         await initFirebaseRealtime({silent:true,force:true});
         flushLocalSyncFallback().catch(()=>{});
       }
-      if(isFirebaseAuthIdentityMatchingEmail(em)){
-        await applyFirebaseRoleMapping(me,em);
+      if(isFirebaseAuthIdentityMatchingEmail(firebaseEmail)){
+        await applyFirebaseRoleMapping(me,firebaseEmail);
       }
     }catch(_e){}
   }
@@ -2434,7 +2436,7 @@ async function login(){
   const remCb=document.getElementById('l-remember');
   if(remCb&&remCb.checked){
     localStorage.setItem('jb_remember','1');
-    localStorage.setItem('jb_remember_email',document.getElementById('l-em').value.trim());
+    localStorage.setItem('jb_remember_email',firebaseEmail);
     localStorage.setItem('jb_remember_pw',document.getElementById('l-pw').value);
   } else {
     localStorage.removeItem('jb_remember');
@@ -7560,6 +7562,12 @@ async function firebaseSignInForSession(email,password){
       _health.authState='auth_invalid_email';
       return null;
     }
+    const authCode=String(err&&err.code||'');
+    if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
+      // Soft fail: app login may still be valid even when Firebase password differs.
+      _health.authState='waiting_login';
+      return null;
+    }
     markError(err);
     _health.authState=mapFirebaseAuthState(err,'auth_error');
     return null;
@@ -8011,8 +8019,8 @@ async function saveMediaToFirebase(data,type){
     });
     return {id,url:data||null};
   }catch(err){
-    // If media collection write is blocked by rules, bubble up cleanly.
-    throw new Error('Media save blocked: '+(err&&err.message?err.message:String(err)));
+    // If media collection write is blocked by rules, keep app flow alive with local fallback.
+    return saveLocalMedia(data,type);
   }
 }
 async function getMediaFromFirebase(id){
