@@ -2121,7 +2121,43 @@ let orders    = (()=>{
   return raw.map(o=>({...o, status: o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status}));
 })();
 let settings  = JSON.parse(localStorage.getItem('jb_settings')  || '{}');
-let users     = JSON.parse(localStorage.getItem('jb_users')     || JSON.stringify([{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}]));
+const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
+function normalizeUsersList(raw){
+  try{
+    let list=raw;
+    if(list===null||list===undefined) list=[];
+    if(!Array.isArray(list) && list && typeof list==='object'){
+      list=Object.values(list).filter(v=>v&&typeof v==='object');
+    }
+    if(!Array.isArray(list)) list=[];
+    const out=list
+      .filter(u=>u&&typeof u==='object')
+      .map(u=>({
+        ...u,
+        id:String(u.id||('u'+Date.now()+Math.random().toString(36).slice(2,6))),
+        email:String(u.email||'').trim(),
+        password:String(u.password||''),
+        role:String(u.role||'Reseller'),
+        dname:String(u.dname||'').trim()
+      }))
+      .filter(u=>u.email&&u.password);
+    return out.length?out:[...DEFAULT_BOOT_USERS];
+  }catch(_e){
+    return [...DEFAULT_BOOT_USERS];
+  }
+}
+function findUserForLogin(identifier,password){
+  const id=String(identifier||'').trim().toLowerCase();
+  const pw=String(password||'');
+  if(!id||!pw) return null;
+  const list=normalizeUsersList(users);
+  return list.find(function(u){
+    const em=String(u.email||'').trim().toLowerCase();
+    const dn=String(u.dname||'').trim().toLowerCase();
+    return (em===id || (dn&&dn===id)) && String(u.password||'')===pw;
+  })||null;
+}
+let users     = normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')     || JSON.stringify(DEFAULT_BOOT_USERS)));
 let suppliers = JSON.parse(localStorage.getItem('jb_suppliers') || '[]');
 let templates = JSON.parse(localStorage.getItem('jb_templates') || JSON.stringify({
   order_confirmation:"Hi {{name}} 👋\n\nYour order is confirmed! ✅\nRef: {{ref}}\nProducts: {{products}}\n\nWe'll send your tracking soon. Thank you! 🎉",
@@ -2168,7 +2204,7 @@ function toggleDark(){const d=document.body.classList.toggle('dark');document.ge
       .then(function(res){
         if(res.data){
           Object.keys(res.data).forEach(function(k){localStorage.setItem(k,JSON.stringify(res.data[k]));});
-          users=JSON.parse(localStorage.getItem('jb_users')||'[]');
+          users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
         scheduleFirebaseAutoConnect('boot');
           const savedEm=localStorage.getItem('jb_saved_email');
           const savedPwRaw=localStorage.getItem('jb_saved_pw');const savedPw=savedPwRaw?decodeURIComponent(atob(savedPwRaw)):'';
@@ -2353,7 +2389,8 @@ async function login(){
   const pw=document.getElementById('l-pw').value;
   resetHealthCounters();
   cacheFirebaseLoginCreds(em,pw);
-  const u=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
+  users=normalizeUsersList(users);
+  let u=findUserForLogin(em,pw);
   if(!u){
     // Firebase-first login retry
     const loginBtn=document.querySelector('.login-btn');
@@ -2362,9 +2399,9 @@ async function login(){
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
-        users=res.data.jb_users;
+        users=normalizeUsersList(res.data.jb_users);
         localStorage.setItem('jb_users',JSON.stringify(users));
-        const u2=users.find(u=>u.email.toLowerCase()===em&&u.password===pw);
+        const u2=findUserForLogin(em,pw);
         if(u2){if(loginBtn)loginBtn.textContent='Sign In →';login();return;}
       }
       if(loginBtn)loginBtn.textContent='Sign In →';
@@ -2376,7 +2413,7 @@ async function login(){
     });
     return;
   }
-  me=u;
+  me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
   if(getFirebaseEnabled()){
     try{
       await initFirebaseRealtime({silent:true,force:true});
@@ -2406,11 +2443,11 @@ async function login(){
   }
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').classList.add('on');
-  document.getElementById('sb-av').textContent=(u.dname||u.email)[0].toUpperCase();
-  document.getElementById('sb-em').textContent=u.email;
-  document.getElementById('sb-rl').textContent=u.role+(u.dname?' · '+u.dname:'');
+  document.getElementById('sb-av').textContent=(me.dname||me.email)[0].toUpperCase();
+  document.getElementById('sb-em').textContent=me.email;
+  document.getElementById('sb-rl').textContent=me.role+(me.dname?' · '+me.dname:'');
   // Update avatar with photo if exists
-  if(u.role==='Admin' || u.role==='Staff'){
+  if(me.role==='Admin' || me.role==='Staff'){
     updateAdminAvatar();
   }
   loadSettings();loadTemplates();loadNotifSettings();loadResFinance();updateBadges();renderNav();setTimeout(checkAutoBackup,5000);
@@ -2458,7 +2495,7 @@ async function login(){
         localStorage.setItem('jb_orders',JSON.stringify(orders));
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
-        users=JSON.parse(localStorage.getItem('jb_users')||'[]');
+        users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
         settings=JSON.parse(localStorage.getItem('jb_settings')||'{}');
         catalogCategories=JSON.parse(localStorage.getItem('jb_cat_categories')||'[]');
