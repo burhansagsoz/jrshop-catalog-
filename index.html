@@ -1210,6 +1210,7 @@ body.dark .modal-foot{background:#263548;}
                 <option value="issue">⚠️ Issues</option>
                 <option value="notification">🔔 Notifications</option>
               </select>
+              <button class="btn btn-blue btn-xs" onclick="undoLastOrderMutation()">↩️ Undo Last</button>
               <button class="btn btn-danger btn-xs" onclick="clearActivityLog()">🗑️ Clear Log</button>
             </div>
           </div>
@@ -2200,6 +2201,8 @@ function getShelfStatus(o){
 }
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
 let _ordersStorageWarnAt=0;
+const ORDER_MUTATION_LOG_KEY='jb_order_mutlog';
+const ORDER_MUTATION_MAX=60;
 function compactOrdersForStorage(list){
   const arr=Array.isArray(list)?list:[];
   const keepRemoteable=function(v){
@@ -2254,6 +2257,79 @@ function persistOrdersState(nextOrders){
   orders=arr;
   persistOrdersLocalSafe(arr);
   return arr;
+}
+function readOrderMutationLog(){
+  try{
+    const raw=localStorage.getItem(ORDER_MUTATION_LOG_KEY);
+    const arr=raw?JSON.parse(raw):[];
+    return Array.isArray(arr)?arr:[];
+  }catch(_e){
+    return [];
+  }
+}
+function writeOrderMutationLog(list){
+  try{localStorage.setItem(ORDER_MUTATION_LOG_KEY,JSON.stringify(Array.isArray(list)?list:[]));}catch(_e){}
+}
+function trackOrderMutation(kind,orderId,beforeOrder,afterOrder){
+  if(!orderId) return;
+  try{
+    const log=readOrderMutationLog();
+    log.unshift({
+      id:'mut'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+      kind:kind||'update',
+      orderId:String(orderId),
+      before:beforeOrder?JSON.parse(JSON.stringify(beforeOrder)):null,
+      after:afterOrder?JSON.parse(JSON.stringify(afterOrder)):null,
+      ts:Date.now(),
+      actor:me&&me.email?me.email:'system'
+    });
+    if(log.length>ORDER_MUTATION_MAX) log.length=ORDER_MUTATION_MAX;
+    writeOrderMutationLog(log);
+  }catch(_e){}
+}
+async function undoLastOrderMutation(){
+  const log=readOrderMutationLog();
+  if(!log.length){
+    toast('ℹ️ No recent changes to undo','info');
+    return;
+  }
+  const last=log[0];
+  const rest=log.slice(1);
+  let changed=false;
+  if(last.kind==='delete' && last.before){
+    if(!orders.find(o=>o&&o.id===last.orderId)){
+      orders.unshift(JSON.parse(JSON.stringify(last.before)));
+      changed=true;
+    }
+  }else if(last.kind==='create'){
+    const exists=orders.find(o=>o&&o.id===last.orderId);
+    if(exists){
+      orders=orders.filter(o=>o&&o.id!==last.orderId);
+      changed=true;
+    }
+  }else if(last.before){
+    const idx=orders.findIndex(o=>o&&o.id===last.orderId);
+    if(idx>=0){
+      orders[idx]=JSON.parse(JSON.stringify(last.before));
+      changed=true;
+    }else{
+      orders.unshift(JSON.parse(JSON.stringify(last.before)));
+      changed=true;
+    }
+  }
+  if(!changed){
+    toast('ℹ️ Nothing to undo for latest change','info');
+    writeOrderMutationLog(rest);
+    return;
+  }
+  writeOrderMutationLog(rest);
+  persistOrdersState(orders);
+  await saveOrders([last.orderId]);
+  updateBadges();
+  render();
+  if(last.orderId) selectOrder(last.orderId);
+  logActivity('edited',`Undo applied for ${esc(last.orderId)}`,last.orderId);
+  toast('↩️ Last order change undone','ok');
 }
 function mergeArrayByTs(localArr,remoteArr){
   const local=Array.isArray(localArr)?localArr:[];
@@ -2450,7 +2526,7 @@ async function login(){
         }else{
           orders=Array.isArray(localOrders)?localOrders:[];
         }
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        persistOrdersState(orders);
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
         users=JSON.parse(localStorage.getItem('jb_users')||'[]');
@@ -2602,7 +2678,7 @@ async function approveOrder(id){
   o.updatedAt=Date.now();
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  persistOrdersState(orders);
   let persisted=false;
   try{
     const ready=await initFirebaseRealtime({silent:true});
@@ -2634,7 +2710,7 @@ async function rejectOrder(id){
   const o=orders.find(x=>x.id===id);
   if(!o){toast('⚠️ Order not found','err');return;}
   orders=orders.filter(x=>x.id!==id);
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  persistOrdersState(orders);
   updateBadges();renderPendingInTable();
   logActivity('status',`Order rejected: ${esc(o.ref||o.id.slice(-6))} — ${note}`,o.id);
   toast('❌ Rejected & deleted','info');
@@ -2677,7 +2753,7 @@ async function navOrders(status,el){
           const od=await ordRes.json();
           if(Array.isArray(od.orders)){
             orders=od.orders;
-            localStorage.setItem('jb_orders',JSON.stringify(orders));
+            persistOrdersState(orders);
             updateBadges();
             loaded=true;
           }
@@ -2688,7 +2764,7 @@ async function navOrders(status,el){
             const {data}=await res.json();
             if(data&&Array.isArray(data.jb_orders)){
               orders=data.jb_orders;
-              localStorage.setItem('jb_orders',JSON.stringify(orders));
+              persistOrdersState(orders);
               updateBadges();
             }
           }
@@ -3144,10 +3220,12 @@ function markProductArrived(orderId, prodIdx){
 // ── ADVANCE STATUS ──
 function advanceStatus(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
+  const beforeStatus=JSON.parse(JSON.stringify(o));
   o.updatedAt=Date.now();
   const next=S_NEXT[o.status];if(!next)return;
   const oldStatus=o.status;
   o.status=next;if(next==='Completed'&&!o.completedAt)o.completedAt=Date.now();saveOrders();selectOrder(o.id);
+  trackOrderMutation('status',o.id,beforeStatus,JSON.parse(JSON.stringify(o)));
   logActivity('status',`Status: ${oldStatus} → ${next} | ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   toast('✅ Status: '+next,'ok');
   // Reseller notifications
@@ -3185,7 +3263,7 @@ function saveProductCN(orderId, prodIdx){
   saveOrders();logActivity('tracking',`CN tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)} - ${o.products[prodIdx].name||'Product '+(prodIdx+1)})`,o.id);
   selectOrder(orderId);toast('✅ CN tracking saved!','ok');
 }
-function saveUk(){const o=orders.find(x=>x.id===selId);if(!o)return;const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}o.ukTracking=val;o.updatedAt=Date.now();if(o.status==='Sent to Factory')o.status='Shipped';saveOrders([o.id]);logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);selectOrder(o.id);toast('✅ UK tracking saved!','ok');}
+function saveUk(){const o=orders.find(x=>x.id===selId);if(!o)return;const beforeUk=JSON.parse(JSON.stringify(o));const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}o.ukTracking=val;o.updatedAt=Date.now();if(o.status==='Sent to Factory')o.status='Shipped';trackOrderMutation('tracking',o.id,beforeUk,JSON.parse(JSON.stringify(o)));saveOrders([o.id]);logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);selectOrder(o.id);toast('✅ UK tracking saved!','ok');}
 function saveNote(){const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();o.note=document.getElementById('d-note-input').value.trim();saveOrders();selectOrder(o.id);toast('✅ Note saved!','ok');}
 
@@ -3477,10 +3555,12 @@ async function deleteOrder(){
   if(!selId||!confirm('Delete this order?'))return;
   const o=orders.find(x=>x.id===selId);
   if(o)logActivity('deleted',`Order deleted: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`);
+  const beforeDelete=o?JSON.parse(JSON.stringify(o)):null;
   const did=selId;
   orders=orders.filter(x=>x.id!==did);
   selId=null;
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
+  persistOrdersState(orders);
+  if(beforeDelete) trackOrderMutation('delete',did,beforeDelete,null);
   closeDetail();render();updateBadges();
   toast('🗑️ Deleted','info');
   // Delete from cloud immediately
@@ -3504,6 +3584,7 @@ function openEditModal(){
 function closeEditModal(){document.getElementById('edit-modal').classList.remove('open');}
 function saveEdit(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
+  const beforeEdit=JSON.parse(JSON.stringify(o));
   o.updatedAt=Date.now();
   const name=document.getElementById('e-name').value.trim();const addr=document.getElementById('e-addr').value.trim();const city=document.getElementById('e-city').value.trim();const post=document.getElementById('e-post').value.trim();
   if(!name||!addr||!city||!post){toast('⚠️ Fill required fields','err');return;}
@@ -3517,6 +3598,7 @@ function saveEdit(){
   if(oldStatus!=='Shipped'&&o.status==='Shipped'&&o.resellerId&&notifSettings.shipped){
     setTimeout(()=>{if(confirm('Send shipping notification to reseller?'))triggerResellerNotif(o,'shipped');},300);
   }
+  trackOrderMutation('edit',o.id,beforeEdit,JSON.parse(JSON.stringify(o)));
   saveOrders();closeEditModal();selectOrder(o.id);render();updateBadges();
   logActivity('edited',`Order edited: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   playSound('success');
@@ -4956,7 +5038,7 @@ function importBackup(input){
       notifSettings={...(notifSettings||{}),...(payload.notifSettings||{})};
 
       // Persist locally first so restore is instant even if cloud/auth is degraded.
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
+      persistOrdersState(orders);
       localStorage.setItem('jb_users',JSON.stringify(users));
       localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));
       localStorage.setItem('jb_catalog',JSON.stringify(catalog));
@@ -6947,7 +7029,7 @@ async function loadFromCloudSilent(){
 
     if(changed){
       orders=localOrders;
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
+      persistOrdersState(orders);
       render();
     }
     return true;
@@ -7034,7 +7116,7 @@ async function loadFromCloud(){
         // Preserve ALL local orders not in cloud - they may not have been synced yet
         const localOnly=localOrders.filter(lo=>!orders.find(o=>o.id===lo.id));
         orders=[...orders,...localOnly];
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        persistOrdersState(orders);
         // Reload variables from localStorage
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
@@ -7150,6 +7232,7 @@ let _firebaseUnsubFeed=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
 let _firebaseRetryAt=0;
+let _firebaseSkipPasswordAuthUntil=0;
 let _firebaseAuthWatcherUnsub=null;
 let _firebaseReauthTimer=null;
 let _lastHealthErrorKey='';
@@ -7449,7 +7532,8 @@ async function ensureFirebaseOnlineAuth(opts={}){
     return _firebaseAuth.currentUser;
   }
   const creds=getFirebaseLoginCreds();
-  if(creds&&creds.email&&creds.password){
+  const allowPasswordAttempt=Date.now()>=_firebaseSkipPasswordAuthUntil;
+  if(allowPasswordAttempt && creds&&creds.email&&creds.password){
     const u=await firebaseSignInForSession(creds.email,creds.password);
     if(u) return u;
   }
@@ -7458,6 +7542,8 @@ async function ensureFirebaseOnlineAuth(opts={}){
       const anon=await _firebaseAuth.signInAnonymously();
       saveAuthSession(anon&&anon.user?anon.user:null);
       _health.authState='anonymous';
+      _health.lastError='';
+      _lastHealthErrorKey='';
       return anon&&anon.user?anon.user:null;
     }catch(err){
       markError(err);
@@ -7481,6 +7567,9 @@ async function firebaseSignInForSession(email,password){
     const cred=await _firebaseAuth.signInWithEmailAndPassword(em,pw);
     saveAuthSession(cred&&cred.user?cred.user:null);
     _health.authState='signed_in';
+    _health.lastError='';
+    _lastHealthErrorKey='';
+    _firebaseSkipPasswordAuthUntil=0;
     return cred&&cred.user?cred.user:null;
   }catch(err){
     if(err&&err.code==='auth/user-not-found'){
@@ -7488,12 +7577,24 @@ async function firebaseSignInForSession(email,password){
         const created=await _firebaseAuth.createUserWithEmailAndPassword(em,pw);
         saveAuthSession(created&&created.user?created.user:null);
         _health.authState='signed_in';
+        _health.lastError='';
+        _lastHealthErrorKey='';
+        _firebaseSkipPasswordAuthUntil=0;
         return created&&created.user?created.user:null;
       }catch(createErr){
         markError(createErr);
         _health.authState=mapFirebaseAuthState(createErr,'auth_error');
         return null;
       }
+    }
+    const code=String(err&&err.code||'');
+    const msg=String(err&&err.message||'');
+    const softAuthFail=code==='auth/wrong-password'||code==='auth/invalid-credential'||/credential.*incorrect|malformed|expired/i.test(msg);
+    if(softAuthFail){
+      // Password-signin mismatch should not block runtime; fallback to anonymous/session restore.
+      _firebaseSkipPasswordAuthUntil=Date.now()+10*60*1000;
+      _health.authState='waiting_login';
+      return null;
     }
     markError(err);
     _health.authState=mapFirebaseAuthState(err,'auth_error');
@@ -7826,7 +7927,7 @@ async function initFirebaseRealtime(opts={}){
         const incoming=snap.docs.map(firebaseDocToOrder);
         const merged=mergeOrdersByFreshness(orders,incoming);
         orders=merged;
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        persistOrdersState(orders);
         _health.ordersRealtime=true;
         markSync('orders_snapshot');
         if(me){
@@ -7844,6 +7945,10 @@ async function initFirebaseRealtime(opts={}){
       await subscribeFeedRealtime({silent:true});
       _firebaseReady=true;
       _health.firebaseConnected=true;
+      if(_health.authState==='signed_in'||_health.authState==='anonymous'){
+        _health.lastError='';
+        _lastHealthErrorKey='';
+      }
       _firebaseRetryAt=0;
       flushLocalSyncFallback().catch(()=>{});
       if(!silent) toast('✅ Firebase realtime connected','ok');
@@ -8835,9 +8940,11 @@ function quickAdvance(id){
 function quickDelete(id){
   if(!confirm('Bu siparişi sil?'))return;
   const o=orders.find(x=>x.id===id);
+  const beforeDelete=o?JSON.parse(JSON.stringify(o)):null;
   if(o) logActivity('deleted',`Order deleted: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`);
   orders=orders.filter(x=>x.id!==id);
   if(selId===id){selId=null;closeDetail();}
+  if(beforeDelete) trackOrderMutation('delete',id,beforeDelete,null);
   saveOrders();render();updateBadges();
   toast('🗑️ Deleteindi','info');
 }
@@ -8847,6 +8954,7 @@ function duplicateOrder(id){
   const now=new Date();const yy=String(now.getFullYear()).slice(2);const mm=String(now.getMonth()+1).padStart(2,'0');const dd=String(now.getDate()).padStart(2,'0');
   const seq=String(orders.filter(x=>x.ts>now.setHours(0,0,0,0)).length+1).padStart(3,'0');
   const newO={...JSON.parse(JSON.stringify(o)),id:'o'+Date.now(),ref:`JR${yy}${mm}${dd}-${seq}`,ts:Date.now(),status:'New',cnTracking:null,ukTracking:null,products:(o.products||[]).map(p=>({...p,cnTracking:'',arrived:false,depotPhoto:null}))};
+  trackOrderMutation('create',newO.id,null,JSON.parse(JSON.stringify(newO)));
   orders.unshift(newO);saveOrders();render();updateBadges();selectOrder(newO.id);
   logActivity('created',`Order duplicated: ${newO.ref} (${newO.name})`,newO.id);
   toast('📋 Order copied','ok');
@@ -8890,7 +8998,7 @@ async function startPendingPoll(){
           const myOld=orders.filter(o=>o.resellerId===me.id);
           const myNew=newOrders.filter(o=>o.resellerId===me.id);
           orders=newOrders;
-          localStorage.setItem('jb_orders',JSON.stringify(orders));
+          persistOrdersState(orders);
           // Detect status changes
           myNew.forEach(o=>{
             const old=myOld.find(x=>x.id===o.id);
@@ -8926,7 +9034,7 @@ async function startPendingPoll(){
           // Also keep local-only orders (not yet in cloud)
           const localOnly=orders.filter(o=>!newOrders.find(n=>n.id===o.id)&&(now-o.ts)<30000);
           orders=[...mergedOrders,...localOnly];
-          localStorage.setItem('jb_orders',JSON.stringify(orders));
+          persistOrdersState(orders);
           updateBadges();
           if(newPending>oldPending){
             toast('🔔 New sipariş onay bekliyor!','info');
@@ -12033,7 +12141,7 @@ async function saveOrders(changedOrderIds){
     // Keep per-order updatedAt so merge logic can resolve conflicts correctly.
       orders=orders.map(o=>({...o,status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status,updatedAt:o.updatedAt||o.ts||Date.now()}));
       // Save to localStorage (cache)
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
+      persistOrdersState(orders);
       // Write changed orders through Firebase bridge.
       const api=getApiBase();
       let queuedFallback=false;
