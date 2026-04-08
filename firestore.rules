@@ -17,7 +17,15 @@ service cloud.firestore {
 
     match /catalog_orders/{code} {
       allow read: if isSignedIn();
-      allow create, update, delete: if isSignedIn();
+      // Public catalog can create order codes without sign-in.
+      // Admin/staff still require sign-in for read/update/delete.
+      allow create: if request.resource != null
+        && request.resource.data.code is string
+        && request.resource.data.code == code
+        && request.resource.data.code.matches('^JR-[A-Z0-9]{6}$')
+        && request.resource.data.ts is number
+        && request.resource.data.total is number;
+      allow update, delete: if isSignedIn();
     }
 
     match /media/{mediaId} {
