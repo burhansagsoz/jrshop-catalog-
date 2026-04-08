@@ -7196,6 +7196,8 @@ let _firebaseScriptsReady=false;
 let _firebaseRetryAt=0;
 let _firebaseAuthWatcherUnsub=null;
 let _firebaseReauthTimer=null;
+let _firebasePasswordRetryAt=0;
+let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
 const UPLOAD_TIMEOUT_MS=7000;
@@ -7433,6 +7435,24 @@ function mapFirebaseAuthState(err,defaultState='auth_error'){
   if(code==='auth/too-many-requests') return 'auth_rate_limited';
   return defaultState;
 }
+function getFirebaseAuthRetryRemainingMs(){
+  const now=Date.now();
+  const waitPassword=Math.max(0,_firebasePasswordRetryAt-now);
+  const waitRate=Math.max(0,_firebaseRateLimitRetryAt-now);
+  return Math.max(waitPassword,waitRate);
+}
+function setFirebasePasswordRetry(ms){
+  const delay=Math.max(0,Number(ms)||0);
+  _firebasePasswordRetryAt=Math.max(_firebasePasswordRetryAt,Date.now()+delay);
+}
+function setFirebaseRateLimitRetry(ms){
+  const delay=Math.max(0,Number(ms)||0);
+  _firebaseRateLimitRetryAt=Math.max(_firebaseRateLimitRetryAt,Date.now()+delay);
+}
+function clearFirebaseAuthRetryGuards(){
+  _firebasePasswordRetryAt=0;
+  _firebaseRateLimitRetryAt=0;
+}
 
 function getFirebaseLoginCreds(){
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
@@ -7493,6 +7513,7 @@ function ensureFirebaseAuthWatcher(){
     }
     _health.authState='waiting_login';
     if(_firebaseReauthTimer) clearTimeout(_firebaseReauthTimer);
+    const retryWaitMs=Math.max(700,Math.min(60000,getFirebaseAuthRetryRemainingMs()+500));
     _firebaseReauthTimer=setTimeout(async()=>{
       try{
         const u=await ensureFirebaseOnlineAuth({allowAnonymous:true});
@@ -7500,7 +7521,7 @@ function ensureFirebaseAuthWatcher(){
           initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
         }
       }catch(_e){}
-    },700);
+    },retryWaitMs);
   });
 }
 
@@ -7509,10 +7530,16 @@ async function ensureFirebaseOnlineAuth(opts={}){
   if(!_firebaseAuth) return null;
   if(_firebaseAuth.currentUser){
     _health.authState='signed_in';
+    clearFirebaseAuthRetryGuards();
     return _firebaseAuth.currentUser;
   }
+  if(Date.now()<_firebaseRateLimitRetryAt){
+    _health.authState='auth_rate_limited';
+    return null;
+  }
   const creds=getFirebaseLoginCreds();
-  if(creds&&creds.email&&creds.password){
+  const passwordRetryBlocked=Date.now()<_firebasePasswordRetryAt;
+  if(!passwordRetryBlocked && creds&&creds.email&&creds.password){
     const u=await firebaseSignInForSession(creds.email,creds.password);
     if(u) return u;
   }
@@ -7521,6 +7548,7 @@ async function ensureFirebaseOnlineAuth(opts={}){
       const anon=await _firebaseAuth.signInAnonymously();
       saveAuthSession(anon&&anon.user?anon.user:null);
       _health.authState='anonymous';
+      clearFirebaseAuthRetryGuards();
       return anon&&anon.user?anon.user:null;
     }catch(err){
       markError(err);
@@ -7544,6 +7572,7 @@ async function firebaseSignInForSession(email,password){
     const cred=await _firebaseAuth.signInWithEmailAndPassword(em,pw);
     saveAuthSession(cred&&cred.user?cred.user:null);
     _health.authState='signed_in';
+    clearFirebaseAuthRetryGuards();
     return cred&&cred.user?cred.user:null;
   }catch(err){
     if(err&&err.code==='auth/user-not-found'){
@@ -7563,8 +7592,16 @@ async function firebaseSignInForSession(email,password){
       return null;
     }
     const authCode=String(err&&err.code||'');
+    if(authCode==='auth/too-many-requests'){
+      markError(err);
+      _health.authState='auth_rate_limited';
+      setFirebaseRateLimitRetry(30*60*1000);
+      setFirebasePasswordRetry(30*60*1000);
+      return null;
+    }
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
       // Soft fail: app login may still be valid even when Firebase password differs.
+      setFirebasePasswordRetry(10*60*1000);
       _health.authState='waiting_login';
       return null;
     }
@@ -7896,7 +7933,8 @@ async function initFirebaseRealtime(opts={}){
       const authedUser=await ensureFirebaseOnlineAuth({allowAnonymous:true});
       if(!authedUser){
         disconnectFirebaseRealtime();
-        _firebaseRetryAt=Date.now()+30000;
+        const authWait=getFirebaseAuthRetryRemainingMs();
+        _firebaseRetryAt=Date.now()+Math.max(30000,authWait);
         if(!silent){
           const hint=firebaseAuthHint({code:_health.authState,message:_health.lastError||''});
           toast('⚠️ Firebase auth gerekli. '+(hint?('Hint: '+hint):'Tekrar giriş yapın.'),'err');
@@ -8452,6 +8490,13 @@ async function migrateAllToFirebase(){
 }
 
 async function connectFirebaseNow(){
+  const waitMs=getFirebaseAuthRetryRemainingMs();
+  if(waitMs>0){
+    const mins=Math.max(1,Math.ceil(waitMs/60000));
+    _health.authState='auth_rate_limited';
+    toast('⚠️ Firebase geçici olarak rate limited. '+mins+' dk sonra tekrar deneyin.','info');
+    return;
+  }
   resetHealthCounters();
   await initFirebaseRealtime({silent:false,force:true});
 }
