@@ -2371,28 +2371,28 @@ async function login(){
     .then(function(res){
       if(res.data){
         Object.keys(res.data).forEach(function(k){
+          if(k==='jb_orders') return;
           if(k==='jb_feed' || k.indexOf('jb_chat_')===0){
             mergeKeyWithLocalFirst(k,res.data[k]);
           }else{
             localStorage.setItem(k,JSON.stringify(res.data[k]));
           }
         });
-        // Merge: cloud orders + local images (cloud strips base64)
-    const cloudOrders=(res.data&&res.data.jb_orders)||[];
-    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    if(!shouldAcceptRemoteOrders(cloudOrders)) return;
-    orders=cloudOrders.map(co=>({...co,status:co.status==='At Depott'?'At Depot':co.status==='Sent to Wechat'||co.status==='Sent to WeChat'?'Sent to Factory':co.status,
-      products:(co.products||[]).map((cp,i)=>{
-        const lo=localOrders.find(o=>o.id===co.id);
-        const lp=lo&&lo.products&&lo.products[i];
-        return{...cp,
-          img:cp.img||(lp&&lp.img)||null,
-          depotPhoto:cp.depotPhoto||(lp&&lp.depotPhoto)||null
-        };
-      })
-    }));
-    localStorage.setItem('jb_orders',JSON.stringify(orders));
-        if(getFirebaseEnabled()){pushOrdersToFirebase(orders).catch(function(){});}
+        // Critical: never overwrite local changes on login with stale cloud snapshot.
+        const cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
+        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+        if(cloudOrders.length){
+          orders=mergeOrdersByFreshness(localOrders,cloudOrders).map(function(o){
+            return {
+              ...o,
+              status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status
+            };
+          });
+        }else{
+          orders=Array.isArray(localOrders)?localOrders:[];
+        }
+        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
         users=JSON.parse(localStorage.getItem('jb_users')||'[]');
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
@@ -11976,6 +11976,7 @@ async function saveOrders(changedOrderIds){
       localStorage.setItem('jb_orders',JSON.stringify(orders));
       // Write changed orders through Firebase bridge.
       const api=getApiBase();
+      let queuedFallback=false;
       for(const o of targetOrders){
         const clean={...o,products:(o.products||[]).map(p=>({...p,
           img:p.img||null,
@@ -11986,7 +11987,12 @@ async function saveOrders(changedOrderIds){
             headers:getAuthHeaders({'Content-Type':'application/json'}),
             body:JSON.stringify({order:clean})
           });
-          if(!_sr.ok) console.warn('[saveOrders] remote save failed for',o.id);
+          let _payload={};
+          try{_payload=await _sr.json();}catch(_e){_payload={};}
+          if(!_sr.ok || (_payload&&_payload.localOnly)){
+            console.warn('[saveOrders] remote save pending/localOnly for',o.id);
+            queuedFallback=true;
+          }
         }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
       }
       // Propagate deletions too; otherwise removed orders can reappear after reload.
@@ -11996,11 +12002,18 @@ async function saveOrders(changedOrderIds){
             method:'DELETE',
             headers:getAuthHeaders()
           });
-          if(!_dr.ok) console.warn('[saveOrders] remote delete failed for',deletedId);
+          let _payload={};
+          try{_payload=await _dr.json();}catch(_e){_payload={};}
+          if(!_dr.ok || (_payload&&_payload.localOnly)){
+            console.warn('[saveOrders] remote delete pending/localOnly for',deletedId);
+            queuedFallback=true;
+          }
         }catch(_e){
           console.warn('[saveOrders] delete network error',_e.message);
+          queuedFallback=true;
         }
       }
+      if(queuedFallback) persistLocalSyncFallback('jb_orders',orders);
       if(getFirebaseEnabled()){
         pushOrdersToFirebase([...(targetOrders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
       }
