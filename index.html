@@ -7943,6 +7943,25 @@ function getLocalCatalogOrder(code){
   const map=parseLocalJson(LOCAL_CATALOG_ORDERS_KEY,{})||{};
   return map[code]||null;
 }
+function getChatDocKeyForReseller(resellerId){
+  return 'jb_chat_'+String(resellerId||'');
+}
+function getChatMessagesForReseller(resellerId){
+  try{
+    const key=getChatDocKeyForReseller(resellerId);
+    const raw=localStorage.getItem(key);
+    const arr=raw?JSON.parse(raw):[];
+    return Array.isArray(arr)?arr:[];
+  }catch(_e){
+    return [];
+  }
+}
+function setChatMessagesForReseller(resellerId,msgs){
+  const key=getChatDocKeyForReseller(resellerId);
+  const list=Array.isArray(msgs)?msgs:[];
+  try{localStorage.setItem(key,JSON.stringify(list));}catch(_e){}
+  _messages[String(resellerId||'')]=list;
+}
 function isApiPath(pathname){
   return pathname.startsWith('/api/');
 }
@@ -8861,12 +8880,57 @@ async function startPendingPoll(){
 // ── CHAT SYSTEM ──
 let _chatReseller = null;
 let _globalChatPoll = null;
+let _firebaseUnsubActiveChat = null;
+let _firebaseActiveChatKey = '';
+let _resChatRealtimeBound=false;
+
+function stopActiveChatRealtime(){
+  if(_firebaseUnsubActiveChat){
+    try{_firebaseUnsubActiveChat();}catch(_e){}
+    _firebaseUnsubActiveChat=null;
+  }
+  _firebaseActiveChatKey='';
+}
+
+async function startActiveChatRealtime(chatKey,onData){
+  if(!chatKey||!getFirebaseEnabled()) return false;
+  try{
+    const ready=await initFirebaseRealtime({silent:true});
+    if(!ready||!_firebaseDb) return false;
+    if(_firebaseActiveChatKey===chatKey && _firebaseUnsubActiveChat) return true;
+    stopActiveChatRealtime();
+    _firebaseActiveChatKey=chatKey;
+    _firebaseUnsubActiveChat=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(chatKey).onSnapshot(function(doc){
+      const d=doc&&doc.data?doc.data():null;
+      const msgs=Array.isArray(d&&d.value)?d.value:[];
+      try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+      if(typeof onData==='function') onData(msgs);
+    },function(err){
+      console.warn('[chat realtime]',err&&err.message?err.message:err);
+    });
+    return true;
+  }catch(_e){
+    return false;
+  }
+}
+async function startResellerChatRealtime(){
+  if(_resChatRealtimeBound||!me||!me.id) return false;
+  const chatKey='jb_chat_'+me.id;
+  const ok=await startActiveChatRealtime(chatKey,function(msgs){
+    if(document.getElementById('res-chat-overlay')?.style.display==='flex'){
+      renderResellerMessages(Array.isArray(msgs)?msgs:[]);
+    }
+    checkResellerUnreadMessages().catch(()=>{});
+  });
+  if(ok) _resChatRealtimeBound=true;
+  return ok;
+}
 
 // Start global poll when admin logs in - checks all reseller chats
 function startGlobalChatPoll(){
-  if(getFirebaseEnabled()) return;
   if(_globalChatPoll) clearInterval(_globalChatPoll);
-  _globalChatPoll = setInterval(pollAllChats, 5000); // every 5s
+  const pollMs=getFirebaseEnabled()?1200:5000;
+  _globalChatPoll = setInterval(pollAllChats, pollMs);
   pollAllChats(); // immediate first check
 }
 
@@ -8995,6 +9059,7 @@ async function pollMessages(resellerId){
       _messages[resellerId]=newMsgs;
       if(_chatReseller===resellerId) renderMessages();
       renderChatList();
+      updateChatBadge();
     }
   }catch(e){ console.warn('[pollMessages]',e); }
 }
@@ -9008,6 +9073,7 @@ function closeChatWindow(){
   const emptyEl = document.getElementById('chat-empty-state');
   if(emptyEl) emptyEl.style.display='flex';
   _chatReseller = null;
+  stopActiveChatRealtime();
   if(_chatPollInterval){ clearInterval(_chatPollInterval); _chatPollInterval=null; }
   renderChatList();
 }
@@ -9062,9 +9128,16 @@ async function openChatWith(resellerId){
   
   renderMessages();
   renderChatList();
+  const chatKey='jb_chat_'+resellerId;
+  await startActiveChatRealtime(chatKey,function(msgsNow){
+    _messages[resellerId]=Array.isArray(msgsNow)?msgsNow:[];
+    if(_chatReseller===resellerId) renderMessages();
+    renderChatList();
+    updateChatBadge();
+  });
   // Start polling
   if(_chatPollInterval) clearInterval(_chatPollInterval);
-  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?10000:5000);
+  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?12000:5000);
   document.getElementById('chat-input')?.focus();
 }
 
@@ -9165,10 +9238,10 @@ let _resMsgPollInterval = null;
 let _lastResUnreadCount = 0;
 
 function startResellerMessagePoll(){
-  if(getFirebaseEnabled()) return;
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
-  // Check unread messages every 5 seconds
-  _resMsgPollInterval = setInterval(checkResellerUnreadMessages, 5000);
+  // Keep unread badge updated even when Firebase mode is enabled.
+  const pollMs=getFirebaseEnabled()?3000:5000;
+  _resMsgPollInterval = setInterval(checkResellerUnreadMessages, pollMs);
   checkResellerUnreadMessages(); // Initial check
 }
 
@@ -9225,9 +9298,11 @@ function openResellerChat(){
   const _overlay = document.getElementById('res-chat-overlay');
   if(!_overlay){ toast('Chat could not load','err'); return; }
   _overlay.style.display='flex';
+  startResellerChatRealtime().catch(()=>{});
   loadResellerMessages();
   if(_resChatInterval) clearInterval(_resChatInterval);
-  _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?7000:2000);
+  // Keep a lightweight fallback poll only.
+  _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?2500:2000);
   // Clear unread badges when chat opened
   const badge = document.getElementById('res-chat-badge');
   if(badge) badge.style.display = 'none';
@@ -9238,6 +9313,8 @@ function openResellerChat(){
 
 function closeResellerChat(){
   document.getElementById('res-chat-overlay').style.display='none';
+  _resChatRealtimeBound=false;
+  stopActiveChatRealtime();
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
 }
 
@@ -10690,8 +10767,8 @@ async function sendChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,600,0.7);
-      const uploaded=await uploadImageWithFallback(compressed,'image/jpeg');
+      const compressed=await compressImage(e.target.result,480,0.6);
+      const uploaded=await uploadImageWithFallback(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1800});
       const imgUrl=uploaded&&uploaded.url?uploaded.url:compressed;
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+imgUrl,ts:Date.now()};
       const chatKey='jb_chat_'+_chatReseller;
@@ -10957,8 +11034,8 @@ async function sendResChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,600,0.7);
-      const imgUrl=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true});
+      const compressed=await compressImage(e.target.result,480,0.6);
+      const imgUrl=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1800});
       if(!imgUrl) throw new Error('Image upload unavailable');
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+imgUrl,ts:Date.now()};
       const chatKey='jb_chat_'+me.id;
@@ -11808,14 +11885,14 @@ async function saveOrders(changedOrderIds){
   orders.forEach(o=>{ if(!o.updatedAt) o.updatedAt = o.ts || Date.now(); });
   const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):null;
   const targetOrders=(changedSet?orders.filter(o=>changedSet.has(o.id)):orders);
+  const uploadTimeoutMs=Math.max(1200,Math.floor(UPLOAD_TIMEOUT_MS*0.5));
   // Base64 görselleri sadece değişen siparişlerde upload et
-  const _api=getApiBase();
   for(const o of targetOrders){
     for(const p of (o.products||[])){
       if(p.img && p.img.startsWith('data:')){
         try{
-          const _r=await fetch(_api+'/api/image',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({data:p.img,type:'image/jpeg'})});
-          if(_r.ok){const _d=await _r.json();if(_d.url||_d.id)p.img=_d.url||(_api+'/api/image/'+_d.id);}
+          const uploaded=await uploadImageSmart(p.img,'image/jpeg',{allowDataFallback:true,timeoutMs:uploadTimeoutMs});
+          if(uploaded) p.img=uploaded;
         }catch(e){}
       }
     }
