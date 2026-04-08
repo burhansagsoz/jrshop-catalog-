@@ -8204,7 +8204,9 @@ function mergeOrdersByFreshness(localOrders,incomingOrders){
   return [...byId.values()].sort((a,b)=>(b.ts||0)-(a.ts||0));
 }
 
-function disconnectFirebaseRealtime(){
+function disconnectFirebaseRealtime(opts={}){
+  const keepAuthWatcher=!!(opts&&opts.keepAuthWatcher);
+  const nextAuthState=(opts&&Object.prototype.hasOwnProperty.call(opts,'authState'))?opts.authState:null;
   if(_firebaseUnsubOrders){
     try{_firebaseUnsubOrders();}catch(e){}
     _firebaseUnsubOrders=null;
@@ -8213,19 +8215,25 @@ function disconnectFirebaseRealtime(){
     try{_firebaseUnsubFeed();}catch(e){}
     _firebaseUnsubFeed=null;
   }
-  if(_firebaseAuthWatcherUnsub){
-    try{_firebaseAuthWatcherUnsub();}catch(_e){}
-    _firebaseAuthWatcherUnsub=null;
-  }
-  if(_firebaseReauthTimer){
-    clearTimeout(_firebaseReauthTimer);
-    _firebaseReauthTimer=null;
+  if(!keepAuthWatcher){
+    if(_firebaseAuthWatcherUnsub){
+      try{_firebaseAuthWatcherUnsub();}catch(_e){}
+      _firebaseAuthWatcherUnsub=null;
+    }
+    if(_firebaseReauthTimer){
+      clearTimeout(_firebaseReauthTimer);
+      _firebaseReauthTimer=null;
+    }
   }
   _firebaseReady=false;
   _health.firebaseConnected=false;
   _health.ordersRealtime=false;
   _health.feedRealtime=false;
-  _health.authState='signed_out';
+  if(nextAuthState!==null&&nextAuthState!==undefined){
+    _health.authState=String(nextAuthState||'');
+  }else if(!keepAuthWatcher){
+    _health.authState='signed_out';
+  }
 }
 function stopFirebaseRealtime(){
   disconnectFirebaseRealtime();
@@ -8299,8 +8307,15 @@ async function initFirebaseRealtime(opts={}){
       ensureFirebaseAuthWatcher();
       const authedUser=await ensureFirebaseOnlineAuth({allowAnonymous:true});
       if(!authedUser){
-        disconnectFirebaseRealtime();
+        // Keep auth watcher active so session can recover automatically.
+        disconnectFirebaseRealtime({keepAuthWatcher:true,authState:'waiting_login'});
         _firebaseRetryAt=Date.now()+30000;
+        if(_firebaseReauthTimer) clearTimeout(_firebaseReauthTimer);
+        _firebaseReauthTimer=setTimeout(function(){
+          ensureFirebaseOnlineAuth({allowAnonymous:true}).then(function(u){
+            if(u) initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
+          }).catch(()=>{});
+        },1800);
         if(!silent){
           const hint=firebaseAuthHint({code:_health.authState,message:_health.lastError||''});
           toast('⚠️ Firebase auth gerekli. '+(hint?('Hint: '+hint):'Tekrar giriş yapın.'),'err');
