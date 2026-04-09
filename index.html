@@ -2322,6 +2322,35 @@ function mergeChatMessages(localArr,remoteArr){
   // Keep chronological chat order for renderer consistency.
   return merged.sort((a,b)=>(a&&a.ts||0)-(b&&b.ts||0));
 }
+function normalizeChatMessage(msg,chatKey){
+  const key=String(chatKey||'');
+  const baseTs=Number(msg&&msg.ts)||Date.now();
+  const id=(msg&&msg.id)?String(msg.id):('m'+baseTs.toString(36)+Math.random().toString(36).slice(2,7));
+  const text=msg&&msg.text!==undefined?String(msg.text):'';
+  const from=msg&&msg.from!==undefined?String(msg.from):'';
+  const to=msg&&msg.to!==undefined?String(msg.to):'';
+  const read=!!(msg&&msg.read);
+  const serialized=(function(v){try{return JSON.stringify(v||{});}catch(_e){return String(v||'');}})(msg||{});
+  const v=Math.max(1,Number(msg&&msg.v)||1);
+  const opId=String(msg&&msg.opId||msg&&msg.lastOpId||('op_'+key+'_'+id+'_'+hashStringFast(serialized)));
+  return {
+    ...(msg||{}),
+    id,
+    from,
+    to,
+    text,
+    read,
+    ts:baseTs,
+    updatedAt:Number(msg&&msg.updatedAt)||baseTs,
+    v,
+    opId,
+    lastOpId:opId
+  };
+}
+function normalizeChatMessages(list,chatKey){
+  const arr=Array.isArray(list)?list:[];
+  return arr.map(function(m){return normalizeChatMessage(m,chatKey);});
+}
 function mergeKeyWithLocalFirst(key,remoteValue){
   if(remoteValue===undefined) return;
   try{
@@ -2491,7 +2520,8 @@ async function login(){
         const cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         if(cloudOrders.length){
-          orders=mergeOrdersByFreshness(localOrders,cloudOrders).map(function(o){
+          const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
+          orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
             return {
               ...o,
               status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status
@@ -2683,26 +2713,11 @@ async function rejectOrder(id){
   if(note===null)return;
   const o=orders.find(x=>x.id===id);
   if(!o){toast('⚠️ Order not found','err');return;}
-  orders=orders.filter(x=>x.id!==id);
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
-  updateBadges();renderPendingInTable();
+  const opId=createLocalMutationOpId('reject');
+  await deleteOrderWithTombstone(id,{opId,previousOrder:o});
+  updateBadges();renderPendingInTable();render();
   logActivity('status',`Order rejected: ${esc(o.ref||o.id.slice(-6))} — ${note}`,o.id);
   toast('❌ Rejected & deleted','info');
-  let removed=false;
-  try{
-    const ready=await initFirebaseRealtime({silent:true});
-    if(ready&&_firebaseDb){
-      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
-      removed=true;
-    }
-  }catch(_e){}
-  if(!removed){
-    const api=getApiBase();
-    const k=localStorage.getItem('jb_cloud_key')||'';
-    const headers={};
-    if(k) headers['Authorization']='Bearer '+k;
-    fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
-  }
 }
 
 async function navOrders(status,el){
@@ -2727,7 +2742,8 @@ async function navOrders(status,el){
         if(ordRes.ok){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
-            orders=mergeOrdersByFreshness(localOrders,od.orders);
+            const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
+            orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
             localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
             updateBadges();
             loaded=true;
@@ -2738,7 +2754,8 @@ async function navOrders(status,el){
           if(res.ok){
             const {data}=await res.json();
             if(data&&Array.isArray(data.jb_orders)){
-              orders=mergeOrdersByFreshness(localOrders,data.jb_orders);
+              const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
+              orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
               localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
               updateBadges();
             }
@@ -2973,6 +2990,21 @@ function renderDash(){
   const odEl=document.getElementById('dash-overdue');
   if(!od.length){odEl.innerHTML='<p style="font-size:13px;color:var(--muted);padding:8px 0;">✅ No overdue orders!</p>';return;}
   odEl.innerHTML=`<table style="width:100%;border-collapse:collapse;margin-top:7px;"><thead><tr>${['Ref','Customer','Status','Days'].map(h=>`<th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);">${h}</th>`).join('')}</tr></thead><tbody>${od.map(o=>{const d=daysSince(o.ts);return`<tr style="cursor:pointer;" onclick="navOrders('all',null);selectOrder('${o.id}')"><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;">${esc(o.name)}</td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="pill ${S_CLASS[o.status]||'p-new'}">${S_EMOJI[o.status]||''} ${displayStatus(o.status)}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-family:var(--mono);font-weight:700;color:${d>=5?'var(--red)':'var(--yellow)'};">${d}d</td></tr>`;}).join('')}</tbody></table>`;
+}
+
+function renderRealtimeCounters(){
+  if(!me) return;
+  // Keep badges/counters consistent across pages and devices whenever shared data keys change.
+  updateBadges();
+  if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+  if(document.getElementById('pg-alerts')?.classList.contains('on')) renderAlerts();
+  if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList(document.getElementById('chat-search')?.value||'');
+  if(me.role==='Reseller'){
+    if(typeof renderResellerView==='function') renderResellerView();
+    checkResellerUnreadMessages().catch(()=>{});
+  }else{
+    updateChatBadge();
+  }
 }
 
 // ── ALERTS ──
@@ -3538,14 +3570,10 @@ async function deleteOrder(){
   const o=orders.find(x=>x.id===selId);
   if(o)logActivity('deleted',`Order deleted: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`);
   const did=selId;
-  orders=orders.filter(x=>x.id!==did);
+  await deleteOrderWithTombstone(did,{opId:createLocalMutationOpId('delete'),previousOrder:o||null});
   selId=null;
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
   closeDetail();render();updateBadges();
   toast('🗑️ Deleted','info');
-  // Delete from cloud immediately
-  const api=getApiBase();
-  fetch(api+'/api/order/'+did,{method:'DELETE',headers:getAuthHeaders()}).catch(()=>{});
 }
 
 // ── EDIT ORDER ──
@@ -4418,8 +4446,10 @@ async function sendBulkMessage(resellerIdsStr, btn){
       const chatKey = 'admin_'+resId;
       const chat = chats[chatKey] || [];
       chat.push({from:'admin', text, ts: Date.now()});
-      await fetch(api+'/api/sync', {method:'POST', headers:getAuthHeaders({'Content-Type':'application/json'}), body:JSON.stringify({key:'jb_chats',value:chats})});
-      sent++;
+      const ok=await syncGenericKeyToCloud('jb_chats',chats,{
+        opId:createLocalMutationOpId('bulkchat')
+      });
+      if(ok) sent++;
     }catch(e){console.warn('Bulk msg error:', e);}
   }
   
@@ -4475,13 +4505,16 @@ async function sendBulkEmails(emailsStr, btn){
   clearBulkSelect();
 }
 
-function deleteBulkOrders(){
+async function deleteBulkOrders(){
   if(!_selected.size){toast('⚠️ Select orders first','err');return;}
   if(!confirm(`Delete ${_selected.size} orders? This cannot be undone.`)) return;
   
   const count = _selected.size;
-  orders = orders.filter(o => !_selected.has(o.id));
-  saveOrders();
+  const ids=[..._selected];
+  for(const id of ids){
+    const prev=(orders||[]).find(o=>o&&o.id===id)||null;
+    await deleteOrderWithTombstone(id,{opId:createLocalMutationOpId('bulkdel'),previousOrder:prev});
+  }
   clearBulkSelect();
   render();
   updateBadges();
@@ -4656,10 +4689,25 @@ function removeSupplier(id){if(!confirm('Remove?'))return;suppliers=suppliers.fi
 
 // ── TEMPLATES & NOTIFICATIONS ──
 function loadTemplates(){document.getElementById('tpl-order_confirmation').value=templates.order_confirmation||'';document.getElementById('tpl-tracking').value=templates.tracking||'';document.getElementById('tpl-supplier').value=templates.supplier||'';}
-function saveTpl(key){templates[key]=document.getElementById('tpl-'+key).value;localStorage.setItem('jb_templates',JSON.stringify(templates));toast('✅ Saved!','ok');}
+function saveTpl(key){
+  templates[key]=document.getElementById('tpl-'+key).value;
+  localStorage.setItem('jb_templates',JSON.stringify(templates));
+  syncGenericKeyToCloud('jb_templates',templates,{opId:createLocalMutationOpId('templates')}).catch(function(){});
+  toast('✅ Saved!','ok');
+}
 function insertVar(key,v){const ta=document.getElementById('tpl-'+key);const s=ta.selectionStart,e=ta.selectionEnd;ta.value=ta.value.substring(0,s)+v+ta.value.substring(e);ta.selectionStart=ta.selectionEnd=s+v.length;ta.focus();}
 function loadNotifSettings(){notifSettings=JSON.parse(localStorage.getItem('jb_notif')||'{"shipped":true}');const g=id=>document.getElementById(id);if(g('notif-depot')){g('notif-depot').checked=!!notifSettings.depot;g('notif-logistics').checked=!!notifSettings.logistics;g('notif-shipped').checked=!!notifSettings.shipped;g('notif-completed').checked=!!notifSettings.completed;}}
-function saveNotifSettings(){notifSettings={depot:document.getElementById('notif-depot').checked,logistics:document.getElementById('notif-logistics').checked,shipped:document.getElementById('notif-shipped').checked,completed:document.getElementById('notif-completed').checked};localStorage.setItem('jb_notif',JSON.stringify(notifSettings));toast('✅ Notification settings saved!','ok');}
+function saveNotifSettings(){
+  notifSettings={
+    depot:document.getElementById('notif-depot').checked,
+    logistics:document.getElementById('notif-logistics').checked,
+    shipped:document.getElementById('notif-shipped').checked,
+    completed:document.getElementById('notif-completed').checked
+  };
+  localStorage.setItem('jb_notif',JSON.stringify(notifSettings));
+  syncGenericKeyToCloud('jb_notif',notifSettings,{opId:createLocalMutationOpId('notif')}).catch(function(){});
+  toast('✅ Notification settings saved!','ok');
+}
 
 // ── USERS ──
 function renderUsers(){document.getElementById('users-list').innerHTML=users.map(u=>{const rc={Admin:'background:var(--accent-light);color:var(--accent);',Reseller:'background:var(--blue-bg);color:var(--blue);',Staff:'background:var(--green-bg);color:var(--green);'}[u.role]||'';return`<div class="card-row"><div style="width:32px;height:32px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:13px;flex-shrink:0;">${(u.dname||u.email)[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:600;">${esc(u.email)}${u.dname?` <span style="color:var(--muted);font-size:11px;">(${esc(u.dname)})</span>`:''}</div><div style="margin-top:3px;"><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;${rc}">${u.role}</span></div></div><div>${u.id==='u1'?'<span style="font-size:11px;color:var(--muted);">Super Admin</span>':`<button class="btn btn-danger btn-xs" onclick="removeUser('${u.id}')">Remove</button>`}</div></div>`;}).join('');}
@@ -4955,9 +5003,7 @@ function saveSettings(){
   settings.sessionTimeout=parseInt(g('cfg-session-timeout')?.value)||30;
   settings.messengerLink=g('cfg-messenger-link')?.value.trim()||'';
   localStorage.setItem('jb_settings',JSON.stringify(settings));
-  if(getFirebaseEnabled()){
-    syncSettingsToFirebase().catch(function(){});
-  }
+  syncGenericKeyToCloud('jb_settings',settings,{opId:createLocalMutationOpId('settings')}).catch(function(){});
   _sessionTimeout=(settings.sessionTimeout)*60*1000;
   updateBadges();toast('✅ Saved!','ok');
 }
@@ -4970,6 +5016,46 @@ function loadSettings(){
   if(g('cfg-firebase-enabled')) g('cfg-firebase-enabled').checked=getFirebaseEnabled();
   if(g('cfg-firebase-config')) g('cfg-firebase-config').value=localStorage.getItem('jb_firebase_config')||'';
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
+}
+function applyUsersRealtime(nextUsers){
+  users=normalizeUsersList(Array.isArray(nextUsers)?nextUsers:[]);
+  try{localStorage.setItem('jb_users',JSON.stringify(users));}catch(_e){}
+  if(me&&me.id){
+    const fresh=users.find(function(u){return u&&u.id===me.id;});
+    if(fresh){
+      me={...me,...fresh};
+      renderNav();
+    }
+  }
+  renderUsers();
+  renderChatList(document.getElementById('chat-search')?.value||'');
+}
+function applySuppliersRealtime(nextSuppliers){
+  suppliers=Array.isArray(nextSuppliers)?nextSuppliers:[];
+  try{localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));}catch(_e){}
+  renderSuppliers();
+  if(typeof renderSupPerf==='function') renderSupPerf();
+}
+function applyTemplatesRealtime(nextTemplates){
+  templates=(nextTemplates&&typeof nextTemplates==='object')?nextTemplates:{};
+  try{localStorage.setItem('jb_templates',JSON.stringify(templates));}catch(_e){}
+  loadTemplates();
+}
+function applyNotifRealtime(nextNotif){
+  notifSettings=(nextNotif&&typeof nextNotif==='object')?nextNotif:{shipped:true};
+  try{localStorage.setItem('jb_notif',JSON.stringify(notifSettings));}catch(_e){}
+  loadNotifSettings();
+}
+function applySettingsRealtime(nextSettings){
+  settings=(nextSettings&&typeof nextSettings==='object')?nextSettings:{};
+  try{localStorage.setItem('jb_settings',JSON.stringify(settings));}catch(_e){}
+  loadSettings();
+  _sessionTimeout=(parseInt(settings.sessionTimeout)||30)*60*1000;
+}
+function applyActivityRealtime(nextActivity){
+  activityLog=Array.isArray(nextActivity)?nextActivity:[];
+  try{localStorage.setItem('jb_activity',JSON.stringify(activityLog));}catch(_e){}
+  if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
 }
 
 // ── BACKUP ──
@@ -5669,10 +5755,8 @@ async function shareCatalog(){
     try{
       const headers=getAuthHeaders({'Content-Type':'application/json'});
       // Firebase-first publish target used by catalog.html loader.
-      const syncRes=await fetch(api+'/api/sync',{
-        method:'POST',
-        headers,
-        body:JSON.stringify({key:'jb_catalog_html',value:catalogHTML})
+      const syncOk=await syncGenericKeyToCloud('jb_catalog_html',catalogHTML,{
+        opId:createLocalMutationOpId('catalogpub')
       });
       // Backward compatibility: keep old endpoint write as best-effort.
       try{
@@ -5682,7 +5766,7 @@ async function shareCatalog(){
           body:JSON.stringify({html:catalogHTML})
         });
       }catch(_e){}
-      if(!syncRes.ok){
+      if(!syncOk){
         toast('⚠️ Catalog local saved (cloud retry later)','info');
       }else{
         toast('✅ Catalog published!','ok');
@@ -6952,6 +7036,132 @@ async function flushLocalSyncFallback(){
   let synced=0;
   for(const [key,entry] of entries){
     try{
+      if(key==='jb_order_ops'){
+        const ops=Array.isArray(entry&&entry.value)?entry.value:[];
+        if(!ops.length){
+          clearLocalSyncFallbackKey(key);
+          continue;
+        }
+        const remaining=[];
+        for(const op of ops){
+          if(!op||!op.orderId) continue;
+          try{
+            let res=null;
+            if(op.op==='delete'){
+              res=await fetch('/api/order/'+encodeURIComponent(op.orderId),{
+                method:'DELETE',
+                headers:getAuthHeaders({'Content-Type':'application/json'}),
+                body:JSON.stringify({
+                  opId:op.opId||'',
+                  v:Number(op.v)||0,
+                  deletedAt:Number(op.deletedAt||op.ts)||Date.now(),
+                  event:op.event||null
+                })
+              });
+            }else{
+              res=await fetch('/api/order',{
+                method:'POST',
+                headers:getAuthHeaders({'Content-Type':'application/json'}),
+                body:JSON.stringify({
+                  order:op.order||null,
+                  opId:op.opId||'',
+                  v:Number(op.v)||0,
+                  event:op.event||null
+                })
+              });
+            }
+            let payload={};
+            try{payload=await res.json();}catch(_e){payload={};}
+            if(!res.ok || (payload&&payload.localOnly)){
+              remaining.push(op);
+            }else{
+              clearLocalOrderMutation(op.orderId);
+            }
+          }catch(_e){
+            remaining.push(op);
+          }
+        }
+        if(remaining.length){
+          persistLocalSyncFallback(key,remaining);
+        }else{
+          clearLocalSyncFallbackKey(key);
+          synced++;
+        }
+        continue;
+      }
+      if(key==='jb_order_events'){
+        const events=Array.isArray(entry&&entry.value)?entry.value:[];
+        if(!events.length){
+          clearLocalSyncFallbackKey(key);
+          continue;
+        }
+        let allOk=true;
+        const remaining=[];
+        for(const ev of events){
+          if(!ev||!ev.orderId) continue;
+          try{
+            const res=await fetch('/api/order-event',{
+              method:'POST',
+              headers:getAuthHeaders({'Content-Type':'application/json'}),
+              body:JSON.stringify(ev)
+            });
+            let payload={};
+            try{payload=await res.json();}catch(_e){payload={};}
+            if(!res.ok || (payload&&payload.localOnly)){
+              allOk=false;
+              remaining.push(ev);
+            }
+          }catch(_e){
+            allOk=false;
+            remaining.push(ev);
+          }
+        }
+        if(allOk){
+          clearLocalSyncFallbackKey(key);
+          synced++;
+        }else{
+          persistLocalSyncFallback(key,remaining);
+        }
+        continue;
+      }
+      if(key==='jb_generic_events'){
+        const events=Array.isArray(entry&&entry.value)?entry.value:[];
+        if(!events.length){
+          clearLocalSyncFallbackKey(key);
+          continue;
+        }
+        const remaining=[];
+        for(const ev of events){
+          if(!ev||!ev.key) continue;
+          try{
+            const res=await fetch('/api/sync',{
+              method:'POST',
+              headers:getAuthHeaders({'Content-Type':'application/json'}),
+              body:JSON.stringify({
+                key:String(ev.key),
+                value:Object.prototype.hasOwnProperty.call(ev,'value')?ev.value:null,
+                event:ev
+              })
+            });
+            let payload={};
+            try{payload=await res.json();}catch(_e){payload={};}
+            if(!res.ok || (payload&&payload.localOnly)){
+              remaining.push(ev);
+            }else{
+              clearKeyLocalMutation(String(ev.key||''));
+            }
+          }catch(_e){
+            remaining.push(ev);
+          }
+        }
+        if(remaining.length){
+          persistLocalSyncFallback(key,remaining);
+        }else{
+          clearLocalSyncFallbackKey(key);
+          synced++;
+        }
+        continue;
+      }
       const res=await fetch('/api/sync',{
         method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
@@ -6961,6 +7171,7 @@ async function flushLocalSyncFallback(){
       try{payload=await res.json();}catch(_e){payload={};}
       if(res.ok && !(payload&&payload.localOnly)){
         clearLocalSyncFallbackKey(key);
+        clearKeyLocalMutation(key);
         synced++;
       }
     }catch(_e){}
@@ -6994,13 +7205,68 @@ function cloudSave(key,value){
   localStorage.setItem(key,value);
   // Instant cloud write — no delay
   if(SYNC_KEYS.includes(key)&&key!=='jb_orders'){
+    markKeyLocalMutation(key,{v:1});
     clearTimeout(_syncTimeouts[key]);
     _syncTimeouts[key]=setTimeout(function(){syncToCloud(key,value);},500);
   }
 }
+function normalizeGenericVersion(v){
+  return Math.max(1,Number(v)||1);
+}
+function getGenericItemId(item){
+  if(item&&item.id!==undefined&&item.id!==null&&String(item.id).trim()) return String(item.id);
+  return '';
+}
+function hashStringFast(input){
+  const s=String(input||'');
+  let h=2166136261;
+  for(let i=0;i<s.length;i++){
+    h^=s.charCodeAt(i);
+    h=(h*16777619)>>>0;
+  }
+  return h.toString(36);
+}
+function buildGenericEventDoc(key,value,meta={}){
+  const parsed=(function(raw){
+    try{return typeof raw==='string'?JSON.parse(raw):raw;}catch(_e){return raw;}
+  })(value);
+  const baseTs=Number(meta.ts)||Date.now();
+  const baseV=normalizeGenericVersion(meta.v);
+  const opId=String(meta.opId||createLocalMutationOpId('sync'));
+  const actor=(me&&me.email)?me.email:'system';
+  const list=Array.isArray(parsed)?parsed:[];
+  return {
+    key:String(key||''),
+    value:parsed,
+    ts:baseTs,
+    v:baseV,
+    opId,
+    actor,
+    mode:Array.isArray(parsed)?'array':'value',
+    itemEvents:list.map(function(item,idx){
+      const id=getGenericItemId(item)||('idx:'+idx);
+      const serialized=(function(v){
+        try{return JSON.stringify(v||{});}catch(_e){return String(v||'');}
+      })(item);
+      const itemV=Math.max(baseV,normalizeGenericVersion(item&&item.v));
+      const itemTs=Math.max(baseTs,Number(item&&item.updatedAt||item&&item.ts||0)||baseTs);
+      const itemOpId=String(item&&item.opId||item&&item.lastOpId||`${opId}:${id}:${hashStringFast(serialized)}`);
+      return {
+        id,
+        op:'upsert',
+        v:itemV,
+        ts:itemTs,
+        opId:itemOpId,
+        hash:hashStringFast(serialized),
+        actor
+      };
+    })
+  };
+}
 async function syncToCloud(key,value){
   const api=getApiBase();
   let parsed=value;
+  let eventDoc=null;
   try{
     try{parsed=JSON.parse(value);}catch{parsed=value;}
     // For cloud: strip base64 (too large), keep only http URLs
@@ -7014,13 +7280,62 @@ async function syncToCloud(key,value){
         }))
       }));
     }
-    const res=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
+    eventDoc=buildGenericEventDoc(key,cloudValue,{
+      ts:Date.now(),
+      v:normalizeGenericVersion((Array.isArray(cloudValue)&&cloudValue[0]&&cloudValue[0].v)||parsed&&parsed.v||1),
+      opId:createLocalMutationOpId(String(key||'sync').replace(/^jb_/,''))
+    });
+    if(key!=='jb_orders') markKeyLocalMutation(key,{opId:eventDoc.opId,v:eventDoc.v});
+    const res=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue,event:eventDoc})});
     let payload={};
     try{payload=await res.json();}catch(_e){payload={};}
-    if(res.ok && !(payload&&payload.localOnly)) clearLocalSyncFallbackKey(key);
-    else persistLocalSyncFallback(key,parsed);
+    if(res.ok && !(payload&&payload.localOnly)){
+      clearLocalSyncFallbackKey(key);
+      if(key!=='jb_orders') clearKeyLocalMutation(key);
+    }else{
+      persistLocalSyncFallback(key,parsed);
+      if(key!=='jb_orders' && eventDoc) queueGenericEventFallback(eventDoc);
+    }
   }catch(e){
     persistLocalSyncFallback(key,parsed);
+    if(key!=='jb_orders' && eventDoc) queueGenericEventFallback(eventDoc);
+  }
+}
+async function syncGenericKeyToCloud(key,value,meta={}){
+  if(!key) return false;
+  const api=getApiBase();
+  let parsed=value;
+  try{
+    parsed=typeof value==='string'?JSON.parse(value):value;
+  }catch(_e){
+    parsed=value;
+  }
+  const eventDoc=buildGenericEventDoc(key,parsed,{
+    ts:Number(meta.ts)||Date.now(),
+    v:normalizeGenericVersion(meta.v||(parsed&&parsed.v)||1),
+    opId:meta.opId||createLocalMutationOpId(String(key).replace(/^jb_/,''))
+  });
+  markKeyLocalMutation(key,{opId:eventDoc.opId,v:eventDoc.v});
+  try{
+    const res=await fetch(api+'/api/sync',{
+      method:'POST',
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({key,value:parsed,event:eventDoc})
+    });
+    let payload={};
+    try{payload=await res.json();}catch(_e){payload={};}
+    if(res.ok && !(payload&&payload.localOnly)){
+      clearLocalSyncFallbackKey(key);
+      clearKeyLocalMutation(key);
+      return true;
+    }
+    persistLocalSyncFallback(key,parsed);
+    queueGenericEventFallback(eventDoc);
+    return false;
+  }catch(_e){
+    persistLocalSyncFallback(key,parsed);
+    queueGenericEventFallback(eventDoc);
+    return false;
   }
 }
 
@@ -7065,6 +7380,7 @@ async function loadFromCloudSilent(){
     const KEYS=['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed'];
     for(const key of KEYS){
       if(data[key]===undefined) continue;
+      if(hasKeyLocalMutation(key)) continue;
       if(key==='jb_feed'){
         if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
         continue;
@@ -7072,46 +7388,22 @@ async function loadFromCloudSilent(){
       localStorage.setItem(key,JSON.stringify(data[key]));
     }
 
-    // Siparişler: sadece cloud'da YENİ olan veya DAHA YENİ olanı al
+    // Otoriter sipariş snapshot'u: realtime kapalı olsa bile cihazlar tutarlı olsun.
     const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
     const ordPayload=await ordRes.json();
     const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
-    // Guard: never treat fallback/no-data response as authoritative overwrite.
-    if((ordPayload&&ordPayload.localOnly)||!cloudOrders.length){
+    if(ordPayload&&ordPayload.localOnly){
       return false;
     }
 
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    let changed=false;
-
-    for(const co of cloudOrders){
-      const lo=localOrders.find(x=>x.id===co.id);
-      if(!lo){
-        // Yeni sipariş (başka cihazdan eklenmiş) - ekle
-        localOrders.push(co);
-        changed=true;
-      } else {
-        const cloudTime=co.updatedAt||co.ts||0;
-        const localTime=lo.updatedAt||lo.ts||0;
-        if(cloudTime > localTime){
-          // Cloud daha yeni - güncelle (başka cihazdan değiştirilmiş)
-          const idx2=localOrders.indexOf(lo);
-          localOrders[idx2]={
-            ...co,
-            products:(co.products||[]).map(p=>{
-              const lp=lo.products?.find(x=>x.name===p.name);
-              return {...p, img:p.img||(lp?.img||null), depotPhoto:p.depotPhoto||(lp?.depotPhoto||null)};
-            })
-          };
-          changed=true;
-        }
-        // Local daha yeni veya eşit → dokunma (kullanıcı az önce değiştirdi)
-      }
-    }
-
-    if(changed){
-      orders=localOrders;
+    const merged=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'silent',pruneMissing:true});
+    const finalOrders=pruneLocalOrdersAgainstRemote(merged,cloudOrders);
+    const before=JSON.stringify(Array.isArray(localOrders)?localOrders:[]);
+    const after=JSON.stringify(finalOrders);
+    if(before!==after){
+      orders=finalOrders;
       localStorage.setItem('jb_orders',JSON.stringify(orders));
       render();
     }
@@ -7138,6 +7430,7 @@ async function loadFromCloud(){
         for(const key of SYNC_KEYS){
           if(key==='jb_orders')continue;
           if(data[key]===undefined) continue;
+          if(hasKeyLocalMutation(key)) continue;
           if(key==='jb_feed'){
             if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
             continue;
@@ -7147,6 +7440,7 @@ async function loadFromCloud(){
         // Keep chat/feed local snapshots durable even when Firebase auth is unstable.
         ['jb_feed','jb_chat_index'].forEach(function(k){
           if(data[k]===undefined) return;
+          if(hasKeyLocalMutation(k)) return;
           if(k==='jb_feed'){
             if(shouldAcceptRemoteFeed(data[k])) setFeedCache(data[k],Date.now());
             return;
@@ -7160,45 +7454,19 @@ async function loadFromCloud(){
           const od=await ordRes.json();
           const isLocalOnly=!!(od&&od.localOnly);
           cloudOrders=Array.isArray(od&&od.orders)?od.orders:[];
-          if(isLocalOnly||!cloudOrders.length){
-            // Never wipe local orders on local-only/no-data responses.
-            console.warn('[Remote] Skipping merge from localOnly/empty orders payload');
+          if(isLocalOnly){
+            // Never wipe local orders on local-only responses.
+            console.warn('[Remote] Skipping merge from localOnly orders payload');
             return false;
           }
         } else {
           cloudOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
           if(!cloudOrders.length) return false;
         }
-        // Smart merge: timestamp bazlı - hangisi daha yeniyse o kazanır
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-        orders=cloudOrders.map(co=>{
-          const lo=localOrders.find(x=>x.id===co.id);
-          if(!lo){
-            // Local'de yok - cloud'dan al, status düzelt
-            return {...co, status:co.status==='At Depott'?'At Depot':co.status==='Sent to Wechat'||co.status==='Sent to WeChat'?'Sent to Factory':co.status};
-          }
-          const localTime=lo.updatedAt||lo.ts||0;
-          const cloudTime=co.updatedAt||co.ts||0;
-          // Hangisi daha yeniyse onu al
-          const winner = localTime >= cloudTime ? lo : co;
-          const loser  = localTime >= cloudTime ? co : lo;
-          return {
-            ...winner,
-            status:winner.status==='At Depott'?'At Depot':winner.status==='Sent to Wechat'||winner.status==='Sent to WeChat'?'Sent to Factory':winner.status,
-            products:(winner.products||[]).map(p=>{
-              const lp=lo.products?.find(x=>x.name===p.name);
-              const cp=co.products?.find(x=>x.name===p.name);
-              return {...p,
-                img:p.img||(lp?.img||cp?.img||null),
-                depotPhoto:p.depotPhoto||(lp?.depotPhoto||cp?.depotPhoto||null)
-              };
-            })
-          };
-        });
-        // Keep local-only orders (not yet synced to cloud)
-        // Preserve ALL local orders not in cloud - they may not have been synced yet
-        const localOnly=localOrders.filter(lo=>!orders.find(o=>o.id===lo.id));
-        orders=[...orders,...localOnly];
+        // Server-authoritative merge: prune missing remote IDs except recent local mutations.
+        orders=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'load',pruneMissing:true});
+        orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
         localStorage.setItem('jb_orders',JSON.stringify(orders));
         // Reload variables from localStorage
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
@@ -7274,9 +7542,7 @@ function saveFirebaseSettings(){
 }
 async function syncSettingsToFirebase(){
   try{
-    const ok=await initFirebaseRealtime({silent:true});
-    if(!ok||!_firebaseDb) return;
-    await writeFirebaseDataKey('jb_settings',settings||{});
+    await syncGenericKeyToCloud('jb_settings',settings||{},{opId:createLocalMutationOpId('settings')});
   }catch(_e){}
 }
 
@@ -7297,10 +7563,16 @@ const FIREBASE_COLLECTION_MEDIA='media';
 const FIREBASE_COLLECTION_CATALOG_ORDERS='catalog_orders';
 const FIREBASE_COLLECTION_AUDIT='audit_logs';
 const FIREBASE_COLLECTION_USER_ROLES='user_roles';
+const FIREBASE_COLLECTION_ORDER_EVENTS='order_events';
+const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
+const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
+const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
+const LOCAL_DATA_META_KEY='jb_data_meta';
+const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
@@ -7312,6 +7584,7 @@ let _firebaseAuth=null;
 let _firebaseReady=false;
 let _firebaseUnsubOrders=null;
 let _firebaseUnsubFeed=null;
+let _firebaseUnsubData=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
 let _firebaseRetryAt=0;
@@ -7331,9 +7604,11 @@ const _health={
   lastError:'',
   authState:'signed_out',
   feedRealtime:false,
-  ordersRealtime:false
+  ordersRealtime:false,
+  dataRealtime:false
 };
 let _realtimeRenderTimer=null;
+let _realtimeMetricsTimer=null;
 let _lastOrdersSaveAuditAt=0;
 const _nativeFetch=window.fetch.bind(window);
 
@@ -7346,6 +7621,315 @@ function ensureFirebaseConfigDefaults(){
   }
 }
 ensureFirebaseConfigDefaults();
+
+function readLocalOrderMutations(){
+  try{
+    const raw=localStorage.getItem(LOCAL_MUTATION_TS_KEY);
+    const map=raw?JSON.parse(raw):{};
+    return map&&typeof map==='object'?map:{};
+  }catch(_e){
+    return {};
+  }
+}
+function writeLocalOrderMutations(map){
+  try{localStorage.setItem(LOCAL_MUTATION_TS_KEY,JSON.stringify(map||{}));}catch(_e){}
+}
+function cleanupLocalOrderMutations(map){
+  const src=map&&typeof map==='object'?{...map}:readLocalOrderMutations();
+  const now=Date.now();
+  let changed=false;
+  Object.keys(src).forEach(function(id){
+    const row=src[id]||{};
+    const ts=Number(row.ts)||0;
+    if(!ts || (now-ts)>=LOCAL_ORDER_MUTATION_KEEP_MS){
+      delete src[id];
+      changed=true;
+    }
+  });
+  if(changed) writeLocalOrderMutations(src);
+  return src;
+}
+function getActiveLocalOrderMutationIds(){
+  const map=cleanupLocalOrderMutations();
+  return Object.keys(map);
+}
+function createLocalMutationOpId(prefix){
+  return `${prefix||'ord'}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
+}
+function markLocalOrderMutation(orderId,type,meta={}){
+  if(!orderId) return;
+  const map=readLocalOrderMutations();
+  map[String(orderId)]={
+    type:type||'upsert',
+    ts:Date.now(),
+    opId:meta.opId||'',
+    v:Number(meta.v)||0
+  };
+  writeLocalOrderMutations(map);
+}
+function clearLocalOrderMutation(orderId){
+  if(!orderId) return;
+  const map=readLocalOrderMutations();
+  if(!Object.prototype.hasOwnProperty.call(map,String(orderId))) return;
+  delete map[String(orderId)];
+  writeLocalOrderMutations(map);
+}
+function hasActiveLocalOrderMutation(orderId){
+  if(!orderId) return false;
+  const map=cleanupLocalOrderMutations();
+  const row=map[String(orderId)];
+  if(!row) return false;
+  const ts=Number(row.ts)||0;
+  return (Date.now()-ts) < LOCAL_ORDER_MUTATION_KEEP_MS;
+}
+function readLocalDataMutations(){
+  try{
+    const raw=localStorage.getItem(LOCAL_DATA_MUTATION_TS_KEY);
+    const map=raw?JSON.parse(raw):{};
+    return map&&typeof map==='object'?map:{};
+  }catch(_e){
+    return {};
+  }
+}
+function writeLocalDataMutations(map){
+  try{localStorage.setItem(LOCAL_DATA_MUTATION_TS_KEY,JSON.stringify(map||{}));}catch(_e){}
+}
+function cleanupLocalDataMutations(map){
+  const src=map&&typeof map==='object'?{...map}:readLocalDataMutations();
+  const now=Date.now();
+  let changed=false;
+  Object.keys(src).forEach(function(key){
+    const row=src[key]||{};
+    const ts=Number(row.ts)||0;
+    if(!ts || (now-ts)>=LOCAL_DATA_MUTATION_KEEP_MS){
+      delete src[key];
+      changed=true;
+    }
+  });
+  if(changed) writeLocalDataMutations(src);
+  return src;
+}
+function markKeyLocalMutation(key,meta={}){
+  const k=String(key||'').trim();
+  if(!k) return;
+  const map=readLocalDataMutations();
+  map[k]={
+    ts:Date.now(),
+    opId:String(meta.opId||''),
+    v:normalizeGenericVersion(meta.v||1)
+  };
+  writeLocalDataMutations(map);
+}
+function clearKeyLocalMutation(key){
+  const k=String(key||'').trim();
+  if(!k) return;
+  const map=readLocalDataMutations();
+  if(!Object.prototype.hasOwnProperty.call(map,k)) return;
+  delete map[k];
+  writeLocalDataMutations(map);
+}
+function hasKeyLocalMutation(key){
+  const k=String(key||'').trim();
+  if(!k) return false;
+  const map=cleanupLocalDataMutations();
+  const row=map[k];
+  if(!row) return false;
+  return (Date.now()-(Number(row.ts)||0)) < LOCAL_DATA_MUTATION_KEEP_MS;
+}
+function queueGenericEventFallback(eventDoc){
+  if(!eventDoc||!eventDoc.key) return;
+  const map=readLocalSyncFallback();
+  const arr=Array.isArray(map['jb_generic_events']&&map['jb_generic_events'].value)?map['jb_generic_events'].value:[];
+  const opId=String(eventDoc.opId||'');
+  const dedup=arr.filter(function(ev){return String(ev&&ev.opId||'')!==opId;});
+  dedup.push(eventDoc);
+  persistLocalSyncFallback('jb_generic_events',dedup);
+}
+async function syncChatThreadToCloud(chatKey,msgs,meta={}){
+  const key=String(chatKey||'');
+  if(!key) return false;
+  const list=Array.isArray(msgs)?msgs:[];
+  try{localStorage.setItem(key,JSON.stringify(list));}catch(_e){}
+  return await syncGenericKeyToCloud(key,list,{
+    v:normalizeGenericVersion(meta.v||1),
+    opId:meta.opId||createLocalMutationOpId('chat')
+  });
+}
+function getOrderVersion(order){
+  return Math.max(0,Number(order&&order.v)||0);
+}
+function nextOrderVersion(currentOrder,previousOrder){
+  return Math.max(getOrderVersion(currentOrder),getOrderVersion(previousOrder))+1;
+}
+function buildOrderEvent(op,orderId,meta={}){
+  const id=String(orderId||'').trim();
+  const ts=Number(meta.ts)||Date.now();
+  const opId=String(meta.opId||createLocalMutationOpId(op||'evt'));
+  return {
+    id:'evt_'+opId,
+    orderId:id,
+    op:String(op||'upsert'),
+    ts,
+    actor:meta.actor||(me&&me.email?me.email:'system'),
+    opId,
+    v:Math.max(0,Number(meta.v)||0),
+    source:meta.source||'client'
+  };
+}
+function queueOrderEventFallback(event){
+  if(!event||!event.orderId) return;
+  const q=readLocalSyncFallback();
+  const arr=Array.isArray((q['jb_order_events']&&q['jb_order_events'].value))?q['jb_order_events'].value:[];
+  const key=String(event.opId||event.id||'');
+  const dedup=arr.filter(ev=>String(ev&& (ev.opId||ev.id||''))!==key);
+  dedup.push(event);
+  persistLocalSyncFallback('jb_order_events',dedup);
+}
+function queueGenericSyncEventFallback(eventDoc){
+  if(!eventDoc||!eventDoc.key) return;
+  const q=readLocalSyncFallback();
+  const arr=Array.isArray((q['jb_sync_events']&&q['jb_sync_events'].value))?q['jb_sync_events'].value:[];
+  const key=String(eventDoc.opId||'');
+  if(!key){
+    arr.push(eventDoc);
+    persistLocalSyncFallback('jb_sync_events',arr);
+    return;
+  }
+  const dedup=arr.filter(function(ev){return String(ev&&ev.opId||'')!==key;});
+  dedup.push(eventDoc);
+  persistLocalSyncFallback('jb_sync_events',dedup);
+}
+function getDataVersion(item){
+  if(item===null||item===undefined) return 0;
+  if(typeof item==='object'){
+    return Math.max(0,Number(item.v)||Number(item.updatedAt)||Number(item.ts)||0);
+  }
+  return 0;
+}
+function nextDataVersion(currentItem,previousItem){
+  return Math.max(getDataVersion(currentItem),getDataVersion(previousItem))+1;
+}
+function buildDataEvent(key,op,payload,meta={}){
+  const ts=Number(meta.ts)||Date.now();
+  const opId=String(meta.opId||createLocalMutationOpId(op||'data'));
+  return {
+    id:'devt_'+opId,
+    key:String(key||''),
+    op:String(op||'set'),
+    ts,
+    opId,
+    actor:meta.actor||(me&&me.email?me.email:'system'),
+    v:Math.max(0,Number(meta.v)||0),
+    payload:payload===undefined?null:payload
+  };
+}
+function mergeByEntityVersion(localArr,remoteArr,extractEntityId){
+  const pickId=typeof extractEntityId==='function'?extractEntityId:function(x){return x&&x.id?String(x.id):'';};
+  const local=Array.isArray(localArr)?localArr:[];
+  const remote=Array.isArray(remoteArr)?remoteArr:[];
+  const byId=new Map();
+  for(const item of local){
+    const id=pickId(item);
+    if(id) byId.set(id,item);
+  }
+  for(const item of remote){
+    const id=pickId(item);
+    if(!id) continue;
+    const prev=byId.get(id);
+    const itemV=getDataVersion(item);
+    const prevV=getDataVersion(prev);
+    if(!prev || itemV>=prevV){
+      byId.set(id,item);
+    }
+  }
+  return [...byId.values()];
+}
+function mergeFeedByVersion(localFeed,remoteFeed){
+  const merged=mergeByEntityVersion(localFeed,remoteFeed,function(item){
+    if(!item||!item.id) return '';
+    return String(item.id);
+  });
+  return merged.sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
+}
+function mergeChatByVersion(localMsgs,remoteMsgs){
+  const merged=mergeByEntityVersion(localMsgs,remoteMsgs,function(item){
+    if(!item) return '';
+    if(item.id) return String(item.id);
+    const from=String(item.from||'');
+    const to=String(item.to||'');
+    const ts=Number(item.ts)||0;
+    const text=String(item.text||'');
+    return `${from}|${to}|${ts}|${text}`;
+  });
+  return merged.sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
+}
+function normalizeChatMessage(msg,prev){
+  const base=msg&&typeof msg==='object'?msg:{};
+  const old=prev&&typeof prev==='object'?prev:{};
+  const ts=Number(base.ts)||Number(old.ts)||Date.now();
+  const nextV=Math.max(1,Number(base.v)||nextDataVersion(base,old));
+  return {
+    ...old,
+    ...base,
+    id:base.id||old.id||('m'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)),
+    ts,
+    updatedAt:Number(base.updatedAt)||ts,
+    v:nextV
+  };
+}
+function normalizeFeedPost(post,prev){
+  const base=post&&typeof post==='object'?post:{};
+  const old=prev&&typeof prev==='object'?prev:{};
+  const ts=Number(base.ts)||Number(old.ts)||Date.now();
+  const nextV=Math.max(1,Number(base.v)||nextDataVersion(base,old));
+  return {
+    ...old,
+    ...base,
+    id:base.id||old.id||('post_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)),
+    ts,
+    updatedAt:Number(base.updatedAt)||ts,
+    v:nextV
+  };
+}
+function queueOrderOpFallback(op){
+  if(!op||!op.orderId) return;
+  const q=readLocalSyncFallback();
+  const arr=Array.isArray((q['jb_order_ops']&&q['jb_order_ops'].value))?q['jb_order_ops'].value:[];
+  const opId=String(op.opId||'');
+  const dedup=opId?arr.filter(function(row){return String(row&&row.opId||'')!==opId;}):arr.slice();
+  dedup.push(op);
+  persistLocalSyncFallback('jb_order_ops',dedup);
+}
+function ackLocalMutationsFromIncoming(incomingOrders){
+  const map=cleanupLocalOrderMutations();
+  if(!Object.keys(map).length) return;
+  let changed=false;
+  for(const incoming of (incomingOrders||[])){
+    if(!incoming||!incoming.id) continue;
+    const id=String(incoming.id);
+    const row=map[id];
+    if(!row) continue;
+    const incomingV=Math.max(0,Number(incoming.v)||0);
+    const rowV=Math.max(0,Number(row.v)||0);
+    const incomingTs=Number(incoming.updatedAt||incoming.ts||0);
+    const rowTs=Number(row.ts)||0;
+    if((incomingV&&incomingV>=rowV) || (!incomingV && incomingTs>=rowTs)){
+      delete map[id];
+      changed=true;
+    }
+  }
+  if(changed) writeLocalOrderMutations(map);
+}
+function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
+  const local=Array.isArray(localOrders)?localOrders:[];
+  const remote=Array.isArray(remoteOrders)?remoteOrders:[];
+  const remoteIds=new Set(remote.filter(o=>o&&o.id).map(o=>String(o.id)));
+  return local.filter(function(o){
+    if(!o||!o.id) return false;
+    if(remoteIds.has(String(o.id))) return true;
+    return hasActiveLocalOrderMutation(o.id);
+  });
+}
 
 function markSync(source){
   _health.lastSyncAt=Date.now();
@@ -7410,8 +7994,90 @@ function scheduleRealtimeRender(){
   if(_realtimeRenderTimer) return;
   _realtimeRenderTimer=setTimeout(()=>{
     _realtimeRenderTimer=null;
-    if(me){updateBadges();render();}
+    if(me){
+      updateBadges();
+      refreshLiveCounters();
+      refreshRealtimeBadges();
+      render();
+    }
   },250);
+}
+
+function applyDataKeysFromRemote(remoteMap,opts={}){
+  const map=remoteMap&&typeof remoteMap==='object'?remoteMap:{};
+  const source=String(opts.source||'data_snapshot');
+  let changed=false;
+  const silent=!!opts.silent;
+  Object.entries(map).forEach(function(entry){
+    const key=entry[0];
+    const raw=entry[1];
+    if(!key || key==='jb_orders') return;
+    if(hasKeyLocalMutation(key)) return;
+    const row=(raw&&typeof raw==='object'&&!Array.isArray(raw)&&Object.prototype.hasOwnProperty.call(raw,'value'))?raw:{value:raw};
+    const incomingV=normalizeGenericVersion(row&&row.v);
+    const incomingTs=Number(row&&row.updatedAt)||Date.now();
+    const incomingValue=Object.prototype.hasOwnProperty.call(row,'value')?row.value:null;
+    let currentRaw=null;
+    let currentValue=null;
+    try{
+      currentRaw=localStorage.getItem(key);
+      currentValue=currentRaw===null?undefined:JSON.parse(currentRaw);
+    }catch(_e){
+      currentValue=undefined;
+    }
+    const currentMeta=readGenericMetaForKey(key);
+    const localV=normalizeGenericVersion(currentMeta&&currentMeta.v);
+    const localTs=Number(currentMeta&&currentMeta.updatedAt)||0;
+    if(localV>incomingV || (localV===incomingV && localTs>incomingTs)) return;
+    try{
+      const nextSerialized=JSON.stringify(incomingValue);
+      const currentSerialized=currentRaw===null||currentRaw===undefined?'':String(currentRaw);
+      if(currentSerialized!==nextSerialized){
+        localStorage.setItem(key,nextSerialized);
+        changed=true;
+      }
+      writeGenericMetaForKey(key,{
+        v:incomingV,
+        updatedAt:incomingTs,
+        lastOpId:String(row&&row.lastOpId||'')
+      });
+      if(key==='jb_settings'){
+        settings=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
+        if(!silent) loadSettings();
+      }else if(key==='jb_templates'){
+        templates=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
+        if(!silent) loadTemplates();
+      }else if(key==='jb_notif'){
+        notifSettings=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
+        if(!silent) loadNotifSettings();
+      }else if(key==='jb_users'){
+        users=normalizeUsersList(Array.isArray(incomingValue)?incomingValue:[]);
+      }else if(key==='jb_suppliers'){
+        suppliers=Array.isArray(incomingValue)?incomingValue:[];
+      }else if(key==='jb_catalog'){
+        catalog=Array.isArray(incomingValue)?incomingValue:[];
+      }else if(key==='jb_feed'){
+        setFeedCache(Array.isArray(incomingValue)?incomingValue:[],incomingTs);
+      }
+      clearKeyLocalMutation(key);
+      markSync(source+':'+key);
+    }catch(_e){}
+  });
+  if(changed){
+    if(me) scheduleRealtimeRender();
+  }
+}
+
+function refreshRealtimeBadges(){
+  if(me&&me.role==='Admin'){
+    updateChatBadge();
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
+    if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+  }
+  if(me&&me.role==='Reseller'){
+    checkResellerUnreadMessages().catch(()=>{});
+    if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+  }
 }
 
 function withTimeoutPromise(promise,ms,label){
@@ -7483,6 +8149,68 @@ function firebaseAuthStateHint(state){
 function firebaseDocToOrder(doc){
   const data=doc.data()||{};
   return {...data,id:data.id||doc.id,status:normalizeStatus(data.status)};
+}
+
+function getLiveOrdersOnly(list){
+  return (Array.isArray(list)?list:[]).filter(function(order){
+    return order && order.id && !isOrderDeleted(order);
+  });
+}
+
+function isOrderDeleted(order){
+  return !!(order && order.deletedAt);
+}
+
+function applyOrderDeleteLocally(orderId,deletedAt){
+  const id=String(orderId||'').trim();
+  if(!id) return null;
+  const ts=Number(deletedAt)||Date.now();
+  orders=(orders||[]).filter(function(o){return o&&o.id!==id;});
+  persistOrdersLocalSafe(orders);
+  return {id,status:'Deleted',deletedAt:ts,updatedAt:ts};
+}
+
+async function deleteOrderWithTombstone(orderId,meta={}){
+  const id=String(orderId||'').trim();
+  if(!id) return false;
+  const ts=Number(meta.ts)||Date.now();
+  const previous=meta.previousOrder||((Array.isArray(orders)?orders:[]).find(o=>o&&o.id===id))||null;
+  const v=Math.max(1,Number(meta.v)||nextOrderVersion(null,previous));
+  const opId=String(meta.opId||createLocalMutationOpId('delete'));
+  const event=buildOrderEvent('delete',id,{opId,v,ts,source:'client'});
+  markLocalOrderMutation(id,'delete',{opId,v});
+  applyOrderDeleteLocally(id,ts);
+  const api=getApiBase();
+  let acked=false;
+  let staleIgnored=false;
+  try{
+    const res=await fetch(api+'/api/order/'+encodeURIComponent(id),{
+      method:'DELETE',
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({opId,v,deletedAt:ts,event})
+    });
+    let payload={};
+    try{payload=await res.json();}catch(_e){payload={};}
+    acked=!!(res.ok && !(payload&&payload.localOnly));
+    staleIgnored=!!(payload&&payload.staleIgnored);
+  }catch(_e){
+    acked=false;
+  }
+  if(acked||staleIgnored){
+    clearLocalOrderMutation(id);
+  }else{
+    queueOrderOpFallback({
+      op:'delete',
+      orderId:id,
+      opId,
+      v,
+      ts,
+      deletedAt:ts,
+      event
+    });
+    queueOrderEventFallback(event);
+  }
+  return true;
 }
 
 function loadScriptOnce(src){
@@ -7937,29 +8665,53 @@ function sanitizeOrderForRemote(order){
   return clean;
 }
 
-function mergeOrdersByFreshness(localOrders,incomingOrders){
-  const byId=new Map((localOrders||[]).map(o=>[o.id,{...o,status:normalizeStatus(o.status)}]));
+function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
+  const preservePendingLocalIds=new Set(Array.isArray(opts.preservePendingLocalIds)?opts.preservePendingLocalIds:[]);
+  const source=String(opts.source||'');
+  const pruneMissing=!!opts.pruneMissing;
+  const byId=new Map((localOrders||[]).filter(o=>o&&o.id).map(o=>[String(o.id),{...o,status:normalizeStatus(o.status)}]));
   for(const incoming of (incomingOrders||[])){
     if(!incoming||!incoming.id) continue;
-    const cleanIncoming={...incoming,status:normalizeStatus(incoming.status)};
+    const cleanIncoming={...incoming,id:String(incoming.id),status:normalizeStatus(incoming.status)};
     const local=byId.get(cleanIncoming.id);
     if(!local){
       byId.set(cleanIncoming.id,cleanIncoming);
       continue;
     }
-    const incomingTs=cleanIncoming.updatedAt||cleanIncoming.ts||0;
-    const localTs=local.updatedAt||local.ts||0;
-    if(incomingTs>=localTs){
+    const incomingV=Math.max(0,Number(cleanIncoming.v)||0);
+    const localV=Math.max(0,Number(local.v)||0);
+    const incomingTs=Number(cleanIncoming.updatedAt||cleanIncoming.ts||0);
+    const localTs=Number(local.updatedAt||local.ts||0);
+    const incomingDeleted=!!cleanIncoming.deletedAt;
+    const localDeleted=!!local.deletedAt;
+    const incomingWins=incomingV>localV || (incomingV===localV && incomingTs>=localTs);
+    if(incomingWins){
       byId.set(cleanIncoming.id,{
         ...cleanIncoming,
-        products:(cleanIncoming.products||[]).map(p=>{
+        products:incomingDeleted?[]:(cleanIncoming.products||[]).map(p=>{
           const lp=(local.products||[]).find(x=>x.name===p.name);
           return {...p,img:p.img||(lp&&lp.img)||null,depotPhoto:p.depotPhoto||(lp&&lp.depotPhoto)||null};
         })
       });
+    }else if(localDeleted && !incomingDeleted && incomingV===localV && incomingTs>localTs){
+      // Safety: if same version but fresher non-deleted payload arrives, allow recovery.
+      byId.set(cleanIncoming.id,cleanIncoming);
     }
   }
-  return [...byId.values()].sort((a,b)=>(b.ts||0)-(a.ts||0));
+  let merged=[...byId.values()];
+  if(pruneMissing){
+    const incomingIds=new Set((incomingOrders||[]).filter(o=>o&&o.id).map(o=>String(o.id)));
+    merged=merged.filter(function(o){
+      if(!o||!o.id) return false;
+      if(incomingIds.has(String(o.id))) return true;
+      if(preservePendingLocalIds.has(String(o.id))) return true;
+      if(hasActiveLocalOrderMutation(o.id)) return true;
+      return false;
+    });
+  }
+  return merged
+    .filter(o=>o&&o.id&&!isOrderDeleted(o))
+    .sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0));
 }
 
 function disconnectFirebaseRealtime(){
@@ -7970,6 +8722,10 @@ function disconnectFirebaseRealtime(){
   if(_firebaseUnsubFeed){
     try{_firebaseUnsubFeed();}catch(e){}
     _firebaseUnsubFeed=null;
+  }
+  if(_firebaseUnsubData){
+    try{_firebaseUnsubData();}catch(_e){}
+    _firebaseUnsubData=null;
   }
   if(_firebaseAuthWatcherUnsub){
     try{_firebaseAuthWatcherUnsub();}catch(_e){}
@@ -8023,6 +8779,147 @@ async function subscribeFeedRealtime(opts={}){
   }
 }
 
+function applyRealtimeDataKey(key,value,updatedAt,opts={}){
+  const k=String(key||'').trim();
+  if(!k || k==='jb_orders') return;
+  if(hasKeyLocalMutation(k)) return;
+  const ts=Number(updatedAt)||Date.now();
+  const incomingV=normalizeGenericVersion(opts&&opts.v);
+  const incomingOpId=String(opts&&opts.lastOpId||opts&&opts.opId||'');
+  const localMeta=readGenericMetaForKey(k);
+  const localV=normalizeGenericVersion(localMeta&&localMeta.v);
+  const localMetaTs=Number(localMeta&&localMeta.updatedAt)||0;
+  if(localV>incomingV || (localV===incomingV && localMetaTs>ts)) return;
+  writeGenericMetaForKey(k,{v:incomingV,updatedAt:ts,lastOpId:incomingOpId});
+  if(k==='jb_feed'){
+    const localTs=readFeedUpdatedAt();
+    if(localTs && ts+1200<localTs) return;
+    setFeedCache(Array.isArray(value)?value:[],ts);
+    _health.feedRealtime=true;
+    clearKeyLocalMutation(k);
+    markSync('data_feed_snapshot');
+    if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
+    if(me&&me.role==='Admin') renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
+    refreshRealtimeBadges();
+    return;
+  }
+  localStorage.setItem(k,JSON.stringify(value));
+  if(k==='jb_users'){
+    users=normalizeUsersList(Array.isArray(value)?value:[]);
+    if(me&&me.id){
+      const mine=users.find(u=>u&&u.id===me.id) || users.find(u=>u&&String(u.email||'').toLowerCase()===String(me.email||'').toLowerCase());
+      if(mine){
+        const roleNow=String(mine.role||'');
+        if(roleNow && roleNow!==me.role){
+          me.role=roleNow;
+          renderNav();
+        }
+        me.dname=mine.dname||me.dname;
+      }
+    }
+    renderUsers();
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
+  }else if(k==='jb_suppliers'){
+    suppliers=Array.isArray(value)?value:[];
+    renderSuppliers();
+    if(typeof renderSupPerf==='function') renderSupPerf();
+  }else if(k==='jb_templates'){
+    templates=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+    loadTemplates();
+  }else if(k==='jb_notif'){
+    notifSettings=value&&typeof value==='object'&&!Array.isArray(value)?value:{shipped:true};
+    loadNotifSettings();
+  }else if(k==='jb_settings'){
+    settings=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+    loadSettings();
+    _sessionTimeout=(parseInt(settings.sessionTimeout)||30)*60*1000;
+  }else if(k==='jb_catalog'){
+    catalog=Array.isArray(value)?value:[];
+  }else if(k==='jb_activity'){
+    activityLog=Array.isArray(value)?value:[];
+    if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
+  }else if(k.indexOf('jb_chat_')===0){
+    const rid=k.replace('jb_chat_','');
+    _messages[String(rid||'')]=Array.isArray(value)?value:[];
+    if(_chatReseller && String(_chatReseller)===String(rid||'')) renderMessages();
+    if(me&&me.id&&String(me.id)===String(rid||'')) renderResellerMessages(Array.isArray(value)?value:[]);
+    updateChatBadge();
+    checkResellerUnreadMessages().catch(()=>{});
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
+  }else if(k==='jb_chat_index'){
+    // keep durable snapshot only
+  }
+  clearKeyLocalMutation(k);
+  markSync('data_snapshot:'+k);
+  refreshLiveCounters();
+  refreshRealtimeBadges();
+  if(me) scheduleRealtimeRender();
+}
+
+function renderLiveCounters(){
+  const allCount=Array.isArray(orders)?orders.length:0;
+  const completedCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.status==='Completed').length;
+  const readyCount=(Array.isArray(orders)?orders:[]).filter(function(o){
+    return o&&o.status==='At Depot'&&getShelfStatus(o).ready;
+  }).length;
+  const pendingApprovalCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.pendingApproval).length;
+  const setText=function(id,val){
+    const el=document.getElementById(id);
+    if(el) el.textContent=String(val);
+  };
+  setText('lc-total-orders',allCount);
+  setText('lc-completed-orders',completedCount);
+  setText('lc-ready-orders',readyCount);
+  setText('lc-pending-approval',pendingApprovalCount);
+}
+
+function refreshLiveCounters(){
+  renderLiveCounters();
+  if(me&&me.role==='Admin'){
+    const badge=document.getElementById('sync-state-dot');
+    if(badge){
+      const ok=!!(_health.firebaseConnected&&_health.ordersRealtime);
+      badge.style.background=ok?'#22c55e':'#f59e0b';
+      badge.title=ok?'Realtime connected':'Realtime reconnecting';
+    }
+  }
+}
+
+async function subscribeDataRealtime(opts={}){
+  const silent=!!opts.silent;
+  if(!_firebaseDb) return false;
+  if(_firebaseUnsubData){try{_firebaseUnsubData();}catch(_e){}}
+  try{
+    _firebaseUnsubData=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).onSnapshot(snap=>{
+      snap.docChanges().forEach(function(ch){
+        if(!ch||!ch.doc) return;
+        const key=String(ch.doc.id||'');
+        if(!key || key==='jb_orders' || key==='jb_feed') return;
+        const d=ch.doc.data?ch.doc.data():null;
+        applyRealtimeDataKey(key,d&&d.value,d&&d.updatedAt,{
+          source:'realtime',
+          v:d&&d.v,
+          lastOpId:d&&d.lastOpId
+        });
+      });
+      _health.dataRealtime=true;
+      markSync('data_collection_snapshot');
+      refreshLiveCounters();
+    },err=>{
+      _health.dataRealtime=false;
+      markError(err);
+      if(!silent) console.warn('[data snapshot]',err&&err.message?err.message:err);
+    });
+    _health.dataRealtime=true;
+    return true;
+  }catch(e){
+    _health.dataRealtime=false;
+    markError(e);
+    if(!silent) console.warn('[subscribeDataRealtime]',e&&e.message?e.message:e);
+    return false;
+  }
+}
+
 async function initFirebaseRealtime(opts={}){
   const silent=!!opts.silent;
   const force=!!opts.force;
@@ -8064,16 +8961,20 @@ async function initFirebaseRealtime(opts={}){
       }
       if(_firebaseUnsubOrders){try{_firebaseUnsubOrders();}catch(e){}}
       _firebaseUnsubOrders=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).onSnapshot(snap=>{
-        const incoming=snap.docs.map(firebaseDocToOrder);
-        const merged=mergeOrdersByFreshness(orders,incoming);
-        orders=merged;
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        const incomingRaw=snap.docs.map(firebaseDocToOrder);
+        ackLocalMutationsFromIncoming(incomingRaw);
+        const incomingLive=getLiveOrdersOnly(incomingRaw);
+        const merged=mergeOrdersByFreshness(orders,incomingLive,{source:'realtime',pruneMissing:true});
+        orders=pruneLocalOrdersAgainstRemote(merged,incomingLive);
+        localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
         _health.ordersRealtime=true;
         markSync('orders_snapshot');
         if(me){
           if(_realtimeRenderTimer) clearTimeout(_realtimeRenderTimer);
           _realtimeRenderTimer=setTimeout(()=>{
             updateBadges();
+            refreshLiveCounters();
+            refreshRealtimeBadges();
             render();
           },120);
         }
@@ -8083,6 +8984,7 @@ async function initFirebaseRealtime(opts={}){
         console.warn('[Firebase snapshot]',err.message);
       });
       await subscribeFeedRealtime({silent:true});
+      await subscribeDataRealtime({silent:true});
       _firebaseReady=true;
       _health.firebaseConnected=true;
       _firebaseRetryAt=0;
@@ -8147,10 +9049,77 @@ async function writeFirebaseDataMap(map){
     await batch.commit();
   }
 }
+function getGenericEventCollectionName(key){
+  const safe=String(key||'generic').replace(/^jb_/,'').replace(/[^a-zA-Z0-9_-]/g,'_')||'generic';
+  return 'events_'+safe;
+}
+function sanitizeGenericItemEvent(item,idx,base={}){
+  const id=getGenericItemId(item)||('idx:'+idx);
+  const serialized=(function(v){
+    try{return JSON.stringify(v||{});}catch(_e){return String(v||'');}
+  })(item);
+  const v=Math.max(normalizeGenericVersion(base.v),normalizeGenericVersion(item&&item.v));
+  const ts=Math.max(Number(base.ts)||Date.now(),Number(item&&item.updatedAt||item&&item.ts||0)||Number(base.ts)||Date.now());
+  const opId=String(item&&item.opId||item&&item.lastOpId||`${base.opId||createLocalMutationOpId('sync')}:${id}:${hashStringFast(serialized)}`);
+  return {id,op:'upsert',v,ts,opId,hash:hashStringFast(serialized),actor:base.actor||'system'};
+}
+function buildGenericEventDocFromPayload(key,value,event){
+  const parsed=(function(raw){
+    try{return typeof raw==='string'?JSON.parse(raw):raw;}catch(_e){return raw;}
+  })(value);
+  const now=Date.now();
+  const base={
+    ts:Number(event&&event.ts)||now,
+    v:normalizeGenericVersion(event&&event.v),
+    opId:String(event&&event.opId||createLocalMutationOpId(String(key||'sync').replace(/^jb_/,''))),
+    actor:String(event&&event.actor||(me&&me.email?me.email:'system'))
+  };
+  const list=Array.isArray(parsed)?parsed:[];
+  const itemEvents=Array.isArray(event&&event.itemEvents)&&event.itemEvents.length
+    ? event.itemEvents.map(function(it,idx){
+        return {
+          id:String(it&&it.id||('idx:'+idx)),
+          op:String(it&&it.op||'upsert'),
+          v:Math.max(base.v,normalizeGenericVersion(it&&it.v)),
+          ts:Math.max(base.ts,Number(it&&it.ts)||base.ts),
+          opId:String(it&&it.opId||`${base.opId}:${String(it&&it.id||idx)}`),
+          hash:String(it&&it.hash||''),
+          actor:String(it&&it.actor||base.actor)
+        };
+      })
+    : list.map(function(item,idx){ return sanitizeGenericItemEvent(item,idx,base); });
+  return {
+    key:String(key||''),
+    value:parsed,
+    ts:base.ts,
+    v:base.v,
+    opId:base.opId,
+    actor:base.actor,
+    mode:Array.isArray(parsed)?'array':'value',
+    itemEvents
+  };
+}
+async function writeGenericEventDocToFirebase(key,eventDoc){
+  if(!_firebaseDb||!key||!eventDoc) return;
+  const col=getGenericEventCollectionName(key);
+  const opId=String(eventDoc.opId||createLocalMutationOpId(String(key||'sync').replace(/^jb_/,'')));
+  await _firebaseDb.collection(col).doc(opId).set({
+    ...eventDoc,
+    opId,
+    key:String(key),
+    ts:Number(eventDoc.ts)||Date.now(),
+    v:normalizeGenericVersion(eventDoc.v),
+    savedAt:Date.now()
+  },{merge:true});
+}
 async function readFirebaseOrders(){
   const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).get();
-  const list=snap.docs.map(firebaseDocToOrder);
-  return list.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const list=getLiveOrdersOnly(snap.docs.map(firebaseDocToOrder));
+  return list.sort((a,b)=>{
+    const bt=Number(b.updatedAt||b.ts)||0;
+    const at=Number(a.updatedAt||a.ts)||0;
+    return bt-at;
+  });
 }
 async function saveMediaToFirebase(data,type){
   const id='m'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
@@ -8335,13 +9304,59 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path==='/api/sync'&&m==='POST'){
     const key=req&&req.key;
     const value=req&&req.value;
+    const event=req&&req.event;
     if(key) writeLocalJson(key,value);
     if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
     try{
       if(key==='jb_orders'&&Array.isArray(value)){
         await pushOrdersToFirebase([...(value||[])]);
         await deleteFirebaseDataKey('jb_orders');
+      }else if(key==='jb_order_events'&&Array.isArray(value)){
+        for(const ev of value){
+          if(!ev||!ev.orderId) continue;
+          const opId=String(ev.opId||ev.id||createLocalMutationOpId('evt'));
+          await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(opId).set({
+            ...ev,
+            opId,
+            ts:Number(ev.ts)||Date.now(),
+            savedAt:Date.now()
+          },{merge:true});
+        }
+      }else if(key==='jb_generic_events'&&Array.isArray(value)){
+        for(const ev of value){
+          if(!ev||!ev.key) continue;
+          const opId=String(ev.opId||ev.id||createLocalMutationOpId('gevt'));
+          await _firebaseDb.collection(FIREBASE_COLLECTION_GENERIC_EVENTS).doc(opId).set({
+            ...ev,
+            opId,
+            ts:Number(ev.ts)||Date.now(),
+            savedAt:Date.now()
+          },{merge:true});
+        }
       }else{
+        const eventDoc=event?buildGenericEventDocFromPayload(key,value,event):null;
+        if(eventDoc&&eventDoc.opId&&key){
+          const ref=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(String(key));
+          const prevSnap=await ref.get();
+          const prev=prevSnap.exists?(prevSnap.data()||{}):{};
+          const prevOpId=String(prev.lastOpId||'');
+          const prevV=Math.max(0,Number(prev.v)||0);
+          const prevTs=Number(prev.updatedAt||0);
+          if(prevOpId && prevOpId===eventDoc.opId){
+            return jsonApiResponse({ok:true,idempotent:true,ackV:prevV||eventDoc.v,opId:eventDoc.opId});
+          }
+          if(prevV>eventDoc.v || (prevV===eventDoc.v && prevTs>eventDoc.ts)){
+            return jsonApiResponse({ok:true,staleIgnored:true,ackV:prevV,opId:prevOpId||eventDoc.opId});
+          }
+          await ref.set({
+            value:eventDoc.value,
+            updatedAt:Number(eventDoc.ts)||Date.now(),
+            v:normalizeGenericVersion(eventDoc.v),
+            lastOpId:String(eventDoc.opId||'')
+          },{merge:true});
+          await writeGenericEventDocToFirebase(String(key),eventDoc);
+          return jsonApiResponse({ok:true,ackV:eventDoc.v,opId:eventDoc.opId});
+        }
         await writeFirebaseDataKey(key,value);
       }
       return jsonApiResponse({ok:true});
@@ -8353,49 +9368,152 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path==='/api/orders'&&m==='GET'){
     if(firebaseOnline){
       try{
-        const remoteOrders=await readFirebaseOrders();
+        const remoteOrders=getLiveOrdersOnly(await readFirebaseOrders());
         writeLocalJson('jb_orders',remoteOrders);
         return jsonApiResponse({orders:remoteOrders});
       }catch(err){
         markError(err);
       }
     }
-    return jsonApiResponse({orders:readLocalOrders(),localOnly:true});
+    return jsonApiResponse({orders:getLiveOrdersOnly(readLocalOrders()),localOnly:true});
   }
   if(path==='/api/order'&&m==='POST'){
     const order=req&&req.order;
     if(!order||!order.id) return jsonApiResponse({error:'order missing'},400);
-    const localOrder=sanitizeOrderForRemote(order);
-    upsertLocalOrder(localOrder);
-    orders=mergeOrdersByFreshness(orders,[localOrder]);
-    // Overwrite the whole document so removed fields (e.g. pendingApproval) are actually deleted.
-    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
+    const id=String(order.id);
+    const previous=(orders||[]).find(o=>o&&String(o.id)===id)||null;
+    const opId=String((req&&req.opId)||order.opId||createLocalMutationOpId('upsert'));
+    const requestedV=Math.max(0,Number((req&&req.v)||order.v)||0);
+    const v=Math.max(1,requestedV||nextOrderVersion(order,previous));
+    const ts=Number(order.updatedAt||order.ts)||Date.now();
+    const deletedAt=Number(order.deletedAt)||0;
+    const localOrder=sanitizeOrderForRemote({
+      ...order,
+      id,
+      v,
+      opId,
+      lastOpId:opId,
+      updatedAt:ts,
+      ts:Number(order.ts)||ts,
+      deletedAt:deletedAt||undefined,
+      status:deletedAt?'Deleted':normalizeStatus(order.status||'New'),
+      products:deletedAt?[]:(order.products||[])
+    });
+    if(deletedAt){
+      applyOrderDeleteLocally(id,deletedAt||ts);
+    }else{
+      orders=mergeOrdersByFreshness(orders,[localOrder],{source:'api_upsert'});
+      localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+    }
+    const event=(req&&req.event&&typeof req.event==='object')
+      ? {...req.event,orderId:id,opId:String(req.event.opId||opId),v,ts:Number(req.event.ts)||ts}
+      : buildOrderEvent(deletedAt?'delete':'upsert',id,{opId,v,ts,source:'api'});
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
     try{
-      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(localOrder);
-      writeAuditEvent('order_upsert',{orderId:order.id,status:order.status||'',source:'api'}).catch(()=>{});
-      return jsonApiResponse({ok:true});
+      const ref=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id);
+      const prevSnap=await ref.get();
+      const prevData=prevSnap.exists?firebaseDocToOrder(prevSnap):null;
+      const prevV=Math.max(0,Number(prevData&&prevData.v)||0);
+      const prevOpId=String(prevData&&prevData.lastOpId||'');
+      const prevUpdated=Number(prevData&&prevData.updatedAt||0);
+      if(opId && prevOpId===opId){
+        return jsonApiResponse({ok:true,idempotent:true,ackV:prevV||v,opId});
+      }
+      if(prevV>v || (prevV===v && prevUpdated>ts)){
+        return jsonApiResponse({ok:true,staleIgnored:true,ackV:prevV,opId:prevOpId||opId});
+      }
+      await ref.set(localOrder);
+      const evId=String(event.opId||event.id||opId);
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(evId).set({
+        ...event,
+        id:event.id||('evt_'+evId),
+        orderId:id,
+        opId:evId,
+        v,
+        ts:Number(event.ts)||ts,
+        savedAt:Date.now()
+      },{merge:true});
+      writeAuditEvent(deletedAt?'order_tombstone':'order_upsert',{orderId:id,status:localOrder.status||'',source:'api',v,opId}).catch(()=>{});
+      return jsonApiResponse({ok:true,ackV:v,opId});
     }catch(err){
       markError(err);
-      return jsonApiResponse({ok:true,localOnly:true});
+      return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
     }
   }
   if(path.startsWith('/api/order/')&&m==='DELETE'){
-    const id=path.split('/').pop();
-    if(id){
-      deleteLocalOrder(id);
-      orders=(orders||[]).filter(o=>o&&o.id!==id);
-    }
-    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
-    if(id){
-      try{
-        await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
-        writeAuditEvent('order_delete',{orderId:id,source:'api'}).catch(()=>{});
-      }catch(err){
-        markError(err);
-        return jsonApiResponse({ok:true,localOnly:true});
+    const id=String(path.split('/').pop()||'');
+    if(!id) return jsonApiResponse({error:'order id missing'},400);
+    const previous=(orders||[]).find(o=>o&&String(o.id)===id)||null;
+    const ts=Number((req&&req.deletedAt)||Date.now())||Date.now();
+    const opId=String((req&&req.opId)||createLocalMutationOpId('delete'));
+    const v=Math.max(1,Number((req&&req.v)||0)||nextOrderVersion(null,previous));
+    const tombstone={
+      id,
+      status:'Deleted',
+      deletedAt:ts,
+      updatedAt:ts,
+      ts:previous&&previous.ts?previous.ts:ts,
+      v,
+      opId,
+      lastOpId:opId
+    };
+    applyOrderDeleteLocally(id,ts);
+    const event=(req&&req.event&&typeof req.event==='object')
+      ? {...req.event,orderId:id,opId:String(req.event.opId||opId),v,ts:Number(req.event.ts)||ts}
+      : buildOrderEvent('delete',id,{opId,v,ts,source:'api'});
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
+    try{
+      const ref=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id);
+      const prevSnap=await ref.get();
+      const prevData=prevSnap.exists?firebaseDocToOrder(prevSnap):null;
+      const prevV=Math.max(0,Number(prevData&&prevData.v)||0);
+      const prevOpId=String(prevData&&prevData.lastOpId||'');
+      const prevDeletedAt=Number(prevData&&prevData.deletedAt||0);
+      if(opId && prevOpId===opId){
+        return jsonApiResponse({ok:true,idempotent:true,ackV:prevV||v,opId});
       }
+      if(prevV>v || (prevV===v && prevDeletedAt>=ts)){
+        return jsonApiResponse({ok:true,staleIgnored:true,ackV:prevV,opId:prevOpId||opId});
+      }
+      await ref.set(tombstone);
+      const evId=String(event.opId||event.id||opId);
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(evId).set({
+        ...event,
+        id:event.id||('evt_'+evId),
+        orderId:id,
+        opId:evId,
+        v,
+        ts:Number(event.ts)||ts,
+        savedAt:Date.now()
+      },{merge:true});
+      writeAuditEvent('order_tombstone',{orderId:id,source:'api',v,opId}).catch(()=>{});
+      return jsonApiResponse({ok:true,ackV:v,opId});
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
     }
-    return jsonApiResponse({ok:true});
+  }
+  if(path==='/api/order-event'&&m==='POST'){
+    const event=req&&req.event?req.event:req;
+    if(!event||!event.orderId) return jsonApiResponse({error:'event missing'},400);
+    const opId=String(event.opId||event.id||createLocalMutationOpId('evt'));
+    const payload={
+      ...event,
+      id:event.id||('evt_'+opId),
+      opId,
+      orderId:String(event.orderId),
+      ts:Number(event.ts)||Date.now(),
+      v:Math.max(0,Number(event.v)||0),
+      savedAt:Date.now()
+    };
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true,opId});
+    try{
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(opId).set(payload,{merge:true});
+      return jsonApiResponse({ok:true,opId});
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,localOnly:true,opId});
+    }
   }
   if(path==='/api/image'&&m==='POST'){
     if(firebaseOnline){
@@ -9084,13 +10202,13 @@ function quickAdvance(id){
   playSound('success');
   toast(`✅ ${esc(o.name)} → ${next}`,'ok');
 }
-function quickDelete(id){
+async function quickDelete(id){
   if(!confirm('Bu siparişi sil?'))return;
   const o=orders.find(x=>x.id===id);
   if(o) logActivity('deleted',`Order deleted: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`);
-  orders=orders.filter(x=>x.id!==id);
+  await deleteOrderWithTombstone(id,{opId:createLocalMutationOpId('quickdel'),previousOrder:o||null});
   if(selId===id){selId=null;closeDetail();}
-  saveOrders();render();updateBadges();
+  render();updateBadges();
   toast('🗑️ Deleteindi','info');
 }
 function duplicateOrder(id){
@@ -9139,22 +10257,24 @@ async function startPendingPoll(){
         if(ordRes.ok){const od=await ordRes.json();newOrders=od.orders||[];}
         else{newOrders=data.jb_orders||[];}
       }catch{newOrders=data.jb_orders||[];}
-      if(newOrders.length){
+      if(Array.isArray(newOrders)){
         if(me.role==='Reseller'){
           // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
           const prevOrders=Array.isArray(orders)?orders:[];
           const myOld=prevOrders.filter(o=>o.resellerId===me.id);
-          let mergedOrders=mergeOrdersByFreshness(prevOrders,newOrders);
           const nowTs=Date.now();
           const recentLocalPending=myOld.filter(o=>
             o&&o.id&&o.pendingApproval&&!o.rejected&&
             !newOrders.find(n=>n&&n.id===o.id)&&
             (nowTs-((o.updatedAt||o.ts||0)))<RESELLER_PENDING_LOCAL_GRACE_MS
           );
-          if(recentLocalPending.length){
-            mergedOrders=mergeOrdersByFreshness(mergedOrders,recentLocalPending);
-          }
-          orders=mergedOrders;
+          const preserveIds=recentLocalPending.map(o=>String(o.id));
+          const mergedOrders=mergeOrdersByFreshness(prevOrders,newOrders,{
+            source:'poll_reseller',
+            pruneMissing:true,
+            preservePendingLocalIds:preserveIds
+          });
+          orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
           persistOrdersLocalSafe(orders);
           const myNew=orders.filter(o=>o.resellerId===me.id);
           // Detect status changes
@@ -9173,25 +10293,11 @@ async function startPendingPoll(){
             }
           });
         } else {
-          // For admin/staff: smart merge — preserve local status changes
+          // For admin/staff use server-authoritative merge with local-mutation grace.
           const oldPending=orders.filter(o=>o.pendingApproval).length;
           const newPending=newOrders.filter(o=>o.pendingApproval).length;
-          const now=Date.now();
-          // Merge: for each cloud order, if local version has different status and was updated recently, keep local
-          const mergedOrders=newOrders.map(cloudOrder=>{
-            const localOrder=orders.find(o=>o.id===cloudOrder.id);
-            if(!localOrder)return cloudOrder;
-            // If local was updated in last 60 seconds and has different status, keep local
-            const localUpdated=localOrder.updatedAt||localOrder.ts||0;
-            const cloudUpdated=cloudOrder.updatedAt||cloudOrder.ts||0;
-            if(localUpdated>cloudUpdated){
-              return localOrder; // local is newer, keep it
-            }
-            return cloudOrder;
-          });
-          // Also keep local-only orders (not yet in cloud)
-          const localOnly=orders.filter(o=>!newOrders.find(n=>n.id===o.id)&&(now-o.ts)<30000);
-          orders=[...mergedOrders,...localOnly];
+          const mergedOrders=mergeOrdersByFreshness(orders,newOrders,{source:'poll_admin',pruneMissing:true});
+          orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
           localStorage.setItem('jb_orders',JSON.stringify(orders));
           updateBadges();
           if(newPending>oldPending){
@@ -9314,11 +10420,8 @@ async function pollAllChats(){
       });
       
       if(hasNewUnread){
-        // Sync read status to cloud
-        await fetch(api+'/api/sync', {
-          method: 'POST',
-          headers: getAuthHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({key: 'jb_chat_'+_chatReseller, value: msgs})
+        await syncChatThreadToCloud('jb_chat_'+_chatReseller,msgs,{
+          opId:createLocalMutationOpId('chatread')
         });
         renderMessages();
       }
@@ -9442,13 +10545,9 @@ async function openChatWith(resellerId){
   });
   
   if(hasUnread){
-    // Sync to cloud
     try{
-      const api = getApiBase();
-      await fetch(api+'/api/sync', {
-        method: 'POST',
-        headers: getAuthHeaders({'Content-Type':'application/json'}),
-        body: JSON.stringify({key: 'jb_chat_'+resellerId, value: msgs})
+      await syncChatThreadToCloud('jb_chat_'+resellerId,msgs,{
+        opId:createLocalMutationOpId('chatread')
       });
     }catch(e){}
   }
@@ -9555,6 +10654,12 @@ function updateChatBadge(){
   const total=Object.values(_messages).reduce((s,msgs)=>s+msgs.filter(m=>m.from!=='admin'&&!m.read).length,0);
   const badge=document.getElementById('chat-badge');
   if(badge){badge.textContent=total;badge.style.display=total?'flex':'none';}
+}
+function refreshDashboardCounters(){
+  const pg=document.getElementById('pg-dash');
+  if(pg&&pg.classList.contains('on')){
+    renderDash();
+  }
 }
 
 
@@ -9667,10 +10772,8 @@ async function loadResellerMessages(){
       // Save read status to cloud
       if(hasUnread){
         try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-        await fetch('/api/sync', {
-          method: 'POST',
-          headers: getAuthHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({key: chatKey, value: msgs})
+        await syncChatThreadToCloud(chatKey,msgs,{
+          opId:createLocalMutationOpId('reschatread')
         });
       }
       
@@ -9747,7 +10850,10 @@ async function sendChatMsg(){
   renderMessages();
   try{
     const msgs = (_messages[_chatReseller]||[]).slice();
-    await syncToCloud(chatKey,JSON.stringify(msgs));
+    const synced=await syncChatThreadToCloud(chatKey,msgs,{
+      opId:createLocalMutationOpId('chatadmin')
+    });
+    if(!synced) throw new Error('chat sync failed');
     // Push notification to reseller
     const reseller = users.find(u => u.id === _chatReseller);
     if(reseller){
@@ -9767,15 +10873,14 @@ async function sendResellerChatMsg(){
   const chatKey='jb_chat_'+me.id;
   const msg={id:'m'+Date.now(),from:me.id,to:'admin',text,ts:Date.now()};
   try{
-    const api=getApiBase();
     let msgs=[];
     try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
     msgs.push(msg);
     try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-    // Save back
-    const syncRes=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),
-      body:JSON.stringify({key:chatKey,value:msgs})});
-    if(!syncRes.ok) throw new Error('chat sync failed');
+    const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
+      opId:createLocalMutationOpId('reschatmsg')
+    });
+    if(!syncOk) throw new Error('chat sync failed');
     renderResellerMessages(msgs);
     // Push notification to admin
     await sendPushToAdmin('💬 New Message', `${me.dname||me.email}: ${text.slice(0,50)}${text.length>50?'...':''}`);
@@ -10880,7 +11985,7 @@ async function upgradeFeedPostMediaAsync(postId){
   setFeedCache(posts,Date.now());
   renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
   if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
-  syncToCloud('jb_feed',JSON.stringify(posts))
+  syncGenericKeyToCloud('jb_feed',posts,{opId:createLocalMutationOpId('feedmedia')})
     .catch(function(err){ console.warn('[feed media upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
 }
 
@@ -10915,7 +12020,7 @@ async function createFeedPost(){
     if(me&&me.role==='Reseller') renderResFeed();
     renderAdminFeed();
     // Save back async (localOnly responses are queued by syncToCloud)
-    syncToCloud('jb_feed',JSON.stringify(posts))
+    syncGenericKeyToCloud('jb_feed',posts,{opId:createLocalMutationOpId('feedcreate')})
       .catch(function(err){ console.warn('[feed create sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
     // Convert media to remote URLs in background; user does not wait.
     upgradeFeedPostMediaAsync(post.id).catch(function(_e){});
@@ -10984,7 +12089,7 @@ async function deleteFeedPost(postId){
   try{
     const posts=getFeedPostsFromCache().filter(p=>p.id!==postId);
     setFeedCache(posts,Date.now());
-    syncToCloud('jb_feed',JSON.stringify(posts))
+    syncGenericKeyToCloud('jb_feed',posts,{opId:createLocalMutationOpId('feeddelete')})
       .catch(function(err){ console.warn('[feed delete sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
     toast('🗑️ Deleted','info');
     renderAdminFeed();
@@ -11113,8 +12218,9 @@ async function sendChatImage(input){
       _messages[_chatReseller].push(msg);
       try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
       renderMessages();
-      syncToCloud(chatKey,JSON.stringify(_messages[_chatReseller]))
-        .catch(function(err){ console.warn('[chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]); });
+      syncChatThreadToCloud(chatKey,_messages[_chatReseller],{
+        opId:createLocalMutationOpId('chatimg')
+      }).catch(function(err){ console.warn('[chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]); });
       toast('✅ Image sent','ok');
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
@@ -11127,8 +12233,9 @@ async function sendChatImage(input){
           found.text='[img]'+uploaded;
           try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
           renderMessages();
-          syncToCloud(chatKey,JSON.stringify(msgs))
-            .catch(function(err){ console.warn('[chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
+          syncChatThreadToCloud(chatKey,msgs,{
+            opId:createLocalMutationOpId('chatimgup')
+          }).catch(function(err){ console.warn('[chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
         }catch(_e){}
       },0);
     }catch(err){
@@ -11345,24 +12452,20 @@ async function sendVoiceMessage(audioBlob, from){
           _messages[_chatReseller].push(msg);
           try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
           renderMessages();
-          const syncRes=await fetch(api+'/api/sync', {
-            method: 'POST',
-            headers: getAuthHeaders({'Content-Type':'application/json'}),
-            body: JSON.stringify({key: chatKey, value: _messages[_chatReseller]})
+          const syncOk=await syncChatThreadToCloud(chatKey,_messages[_chatReseller],{
+            opId:createLocalMutationOpId('voiceadmin')
           });
-          if(!syncRes.ok) throw new Error('voice chat sync failed');
+          if(!syncOk) throw new Error('voice chat sync failed');
         } else {
           const chatKey='jb_chat_'+me.id;
           let msgs=[];
           try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
           msgs.push(msg);
           try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-          const syncRes=await fetch(api+'/api/sync', {
-            method: 'POST',
-            headers: getAuthHeaders({'Content-Type':'application/json'}),
-            body: JSON.stringify({key: chatKey, value: msgs})
+          const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
+            opId:createLocalMutationOpId('voiceres')
           });
-          if(!syncRes.ok) throw new Error('voice chat sync failed');
+          if(!syncOk) throw new Error('voice chat sync failed');
           renderResellerMessages(msgs);
         }
         
@@ -11393,8 +12496,9 @@ async function sendResChatImage(input){
       msgs.push(msg);
       try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
       renderResellerMessages(msgs);
-      syncToCloud(chatKey,JSON.stringify(msgs))
-        .catch(function(err){ console.warn('[res chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
+      syncChatThreadToCloud(chatKey,msgs,{
+        opId:createLocalMutationOpId('reschatimg')
+      }).catch(function(err){ console.warn('[res chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
       toast('✅ Image sent','ok');
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
@@ -11408,8 +12512,9 @@ async function sendResChatImage(input){
           found.text='[img]'+uploaded;
           try{localStorage.setItem(chatKey,JSON.stringify(live));}catch(_e){}
           renderResellerMessages(live);
-          syncToCloud(chatKey,JSON.stringify(live))
-            .catch(function(err){ console.warn('[res chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,live); });
+          syncChatThreadToCloud(chatKey,live,{
+            opId:createLocalMutationOpId('reschatimgup')
+          }).catch(function(err){ console.warn('[res chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,live); });
         }catch(_e){}
       },0);
     }catch(err){
@@ -11774,20 +12879,8 @@ async function staffSaveTracking(){
   }
   
   _staffCurrentOrder.ukTracking = tracking;
-  saveOrders();
-  
-  // 同步到云端
-  try{
-    const api = getApiBase();
-    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
-    if(k){
-      await fetch(api+'/api/sync', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json','Authorization':'Bearer '+k},
-        body: JSON.stringify({key: 'jb_orders', value: orders})
-      });
-    }
-  }catch(e){}
+  _staffCurrentOrder.updatedAt = Date.now();
+  await saveOrders([_staffCurrentOrder.id]);
   
   toast('✅ 运单号已保存','ok');
   
@@ -11806,20 +12899,8 @@ async function staffCompleteOrder(){
   if(!confirm('确认完成此订单？')) return;
   
   _staffCurrentOrder.status = 'Completed';
-  saveOrders();
-  
-  // 同步到云端
-  try{
-    const api = getApiBase();
-    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
-    if(k){
-      await fetch(api+'/api/sync', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json','Authorization':'Bearer '+k},
-        body: JSON.stringify({key: 'jb_orders', value: orders})
-      });
-    }
-  }catch(e){}
+  _staffCurrentOrder.updatedAt = Date.now();
+  await saveOrders([_staffCurrentOrder.id]);
   
   toast('✅ 订单已完成','ok');
   
@@ -12294,6 +13375,7 @@ function updateBadges(){
   const nbPending=nb('nb-pending');if(nbPending)nbPending.textContent=pendingCount;
   const navPending=document.getElementById('nav-pending');
   if(navPending)navPending.style.display=(me&&me.role!=='Reseller'&&pendingCount>0)?'flex':'none';
+  renderLiveCounters();
 }
 function orderCompareSnapshot(order){
   const clean={
@@ -12349,64 +13431,154 @@ async function saveOrders(changedOrderIds){
     }));
   }
   try{
-    // Keep per-order updatedAt so merge logic can resolve conflicts correctly.
-      orders=orders.map(o=>({...o,status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status,updatedAt:o.updatedAt||o.ts||Date.now()}));
-      // Save to localStorage (cache)
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
-      // Write changed orders through Firebase bridge.
-      const api=getApiBase();
-      let queuedFallback=false;
-      for(const o of targetOrders){
-        const clean={...o,products:(o.products||[]).map(p=>({...p,
-          img:p.img||null,
-          depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
-        }))};
-        try{
-          const _sr=await fetch(api+'/api/order',{method:'POST',
-            headers:getAuthHeaders({'Content-Type':'application/json'}),
-            body:JSON.stringify({order:clean})
-          });
-          let _payload={};
-          try{_payload=await _sr.json();}catch(_e){_payload={};}
-          if(!_sr.ok || (_payload&&_payload.localOnly)){
-            console.warn('[saveOrders] remote save pending/localOnly for',o.id);
-            queuedFallback=true;
-          }
-        }catch(_e){
-          console.warn('[saveOrders] network error',_e&&_e.message?_e.message:_e);
-          queuedFallback=true;
+    orders=orders.map(function(o){
+      if(!o||!o.id) return o;
+      const prev=prevById.get(o.id)||null;
+      const isChanged=changedSet.has(o.id);
+      const updatedAt=Number(o.updatedAt||o.ts||nowTs)||nowTs;
+      const nextV=isChanged?nextOrderVersion(o,prev):Math.max(1,Number(o.v)||Number(prev&&prev.v)||1);
+      return {
+        ...o,
+        status:normalizeStatus(o.status),
+        updatedAt,
+        ts:Number(o.ts)||updatedAt,
+        v:nextV
+      };
+    }).filter(o=>o&&o.id&&!isOrderDeleted(o));
+    localStorage.setItem('jb_orders',JSON.stringify(orders));
+
+    const api=getApiBase();
+    let queuedFallback=false;
+
+    for(const o of targetOrders){
+      const live=(orders||[]).find(x=>x&&x.id===o.id);
+      if(!live) continue;
+      const opId=createLocalMutationOpId('upsert');
+      live.opId=opId;
+      live.lastOpId=opId;
+      const v=Math.max(1,Number(live.v)||nextOrderVersion(live,prevById.get(live.id)||null));
+      live.v=v;
+      markLocalOrderMutation(live.id,'upsert',{opId,v});
+      const event=buildOrderEvent('upsert',live.id,{opId,v,ts:Number(live.updatedAt)||nowTs,source:'client'});
+      const clean=sanitizeOrderForRemote({
+        ...live,
+        id:String(live.id),
+        updatedAt:Number(live.updatedAt)||nowTs,
+        ts:Number(live.ts)||Number(live.updatedAt)||nowTs,
+        v,
+        opId,
+        lastOpId:opId
+      });
+      try{
+        const _sr=await fetch(api+'/api/order',{method:'POST',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({order:clean,opId,v,event})
+        });
+        let _payload={};
+        try{_payload=await _sr.json();}catch(_e){_payload={};}
+        if(_payload&&Number(_payload.ackV)>v){
+          live.v=Number(_payload.ackV);
         }
-      }
-      // Propagate deletions too; otherwise removed orders can reappear after reload.
-      for(const deletedId of deletedOrderIds){
-        try{
-          const _dr=await fetch(api+'/api/order/'+encodeURIComponent(deletedId),{
-            method:'DELETE',
-            headers:getAuthHeaders()
-          });
-          let _payload={};
-          try{_payload=await _dr.json();}catch(_e){_payload={};}
-          if(!_dr.ok || (_payload&&_payload.localOnly)){
-            console.warn('[saveOrders] remote delete pending/localOnly for',deletedId);
-            queuedFallback=true;
-          }
-        }catch(_e){
-          console.warn('[saveOrders] delete network error',_e.message);
-          queuedFallback=true;
+        if(_payload&&_payload.staleIgnored){
+          clearLocalOrderMutation(live.id);
+          continue;
         }
+        if(!_sr.ok || (_payload&&_payload.localOnly)){
+          queuedFallback=true;
+          queueOrderOpFallback({
+            op:'upsert',
+            orderId:live.id,
+            opId,
+            v,
+            ts:Number(clean.updatedAt)||nowTs,
+            order:clean,
+            event
+          });
+          queueOrderEventFallback(event);
+        }else{
+          clearLocalOrderMutation(live.id);
+        }
+      }catch(_e){
+        queuedFallback=true;
+        queueOrderOpFallback({
+          op:'upsert',
+          orderId:live.id,
+          opId,
+          v,
+          ts:Number(clean.updatedAt)||nowTs,
+          order:clean,
+          event
+        });
+        queueOrderEventFallback(event);
       }
-      if(queuedFallback) persistLocalSyncFallback('jb_orders',orders);
-      if(getFirebaseEnabled()){
-        pushOrdersToFirebase([...(targetOrders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
+    }
+
+    for(const deletedId of deletedOrderIds){
+      const prev=prevById.get(deletedId)||null;
+      const opId=createLocalMutationOpId('delete');
+      const v=Math.max(1,nextOrderVersion(null,prev));
+      const deletedAt=nowTs;
+      markLocalOrderMutation(deletedId,'delete',{opId,v});
+      const event=buildOrderEvent('delete',deletedId,{opId,v,ts:deletedAt,source:'client'});
+      try{
+        const _dr=await fetch(api+'/api/order/'+encodeURIComponent(deletedId),{
+          method:'DELETE',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({opId,v,deletedAt,event})
+        });
+        let _payload={};
+        try{_payload=await _dr.json();}catch(_e){_payload={};}
+        if(_payload&&_payload.staleIgnored){
+          clearLocalOrderMutation(deletedId);
+          continue;
+        }
+        if(!_dr.ok || (_payload&&_payload.localOnly)){
+          queuedFallback=true;
+          queueOrderOpFallback({
+            op:'delete',
+            orderId:deletedId,
+            opId,
+            v,
+            ts:deletedAt,
+            deletedAt,
+            event
+          });
+          queueOrderEventFallback(event);
+        }else{
+          clearLocalOrderMutation(deletedId);
+        }
+      }catch(_e){
+        queuedFallback=true;
+        queueOrderOpFallback({
+          op:'delete',
+          orderId:deletedId,
+          opId,
+          v,
+          ts:deletedAt,
+          deletedAt,
+          event
+        });
+        queueOrderEventFallback(event);
       }
-      markSync('orders_save');
-      writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
+    }
+    if(queuedFallback){
+      console.warn('[saveOrders] queued order events for retry');
+    }
+    localStorage.setItem('jb_orders',JSON.stringify(orders));
+    markSync('orders_save');
+    writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
   } catch(e) {
     console.error('[saveOrders]', e);
   }
 }
-function saveUsers(){cloudSave('jb_users',JSON.stringify(users));}
-function saveSuppliers(){cloudSave('jb_suppliers',JSON.stringify(suppliers));}
+function saveUsers(){
+  localStorage.setItem('jb_users',JSON.stringify(users));
+  syncGenericKeyToCloud('jb_users',users,{opId:createLocalMutationOpId('users')}).catch(function(){});
+}
+function saveSuppliers(){
+  localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));
+  syncGenericKeyToCloud('jb_suppliers',suppliers,{opId:createLocalMutationOpId('suppliers')}).catch(function(){});
+}
 function fmtDate(ts){if(!ts)return'-';const d=new Date(ts);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
 function toast(msg,type='info'){const c=document.getElementById('toasts'),t=document.createElement('div');t.className='toast '+type;t.textContent=msg;c.appendChild(t);setTimeout(()=>t.remove(),3500);}
 
