@@ -1779,7 +1779,7 @@ body.dark .modal-foot{background:#263548;}
     </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" onclick="closeResellerOrderModal()">Cancel</button>
-      <button id="reseller-order-submit-btn" class="btn btn-primary" onclick="submitResellerOrder()">📤 Submit Request</button>
+      <button type="button" id="reseller-order-submit-btn" class="btn btn-primary" onclick="submitResellerOrder()">📤 Submit Request</button>
     </div>
   </div>
 </div>
@@ -11639,6 +11639,42 @@ async function staffProcessScan(){
   document.getElementById('staff-scan-input').value = '';
 }
 
+function normalizeStaffCountry(country){
+  const c = String(country || '').trim();
+  if(!c) return 'United Kingdom';
+  if(/^(gb|uk)$/i.test(c)) return 'United Kingdom';
+  return c;
+}
+
+function buildStaffAddressRows(order){
+  if(!order) return [];
+  const rows = [
+    {key:'name', label:'Name', value:order.name || ''},
+    {key:'phone', label:'Phone', value:order.phone || ''},
+    {key:'email', label:'Email', value:order.email || ''},
+    {key:'address', label:'Address', value:order.address || ''},
+    {key:'city', label:'City', value:order.city || ''},
+    {key:'state', label:'State/County', value:order.state || order.county || ''},
+    {key:'postcode', label:'Postcode', value:order.postcode || ''},
+    {key:'country', label:'Country', value:normalizeStaffCountry(order.country)}
+  ];
+  return rows.filter(function(row){
+    return String(row.value || '').trim();
+  });
+}
+
+function buildStaffAddressCopyText(order){
+  if(!order) return '';
+  const rows = buildStaffAddressRows(order);
+  const ref = order.ref || (order.id ? order.id.slice(-8) : '');
+  const lines = [];
+  if(ref) lines.push('Order Ref: ' + ref);
+  rows.forEach(function(row){
+    lines.push(row.label + ': ' + row.value);
+  });
+  return lines.join('\n');
+}
+
 function staffShowOrder(order){
   const card = document.getElementById('staff-order-card');
   const statusEl = document.getElementById('staff-order-status');
@@ -11666,25 +11702,34 @@ function staffShowOrder(order){
     <div style="font-size:12px;font-family:monospace;color:var(--accent);margin-top:4px;">订单号: ${esc(order.ref || order.id.slice(-8))}</div>
   `;
   
-  // 地址
-  const address = [order.address, order.city, order.postcode].filter(Boolean).join(', ');
-  addressEl.innerHTML = `
-    <div style="font-weight:600;margin-bottom:4px;">${esc(order.name)}</div>
-    <div>${esc(address)}</div>
-    ${order.postcode ? `<div style="font-family:monospace;font-weight:700;color:#dc2626;margin-top:4px;">邮编: ${esc(order.postcode)}</div>` : ''}
-  `;
+  // 地址（完整字段，便于一键复制和核对）
+  const addressRows = buildStaffAddressRows(order);
+  addressEl.innerHTML = addressRows.length ? addressRows.map(function(row){
+    const isPostcode = row.key === 'postcode';
+    return `<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:5px;">
+      <div style="min-width:96px;font-size:11px;color:var(--muted);font-weight:600;">${esc(row.label)}</div>
+      <div style="font-size:13px;word-break:break-word;${isPostcode ? 'font-family:monospace;font-weight:700;color:#dc2626;' : ''}">${esc(row.value)}</div>
+    </div>`;
+  }).join('') : `<div style="font-size:12px;color:var(--muted);">No address details</div>`;
   
   // 产品列表
   const prods = order.products || [];
-  productsEl.innerHTML = prods.map((p, i) => `
-    <div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--bg);border-radius:8px;margin-bottom:6px;">
-      <div style="width:8px;height:8px;border-radius:50%;background:${p.arrived ? '#22c55e' : p.cnTracking ? '#3b82f6' : '#f59e0b'};"></div>
-      <div style="flex:1;">
-        <div style="font-size:12px;font-weight:600;">${esc(p.name)}</div>
-        <div style="font-size:10px;color:var(--muted);">数量: ${p.qty || 1} ${p.cnTracking ? `· CN: ${esc(p.cnTracking)}` : ''}</div>
+  productsEl.innerHTML = prods.length ? prods.map((p) => {
+    const prod = p || {};
+    const hasImg = !!prod.img;
+    const safeImg = hasImg ? String(prod.img).replace(/'/g,"\\'") : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--bg);border-radius:8px;margin-bottom:6px;">
+      <div style="width:8px;height:8px;border-radius:50%;background:${prod.arrived ? '#22c55e' : prod.cnTracking ? '#3b82f6' : '#f59e0b'};"></div>
+      ${hasImg
+        ? `<img src="${prod.img}" style="width:44px;height:44px;border-radius:8px;object-fit:cover;border:1px solid var(--border);cursor:pointer;flex-shrink:0;" onclick="openLightbox('${safeImg}')" onerror="this.style.display='none';">`
+        : `<div style="width:44px;height:44px;border-radius:8px;background:var(--card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">📦</div>`
+      }
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;">${esc(prod.name)} ${hasImg?'<span style="font-size:10px;color:#16a34a;">🖼️</span>':''}</div>
+        <div style="font-size:10px;color:var(--muted);">数量: ${prod.qty || 1} ${prod.cnTracking ? `· CN: ${esc(prod.cnTracking)}` : ''}</div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('') : `<div style="font-size:12px;color:var(--muted);">No products</div>`;
   
   // UK跟踪号
   trackingInput.value = order.ukTracking || '';
@@ -11707,7 +11752,11 @@ function staffShowOrder(order){
 function staffCopyAddress(){
   if(!_staffCurrentOrder) return;
   const o = _staffCurrentOrder;
-  const address = [o.name, o.address, o.city, o.postcode, 'United Kingdom'].filter(Boolean).join('\n');
+  const address = buildStaffAddressCopyText(o);
+  if(!address){
+    toast('❌ 没有可复制的地址信息','err');
+    return;
+  }
   navigator.clipboard.writeText(address).then(() => {
     toast('✅ 地址已复制','ok');
   }).catch(() => {
