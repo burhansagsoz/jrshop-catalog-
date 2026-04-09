@@ -7664,6 +7664,9 @@ let _firebasePasswordRetryAt=0;
 let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
+const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=5*60*1000;
+const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
+const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
 const UPLOAD_TIMEOUT_MS=7000;
 const _health={
   firebaseConnected:false,
@@ -8372,18 +8375,26 @@ function mapFirebaseAuthState(err,defaultState='auth_error'){
   return defaultState;
 }
 function getFirebaseAuthRetryRemainingMs(){
+  clampFirebaseAuthRetryGuards();
   const now=Date.now();
   const waitPassword=Math.max(0,_firebasePasswordRetryAt-now);
   const waitRate=Math.max(0,_firebaseRateLimitRetryAt-now);
   return Math.max(waitPassword,waitRate);
 }
+function clampFirebaseAuthRetryGuards(){
+  const capAt=Date.now()+FIREBASE_AUTH_RETRY_CAP_MS;
+  if(_firebasePasswordRetryAt>capAt) _firebasePasswordRetryAt=capAt;
+  if(_firebaseRateLimitRetryAt>capAt) _firebaseRateLimitRetryAt=capAt;
+}
 function setFirebasePasswordRetry(ms){
-  const delay=Math.max(0,Number(ms)||0);
+  const delay=Math.max(0,Math.min(FIREBASE_AUTH_RETRY_CAP_MS,Number(ms)||0));
   _firebasePasswordRetryAt=Math.max(_firebasePasswordRetryAt,Date.now()+delay);
+  clampFirebaseAuthRetryGuards();
 }
 function setFirebaseRateLimitRetry(ms){
-  const delay=Math.max(0,Number(ms)||0);
+  const delay=Math.max(0,Math.min(FIREBASE_AUTH_RETRY_CAP_MS,Number(ms)||0));
   _firebaseRateLimitRetryAt=Math.max(_firebaseRateLimitRetryAt,Date.now()+delay);
+  clampFirebaseAuthRetryGuards();
 }
 function clearFirebaseAuthRetryGuards(){
   _firebasePasswordRetryAt=0;
@@ -8426,7 +8437,7 @@ async function ensureFirebaseAuthSession(){
     const unsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
       saveAuthSession(authUser||null);
       if(authUser){
-        _health.authState='signed_in';
+        _health.authState=authUser.isAnonymous?'anonymous':'signed_in';
         resolve(authUser);
         try{unsub();}catch(_e){}
         return;
@@ -8444,7 +8455,7 @@ function ensureFirebaseAuthWatcher(){
   _firebaseAuthWatcherUnsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
     saveAuthSession(authUser||null);
     if(authUser){
-      _health.authState='signed_in';
+      _health.authState=authUser.isAnonymous?'anonymous':'signed_in';
       return;
     }
     _health.authState='waiting_login';
@@ -8463,28 +8474,32 @@ function ensureFirebaseAuthWatcher(){
 
 async function ensureFirebaseOnlineAuth(opts={}){
   const allowAnonymous=opts.allowAnonymous!==false;
+  const ignoreRetryGuards=!!opts.ignoreRetryGuards;
   if(!_firebaseAuth) return null;
   if(_firebaseAuth.currentUser){
-    _health.authState='signed_in';
-    clearFirebaseAuthRetryGuards();
-    return _firebaseAuth.currentUser;
+    const current=_firebaseAuth.currentUser;
+    _health.authState=current.isAnonymous?'anonymous':'signed_in';
+    if(!current.isAnonymous) clearFirebaseAuthRetryGuards();
+    return current;
   }
-  if(Date.now()<_firebaseRateLimitRetryAt){
-    _health.authState='auth_rate_limited';
-    return null;
-  }
+  clampFirebaseAuthRetryGuards();
+  const now=Date.now();
+  const rateRetryBlocked=!ignoreRetryGuards && now<_firebaseRateLimitRetryAt;
+  const passwordRetryBlocked=!ignoreRetryGuards && now<_firebasePasswordRetryAt;
   const creds=getFirebaseLoginCreds();
-  const passwordRetryBlocked=Date.now()<_firebasePasswordRetryAt;
-  if(!passwordRetryBlocked && creds&&creds.email&&creds.password){
+  if(!rateRetryBlocked && !passwordRetryBlocked && creds&&creds.email&&creds.password){
     const u=await firebaseSignInForSession(creds.email,creds.password);
     if(u) return u;
+  }
+  if(rateRetryBlocked){
+    _health.authState='auth_rate_limited';
+    if(!allowAnonymous) return null;
   }
   if(allowAnonymous){
     try{
       const anon=await _firebaseAuth.signInAnonymously();
       saveAuthSession(anon&&anon.user?anon.user:null);
       _health.authState='anonymous';
-      clearFirebaseAuthRetryGuards();
       return anon&&anon.user?anon.user:null;
     }catch(err){
       markError(err);
@@ -8531,13 +8546,13 @@ async function firebaseSignInForSession(email,password){
     if(authCode==='auth/too-many-requests'){
       markError(err);
       _health.authState='auth_rate_limited';
-      setFirebaseRateLimitRetry(30*60*1000);
-      setFirebasePasswordRetry(30*60*1000);
+      setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
+      setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
       return null;
     }
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
       // Soft fail: app login may still be valid even when Firebase password differs.
-      setFirebasePasswordRetry(10*60*1000);
+      setFirebasePasswordRetry(FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS);
       _health.authState='waiting_login';
       return null;
     }
@@ -9861,13 +9876,12 @@ async function migrateAllToFirebase(){
 
 async function connectFirebaseNow(){
   const waitMs=getFirebaseAuthRetryRemainingMs();
+  resetHealthCounters();
   if(waitMs>0){
     const mins=Math.max(1,Math.ceil(waitMs/60000));
     _health.authState='auth_rate_limited';
-    toast('⚠️ Firebase geçici olarak rate limited. '+mins+' dk sonra tekrar deneyin.','info');
-    return;
+    toast('⚠️ Firebase Email/Password geçici limitte ('+mins+' dk). Güvenli realtime mod deneniyor...','info');
   }
-  resetHealthCounters();
   await initFirebaseRealtime({silent:false,force:true});
 }
 
