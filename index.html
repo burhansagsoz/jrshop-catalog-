@@ -1779,7 +1779,7 @@ body.dark .modal-foot{background:#263548;}
     </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" onclick="closeResellerOrderModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="submitResellerOrder()">📤 Submit Request</button>
+      <button id="reseller-order-submit-btn" class="btn btn-primary" onclick="submitResellerOrder()">📤 Submit Request</button>
     </div>
   </div>
 </div>
@@ -3587,6 +3587,8 @@ function saveEdit(){
 // ── RESELLER VIEW ──
 // ── RESELLER STATE ──
 let _resFilter='all', _resSearch='';
+let _resellerOrderSubmitting=false;
+const RESELLER_PENDING_LOCAL_GRACE_MS=15*60*1000;
 function setResellerFilter(btn,f){
   _resFilter=f;
   document.querySelectorAll('.res-filter-btn').forEach(b=>b.classList.remove('active'));
@@ -6742,7 +6744,13 @@ function fillROFromCatalog(idx,sel){
   }
 }
 function removeROProd(idx){const el=document.getElementById('ropi-'+idx);if(el)el.remove();}
-function submitResellerOrder(){
+async function submitResellerOrder(){
+  if(!me||me.role!=='Reseller'){toast('⚠️ Session error. Please login again.','err');return;}
+  if(_resellerOrderSubmitting) return;
+  _resellerOrderSubmitting=true;
+  const submitBtn=document.getElementById('reseller-order-submit-btn');
+  if(submitBtn){submitBtn.disabled=true;submitBtn.textContent='Submitting...';}
+  try{
   const name=document.getElementById('ro-name').value.trim();
   const addr=document.getElementById('ro-addr').value.trim();
   const city=document.getElementById('ro-city').value.trim();
@@ -6775,12 +6783,17 @@ function submitResellerOrder(){
     note:'[RESELLER REQUEST] '+(document.getElementById('ro-note').value.trim()||''),
     pendingApproval:true
   };
-  orders.unshift(o);saveOrders([o.id]);updateBadges();
+  orders.unshift(o);
+  await saveOrders([o.id]);
+  updateBadges();
   logActivity('order_request',`Order request submitted by ${me.dname||me.email}: ${esc(o.ref)} for ${esc(name)}`,o.id);
+  _resFilter='pending';
   closeResellerOrderModal();renderResellerView();
-  // Force immediate cloud sync so admin sees it
-  syncToCloud('jb_orders',orders).catch(()=>{});
   toast('✅ Order request submitted!','ok');
+  }finally{
+    _resellerOrderSubmitting=false;
+    if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='📤 Submit Request';}
+  }
 }
 
 // ── CUSTOMER TRACKING PAGE ──
@@ -8671,8 +8684,12 @@ if('serviceWorker' in navigator){
         });
       });
     }).catch(()=>{});
-    // Reload when new SW takes control
+    // Avoid force-reload while a logged-in user is actively using the app.
     navigator.serviceWorker.addEventListener('controllerchange',()=>{
+      if(me){
+        toast('🔄 Update ready. It will apply next reopen.','info');
+        return;
+      }
       window.location.reload();
     });
   });
@@ -9125,11 +9142,22 @@ async function startPendingPoll(){
       }catch{newOrders=data.jb_orders||[];}
       if(newOrders.length){
         if(me.role==='Reseller'){
-          // For reseller: check if their orders changed (approved/rejected/status update)
-          const myOld=orders.filter(o=>o.resellerId===me.id);
-          const myNew=newOrders.filter(o=>o.resellerId===me.id);
-          orders=newOrders;
-          localStorage.setItem('jb_orders',JSON.stringify(orders));
+          // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
+          const prevOrders=Array.isArray(orders)?orders:[];
+          const myOld=prevOrders.filter(o=>o.resellerId===me.id);
+          let mergedOrders=mergeOrdersByFreshness(prevOrders,newOrders);
+          const nowTs=Date.now();
+          const recentLocalPending=myOld.filter(o=>
+            o&&o.id&&o.pendingApproval&&!o.rejected&&
+            !newOrders.find(n=>n&&n.id===o.id)&&
+            (nowTs-((o.updatedAt||o.ts||0)))<RESELLER_PENDING_LOCAL_GRACE_MS
+          );
+          if(recentLocalPending.length){
+            mergedOrders=mergeOrdersByFreshness(mergedOrders,recentLocalPending);
+          }
+          orders=mergedOrders;
+          persistOrdersLocalSafe(orders);
+          const myNew=orders.filter(o=>o.resellerId===me.id);
           // Detect status changes
           myNew.forEach(o=>{
             const old=myOld.find(x=>x.id===o.id);
