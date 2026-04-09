@@ -7019,7 +7019,15 @@ function readLocalSyncFallback(){
 function persistLocalSyncFallback(key,value){
   if(!key) return;
   const map=readLocalSyncFallback();
-  map[key]={value,ts:Date.now()};
+  const prev=map[key]&&typeof map[key]==='object'?map[key]:{};
+  map[key]={
+    value,
+    ts:Number(prev.ts)||Date.now(),
+    updatedAt:Date.now(),
+    attempt:Math.max(0,Number(prev.attempt)||0),
+    nextRetryAt:Math.max(0,Number(prev.nextRetryAt)||0),
+    lastError:String(prev.lastError||'')
+  };
   try{localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map));}catch(_e){}
 }
 function clearLocalSyncFallbackKey(key){
@@ -7029,12 +7037,59 @@ function clearLocalSyncFallbackKey(key){
   delete map[key];
   try{localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map));}catch(_e){}
 }
+function getFallbackBackoffMs(attempt){
+  const n=Math.max(1,Number(attempt)||1);
+  const exp=Math.min(6,n-1);
+  const base=2000*Math.pow(2,exp);
+  const jitter=Math.floor(Math.random()*700);
+  return Math.min(120000,base+jitter);
+}
+function persistFallbackRetryState(key,value,entry,reason){
+  if(!key) return;
+  const prev=entry&&typeof entry==='object'?entry:{};
+  const nextAttempt=Math.max(1,(Number(prev.attempt)||0)+1);
+  const nextRetryAt=Date.now()+getFallbackBackoffMs(nextAttempt);
+  const map=readLocalSyncFallback();
+  map[key]={
+    value,
+    ts:Number(prev.ts)||Date.now(),
+    updatedAt:Date.now(),
+    attempt:nextAttempt,
+    nextRetryAt,
+    lastError:String(reason||prev.lastError||'sync_retry')
+  };
+  try{localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map));}catch(_e){}
+}
+function getLocalSyncFallbackMetrics(){
+  const map=readLocalSyncFallback();
+  const rows=Object.values(map||{});
+  let pendingOps=0;
+  let oldestTs=0;
+  let nextRetryAt=0;
+  rows.forEach(function(row){
+    const ts=Number(row&&row.ts)||0;
+    if(ts && (!oldestTs || ts<oldestTs)) oldestTs=ts;
+    const retryAt=Number(row&&row.nextRetryAt)||0;
+    if(retryAt && (!nextRetryAt || retryAt<nextRetryAt)) nextRetryAt=retryAt;
+    const value=row&&Object.prototype.hasOwnProperty.call(row,'value')?row.value:null;
+    if(Array.isArray(value)) pendingOps+=value.length;
+    else pendingOps+=1;
+  });
+  return {
+    keys:Object.keys(map||{}).length,
+    ops:pendingOps,
+    oldestTs,
+    nextRetryAt
+  };
+}
 async function flushLocalSyncFallback(){
   const map=readLocalSyncFallback();
   const entries=Object.entries(map||{});
   if(!entries.length) return 0;
   let synced=0;
   for(const [key,entry] of entries){
+    const retryAt=Math.max(0,Number(entry&&entry.nextRetryAt)||0);
+    if(retryAt && retryAt>Date.now()) continue;
     try{
       if(key==='jb_order_ops'){
         const ops=Array.isArray(entry&&entry.value)?entry.value:[];
@@ -7082,7 +7137,7 @@ async function flushLocalSyncFallback(){
           }
         }
         if(remaining.length){
-          persistLocalSyncFallback(key,remaining);
+          persistFallbackRetryState(key,remaining,entry,'order_ops_retry');
         }else{
           clearLocalSyncFallbackKey(key);
           synced++;
@@ -7120,7 +7175,7 @@ async function flushLocalSyncFallback(){
           clearLocalSyncFallbackKey(key);
           synced++;
         }else{
-          persistLocalSyncFallback(key,remaining);
+          persistFallbackRetryState(key,remaining,entry,'order_events_retry');
         }
         continue;
       }
@@ -7155,7 +7210,7 @@ async function flushLocalSyncFallback(){
           }
         }
         if(remaining.length){
-          persistLocalSyncFallback(key,remaining);
+          persistFallbackRetryState(key,remaining,entry,'generic_events_retry');
         }else{
           clearLocalSyncFallbackKey(key);
           synced++;
@@ -7173,8 +7228,23 @@ async function flushLocalSyncFallback(){
         clearLocalSyncFallbackKey(key);
         clearKeyLocalMutation(key);
         synced++;
+      }else{
+        const reason=String(payload&&payload.error||payload&&payload.message||'sync_retry');
+        persistFallbackRetryState(
+          key,
+          entry&&Object.prototype.hasOwnProperty.call(entry,'value')?entry.value:null,
+          entry,
+          reason
+        );
       }
-    }catch(_e){}
+    }catch(_e){
+      persistFallbackRetryState(
+        key,
+        entry&&Object.prototype.hasOwnProperty.call(entry,'value')?entry.value:null,
+        entry,
+        (_e&&_e.message)||'sync_retry_exception'
+      );
+    }
   }
   return synced;
 }
@@ -7964,6 +8034,9 @@ function renderHealthPanel(){
   const fmtTs=_health.lastSyncAt?new Date(_health.lastSyncAt).toLocaleString('tr-TR'):'-';
   const lastAct=Array.isArray(activityLog)&&activityLog[0]?activityLog[0]:null;
   const lastActTxt=lastAct?`${lastAct.type||'activity'} · ${fmtDateTime(lastAct.ts)}`:'-';
+  const q=getLocalSyncFallbackMetrics();
+  const nextRetryTxt=(q.nextRetryAt&&q.nextRetryAt>Date.now())?`${Math.max(1,Math.ceil((q.nextRetryAt-Date.now())/1000))}s`:'now';
+  const oldestTxt=q.oldestTs?`${Math.max(0,Math.floor((Date.now()-q.oldestTs)/1000))}s`:'-';
   el.innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
@@ -7976,11 +8049,16 @@ function renderHealthPanel(){
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">Realtime</div>
-        <div style="font-size:13px;font-weight:700;">orders:${_health.ordersRealtime?'on':'off'} · feed:${_health.feedRealtime?'on':'off'}</div>
+        <div style="font-size:13px;font-weight:700;">orders:${_health.ordersRealtime?'on':'off'} · feed:${_health.feedRealtime?'on':'off'} · data:${_health.dataRealtime?'on':'off'}</div>
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">API</div>
         <div style="font-size:13px;font-weight:700;">${_health.apiCalls} calls / ${_health.apiErrors} errors</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Outbox</div>
+        <div style="font-size:13px;font-weight:700;">${q.ops} ops / ${q.keys} keys</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;">oldest:${oldestTxt} · retry:${nextRetryTxt}</div>
       </div>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted);">Last sync: ${fmtTs} (${_health.lastSyncSource})</div>
@@ -7989,6 +8067,15 @@ function renderHealthPanel(){
   `;
 }
 setInterval(renderHealthPanel,5000);
+function startRealtimeMaintenanceLoop(){
+  if(_realtimeMetricsTimer) return;
+  _realtimeMetricsTimer=setInterval(function(){
+    if(!getFirebaseEnabled()) return;
+    if(!_health.firebaseConnected) return;
+    flushLocalSyncFallback().catch(function(){});
+  },12000);
+}
+startRealtimeMaintenanceLoop();
 
 function scheduleRealtimeRender(){
   if(_realtimeRenderTimer) return;
@@ -10979,12 +11066,24 @@ function initOfflineIndicator(){
   indicator.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#ef4444;color:#fff;text-align:center;padding:8px;font-size:13px;font-weight:600;z-index:10000;display:none;';
   indicator.innerHTML = '📡 Offline - Changes will sync when connected';
   document.body.appendChild(indicator);
+  let reconnectInFlight=false;
   
-  window.addEventListener('online', () => {
+  window.addEventListener('online', async () => {
     indicator.style.display = 'none';
     toast('✅ Back online!','ok');
-    // Auto sync when back online
-    if(me) loadFromCloud().catch(()=>{});
+    // Deterministic reconnect order: realtime auth -> outbox flush -> cloud catch-up.
+    if(!me || reconnectInFlight) return;
+    reconnectInFlight=true;
+    try{
+      if(getFirebaseEnabled()){
+        await initFirebaseRealtime({silent:true,force:true});
+        await flushLocalSyncFallback().catch(()=>{});
+      }
+      await loadFromCloudSilent().catch(()=>{});
+      await loadFromCloud().catch(()=>{});
+    }finally{
+      reconnectInFlight=false;
+    }
   });
   
   window.addEventListener('offline', () => {
@@ -13580,7 +13679,29 @@ function saveSuppliers(){
   syncGenericKeyToCloud('jb_suppliers',suppliers,{opId:createLocalMutationOpId('suppliers')}).catch(function(){});
 }
 function fmtDate(ts){if(!ts)return'-';const d=new Date(ts);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
-function toast(msg,type='info'){const c=document.getElementById('toasts'),t=document.createElement('div');t.className='toast '+type;t.textContent=msg;c.appendChild(t);setTimeout(()=>t.remove(),3500);}
+function shouldSuppressSyncToastForReseller(msg){
+  if(!(me&&me.role==='Reseller')) return false;
+  const text=String(msg||'').toLowerCase();
+  if(!text) return false;
+  return (
+    text.includes('firebase') ||
+    text.includes('realtime') ||
+    text.includes('syncing to firebase') ||
+    text.includes('synced ') ||
+    text.includes('all data saved to firebase') ||
+    text.includes('cloud retry') ||
+    text.includes('migration complete') ||
+    text.includes('backup to firebase')
+  );
+}
+function toast(msg,type='info'){
+  if(shouldSuppressSyncToastForReseller(msg)) return;
+  const c=document.getElementById('toasts'),t=document.createElement('div');
+  t.className='toast '+type;
+  t.textContent=msg;
+  c.appendChild(t);
+  setTimeout(()=>t.remove(),3500);
+}
 
 // ── LOADING HELPERS ──
 function showLoading(message = 'Loading...'){
