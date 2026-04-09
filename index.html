@@ -2322,6 +2322,35 @@ function mergeChatMessages(localArr,remoteArr){
   // Keep chronological chat order for renderer consistency.
   return merged.sort((a,b)=>(a&&a.ts||0)-(b&&b.ts||0));
 }
+function normalizeChatMessage(msg,chatKey){
+  const key=String(chatKey||'');
+  const baseTs=Number(msg&&msg.ts)||Date.now();
+  const id=(msg&&msg.id)?String(msg.id):('m'+baseTs.toString(36)+Math.random().toString(36).slice(2,7));
+  const text=msg&&msg.text!==undefined?String(msg.text):'';
+  const from=msg&&msg.from!==undefined?String(msg.from):'';
+  const to=msg&&msg.to!==undefined?String(msg.to):'';
+  const read=!!(msg&&msg.read);
+  const serialized=(function(v){try{return JSON.stringify(v||{});}catch(_e){return String(v||'');}})(msg||{});
+  const v=Math.max(1,Number(msg&&msg.v)||1);
+  const opId=String(msg&&msg.opId||msg&&msg.lastOpId||('op_'+key+'_'+id+'_'+hashStringFast(serialized)));
+  return {
+    ...(msg||{}),
+    id,
+    from,
+    to,
+    text,
+    read,
+    ts:baseTs,
+    updatedAt:Number(msg&&msg.updatedAt)||baseTs,
+    v,
+    opId,
+    lastOpId:opId
+  };
+}
+function normalizeChatMessages(list,chatKey){
+  const arr=Array.isArray(list)?list:[];
+  return arr.map(function(m){return normalizeChatMessage(m,chatKey);});
+}
 function mergeKeyWithLocalFirst(key,remoteValue){
   if(remoteValue===undefined) return;
   try{
@@ -4402,8 +4431,10 @@ async function sendBulkMessage(resellerIdsStr, btn){
       const chatKey = 'admin_'+resId;
       const chat = chats[chatKey] || [];
       chat.push({from:'admin', text, ts: Date.now()});
-      await fetch(api+'/api/sync', {method:'POST', headers:getAuthHeaders({'Content-Type':'application/json'}), body:JSON.stringify({key:'jb_chats',value:chats})});
-      sent++;
+      const ok=await syncGenericKeyToCloud('jb_chats',chats,{
+        opId:createLocalMutationOpId('bulkchat')
+      });
+      if(ok) sent++;
     }catch(e){console.warn('Bulk msg error:', e);}
   }
   
@@ -5656,10 +5687,8 @@ async function shareCatalog(){
     try{
       const headers=getAuthHeaders({'Content-Type':'application/json'});
       // Firebase-first publish target used by catalog.html loader.
-      const syncRes=await fetch(api+'/api/sync',{
-        method:'POST',
-        headers,
-        body:JSON.stringify({key:'jb_catalog_html',value:catalogHTML})
+      const syncOk=await syncGenericKeyToCloud('jb_catalog_html',catalogHTML,{
+        opId:createLocalMutationOpId('catalogpub')
       });
       // Backward compatibility: keep old endpoint write as best-effort.
       try{
@@ -5669,7 +5698,7 @@ async function shareCatalog(){
           body:JSON.stringify({html:catalogHTML})
         });
       }catch(_e){}
-      if(!syncRes.ok){
+      if(!syncOk){
         toast('⚠️ Catalog local saved (cloud retry later)','info');
       }else{
         toast('✅ Catalog published!','ok');
@@ -7027,6 +7056,44 @@ async function flushLocalSyncFallback(){
         }
         continue;
       }
+      if(key==='jb_generic_events'){
+        const events=Array.isArray(entry&&entry.value)?entry.value:[];
+        if(!events.length){
+          clearLocalSyncFallbackKey(key);
+          continue;
+        }
+        const remaining=[];
+        for(const ev of events){
+          if(!ev||!ev.key) continue;
+          try{
+            const res=await fetch('/api/sync',{
+              method:'POST',
+              headers:getAuthHeaders({'Content-Type':'application/json'}),
+              body:JSON.stringify({
+                key:String(ev.key),
+                value:Object.prototype.hasOwnProperty.call(ev,'value')?ev.value:null,
+                event:ev
+              })
+            });
+            let payload={};
+            try{payload=await res.json();}catch(_e){payload={};}
+            if(!res.ok || (payload&&payload.localOnly)){
+              remaining.push(ev);
+            }else{
+              clearKeyLocalMutation(String(ev.key||''));
+            }
+          }catch(_e){
+            remaining.push(ev);
+          }
+        }
+        if(remaining.length){
+          persistLocalSyncFallback(key,remaining);
+        }else{
+          clearLocalSyncFallbackKey(key);
+          synced++;
+        }
+        continue;
+      }
       const res=await fetch('/api/sync',{
         method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
@@ -7036,6 +7103,7 @@ async function flushLocalSyncFallback(){
       try{payload=await res.json();}catch(_e){payload={};}
       if(res.ok && !(payload&&payload.localOnly)){
         clearLocalSyncFallbackKey(key);
+        clearKeyLocalMutation(key);
         synced++;
       }
     }catch(_e){}
@@ -7069,13 +7137,68 @@ function cloudSave(key,value){
   localStorage.setItem(key,value);
   // Instant cloud write — no delay
   if(SYNC_KEYS.includes(key)&&key!=='jb_orders'){
+    markKeyLocalMutation(key,{v:1});
     clearTimeout(_syncTimeouts[key]);
     _syncTimeouts[key]=setTimeout(function(){syncToCloud(key,value);},500);
   }
 }
+function normalizeGenericVersion(v){
+  return Math.max(1,Number(v)||1);
+}
+function getGenericItemId(item){
+  if(item&&item.id!==undefined&&item.id!==null&&String(item.id).trim()) return String(item.id);
+  return '';
+}
+function hashStringFast(input){
+  const s=String(input||'');
+  let h=2166136261;
+  for(let i=0;i<s.length;i++){
+    h^=s.charCodeAt(i);
+    h=(h*16777619)>>>0;
+  }
+  return h.toString(36);
+}
+function buildGenericEventDoc(key,value,meta={}){
+  const parsed=(function(raw){
+    try{return typeof raw==='string'?JSON.parse(raw):raw;}catch(_e){return raw;}
+  })(value);
+  const baseTs=Number(meta.ts)||Date.now();
+  const baseV=normalizeGenericVersion(meta.v);
+  const opId=String(meta.opId||createLocalMutationOpId('sync'));
+  const actor=(me&&me.email)?me.email:'system';
+  const list=Array.isArray(parsed)?parsed:[];
+  return {
+    key:String(key||''),
+    value:parsed,
+    ts:baseTs,
+    v:baseV,
+    opId,
+    actor,
+    mode:Array.isArray(parsed)?'array':'value',
+    itemEvents:list.map(function(item,idx){
+      const id=getGenericItemId(item)||('idx:'+idx);
+      const serialized=(function(v){
+        try{return JSON.stringify(v||{});}catch(_e){return String(v||'');}
+      })(item);
+      const itemV=Math.max(baseV,normalizeGenericVersion(item&&item.v));
+      const itemTs=Math.max(baseTs,Number(item&&item.updatedAt||item&&item.ts||0)||baseTs);
+      const itemOpId=String(item&&item.opId||item&&item.lastOpId||`${opId}:${id}:${hashStringFast(serialized)}`);
+      return {
+        id,
+        op:'upsert',
+        v:itemV,
+        ts:itemTs,
+        opId:itemOpId,
+        hash:hashStringFast(serialized),
+        actor
+      };
+    })
+  };
+}
 async function syncToCloud(key,value){
   const api=getApiBase();
   let parsed=value;
+  let eventDoc=null;
   try{
     try{parsed=JSON.parse(value);}catch{parsed=value;}
     // For cloud: strip base64 (too large), keep only http URLs
@@ -7089,13 +7212,62 @@ async function syncToCloud(key,value){
         }))
       }));
     }
-    const res=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue})});
+    eventDoc=buildGenericEventDoc(key,cloudValue,{
+      ts:Date.now(),
+      v:normalizeGenericVersion((Array.isArray(cloudValue)&&cloudValue[0]&&cloudValue[0].v)||parsed&&parsed.v||1),
+      opId:createLocalMutationOpId(String(key||'sync').replace(/^jb_/,''))
+    });
+    if(key!=='jb_orders') markKeyLocalMutation(key,{opId:eventDoc.opId,v:eventDoc.v});
+    const res=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({key,value:cloudValue,event:eventDoc})});
     let payload={};
     try{payload=await res.json();}catch(_e){payload={};}
-    if(res.ok && !(payload&&payload.localOnly)) clearLocalSyncFallbackKey(key);
-    else persistLocalSyncFallback(key,parsed);
+    if(res.ok && !(payload&&payload.localOnly)){
+      clearLocalSyncFallbackKey(key);
+      if(key!=='jb_orders') clearKeyLocalMutation(key);
+    }else{
+      persistLocalSyncFallback(key,parsed);
+      if(key!=='jb_orders' && eventDoc) queueGenericEventFallback(eventDoc);
+    }
   }catch(e){
     persistLocalSyncFallback(key,parsed);
+    if(key!=='jb_orders' && eventDoc) queueGenericEventFallback(eventDoc);
+  }
+}
+async function syncGenericKeyToCloud(key,value,meta={}){
+  if(!key) return false;
+  const api=getApiBase();
+  let parsed=value;
+  try{
+    parsed=typeof value==='string'?JSON.parse(value):value;
+  }catch(_e){
+    parsed=value;
+  }
+  const eventDoc=buildGenericEventDoc(key,parsed,{
+    ts:Number(meta.ts)||Date.now(),
+    v:normalizeGenericVersion(meta.v||(parsed&&parsed.v)||1),
+    opId:meta.opId||createLocalMutationOpId(String(key).replace(/^jb_/,''))
+  });
+  markKeyLocalMutation(key,{opId:eventDoc.opId,v:eventDoc.v});
+  try{
+    const res=await fetch(api+'/api/sync',{
+      method:'POST',
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({key,value:parsed,event:eventDoc})
+    });
+    let payload={};
+    try{payload=await res.json();}catch(_e){payload={};}
+    if(res.ok && !(payload&&payload.localOnly)){
+      clearLocalSyncFallbackKey(key);
+      clearKeyLocalMutation(key);
+      return true;
+    }
+    persistLocalSyncFallback(key,parsed);
+    queueGenericEventFallback(eventDoc);
+    return false;
+  }catch(_e){
+    persistLocalSyncFallback(key,parsed);
+    queueGenericEventFallback(eventDoc);
+    return false;
   }
 }
 
@@ -7140,6 +7312,7 @@ async function loadFromCloudSilent(){
     const KEYS=['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed'];
     for(const key of KEYS){
       if(data[key]===undefined) continue;
+      if(hasKeyLocalMutation(key)) continue;
       if(key==='jb_feed'){
         if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
         continue;
@@ -7189,6 +7362,7 @@ async function loadFromCloud(){
         for(const key of SYNC_KEYS){
           if(key==='jb_orders')continue;
           if(data[key]===undefined) continue;
+          if(hasKeyLocalMutation(key)) continue;
           if(key==='jb_feed'){
             if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
             continue;
@@ -7198,6 +7372,7 @@ async function loadFromCloud(){
         // Keep chat/feed local snapshots durable even when Firebase auth is unstable.
         ['jb_feed','jb_chat_index'].forEach(function(k){
           if(data[k]===undefined) return;
+          if(hasKeyLocalMutation(k)) return;
           if(k==='jb_feed'){
             if(shouldAcceptRemoteFeed(data[k])) setFeedCache(data[k],Date.now());
             return;
@@ -7323,11 +7498,15 @@ const FIREBASE_COLLECTION_CATALOG_ORDERS='catalog_orders';
 const FIREBASE_COLLECTION_AUDIT='audit_logs';
 const FIREBASE_COLLECTION_USER_ROLES='user_roles';
 const FIREBASE_COLLECTION_ORDER_EVENTS='order_events';
+const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
+const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
+const LOCAL_DATA_META_KEY='jb_data_meta';
+const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
@@ -7434,6 +7613,79 @@ function hasActiveLocalOrderMutation(orderId){
   const ts=Number(row.ts)||0;
   return (Date.now()-ts) < LOCAL_ORDER_MUTATION_KEEP_MS;
 }
+function readLocalDataMutations(){
+  try{
+    const raw=localStorage.getItem(LOCAL_DATA_MUTATION_TS_KEY);
+    const map=raw?JSON.parse(raw):{};
+    return map&&typeof map==='object'?map:{};
+  }catch(_e){
+    return {};
+  }
+}
+function writeLocalDataMutations(map){
+  try{localStorage.setItem(LOCAL_DATA_MUTATION_TS_KEY,JSON.stringify(map||{}));}catch(_e){}
+}
+function cleanupLocalDataMutations(map){
+  const src=map&&typeof map==='object'?{...map}:readLocalDataMutations();
+  const now=Date.now();
+  let changed=false;
+  Object.keys(src).forEach(function(key){
+    const row=src[key]||{};
+    const ts=Number(row.ts)||0;
+    if(!ts || (now-ts)>=LOCAL_DATA_MUTATION_KEEP_MS){
+      delete src[key];
+      changed=true;
+    }
+  });
+  if(changed) writeLocalDataMutations(src);
+  return src;
+}
+function markKeyLocalMutation(key,meta={}){
+  const k=String(key||'').trim();
+  if(!k) return;
+  const map=readLocalDataMutations();
+  map[k]={
+    ts:Date.now(),
+    opId:String(meta.opId||''),
+    v:normalizeGenericVersion(meta.v||1)
+  };
+  writeLocalDataMutations(map);
+}
+function clearKeyLocalMutation(key){
+  const k=String(key||'').trim();
+  if(!k) return;
+  const map=readLocalDataMutations();
+  if(!Object.prototype.hasOwnProperty.call(map,k)) return;
+  delete map[k];
+  writeLocalDataMutations(map);
+}
+function hasKeyLocalMutation(key){
+  const k=String(key||'').trim();
+  if(!k) return false;
+  const map=cleanupLocalDataMutations();
+  const row=map[k];
+  if(!row) return false;
+  return (Date.now()-(Number(row.ts)||0)) < LOCAL_DATA_MUTATION_KEEP_MS;
+}
+function queueGenericEventFallback(eventDoc){
+  if(!eventDoc||!eventDoc.key) return;
+  const map=readLocalSyncFallback();
+  const arr=Array.isArray(map['jb_generic_events']&&map['jb_generic_events'].value)?map['jb_generic_events'].value:[];
+  const opId=String(eventDoc.opId||'');
+  const dedup=arr.filter(function(ev){return String(ev&&ev.opId||'')!==opId;});
+  dedup.push(eventDoc);
+  persistLocalSyncFallback('jb_generic_events',dedup);
+}
+async function syncChatThreadToCloud(chatKey,msgs,meta={}){
+  const key=String(chatKey||'');
+  if(!key) return false;
+  const list=Array.isArray(msgs)?msgs:[];
+  try{localStorage.setItem(key,JSON.stringify(list));}catch(_e){}
+  return await syncGenericKeyToCloud(key,list,{
+    v:normalizeGenericVersion(meta.v||1),
+    opId:meta.opId||createLocalMutationOpId('chat')
+  });
+}
 function getOrderVersion(order){
   return Math.max(0,Number(order&&order.v)||0);
 }
@@ -7463,6 +7715,112 @@ function queueOrderEventFallback(event){
   const dedup=arr.filter(ev=>String(ev&& (ev.opId||ev.id||''))!==key);
   dedup.push(event);
   persistLocalSyncFallback('jb_order_events',dedup);
+}
+function queueGenericSyncEventFallback(eventDoc){
+  if(!eventDoc||!eventDoc.key) return;
+  const q=readLocalSyncFallback();
+  const arr=Array.isArray((q['jb_sync_events']&&q['jb_sync_events'].value))?q['jb_sync_events'].value:[];
+  const key=String(eventDoc.opId||'');
+  if(!key){
+    arr.push(eventDoc);
+    persistLocalSyncFallback('jb_sync_events',arr);
+    return;
+  }
+  const dedup=arr.filter(function(ev){return String(ev&&ev.opId||'')!==key;});
+  dedup.push(eventDoc);
+  persistLocalSyncFallback('jb_sync_events',dedup);
+}
+function getDataVersion(item){
+  if(item===null||item===undefined) return 0;
+  if(typeof item==='object'){
+    return Math.max(0,Number(item.v)||Number(item.updatedAt)||Number(item.ts)||0);
+  }
+  return 0;
+}
+function nextDataVersion(currentItem,previousItem){
+  return Math.max(getDataVersion(currentItem),getDataVersion(previousItem))+1;
+}
+function buildDataEvent(key,op,payload,meta={}){
+  const ts=Number(meta.ts)||Date.now();
+  const opId=String(meta.opId||createLocalMutationOpId(op||'data'));
+  return {
+    id:'devt_'+opId,
+    key:String(key||''),
+    op:String(op||'set'),
+    ts,
+    opId,
+    actor:meta.actor||(me&&me.email?me.email:'system'),
+    v:Math.max(0,Number(meta.v)||0),
+    payload:payload===undefined?null:payload
+  };
+}
+function mergeByEntityVersion(localArr,remoteArr,extractEntityId){
+  const pickId=typeof extractEntityId==='function'?extractEntityId:function(x){return x&&x.id?String(x.id):'';};
+  const local=Array.isArray(localArr)?localArr:[];
+  const remote=Array.isArray(remoteArr)?remoteArr:[];
+  const byId=new Map();
+  for(const item of local){
+    const id=pickId(item);
+    if(id) byId.set(id,item);
+  }
+  for(const item of remote){
+    const id=pickId(item);
+    if(!id) continue;
+    const prev=byId.get(id);
+    const itemV=getDataVersion(item);
+    const prevV=getDataVersion(prev);
+    if(!prev || itemV>=prevV){
+      byId.set(id,item);
+    }
+  }
+  return [...byId.values()];
+}
+function mergeFeedByVersion(localFeed,remoteFeed){
+  const merged=mergeByEntityVersion(localFeed,remoteFeed,function(item){
+    if(!item||!item.id) return '';
+    return String(item.id);
+  });
+  return merged.sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
+}
+function mergeChatByVersion(localMsgs,remoteMsgs){
+  const merged=mergeByEntityVersion(localMsgs,remoteMsgs,function(item){
+    if(!item) return '';
+    if(item.id) return String(item.id);
+    const from=String(item.from||'');
+    const to=String(item.to||'');
+    const ts=Number(item.ts)||0;
+    const text=String(item.text||'');
+    return `${from}|${to}|${ts}|${text}`;
+  });
+  return merged.sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
+}
+function normalizeChatMessage(msg,prev){
+  const base=msg&&typeof msg==='object'?msg:{};
+  const old=prev&&typeof prev==='object'?prev:{};
+  const ts=Number(base.ts)||Number(old.ts)||Date.now();
+  const nextV=Math.max(1,Number(base.v)||nextDataVersion(base,old));
+  return {
+    ...old,
+    ...base,
+    id:base.id||old.id||('m'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)),
+    ts,
+    updatedAt:Number(base.updatedAt)||ts,
+    v:nextV
+  };
+}
+function normalizeFeedPost(post,prev){
+  const base=post&&typeof post==='object'?post:{};
+  const old=prev&&typeof prev==='object'?prev:{};
+  const ts=Number(base.ts)||Number(old.ts)||Date.now();
+  const nextV=Math.max(1,Number(base.v)||nextDataVersion(base,old));
+  return {
+    ...old,
+    ...base,
+    id:base.id||old.id||('post_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)),
+    ts,
+    updatedAt:Number(base.updatedAt)||ts,
+    v:nextV
+  };
 }
 function queueOrderOpFallback(op){
   if(!op||!op.orderId) return;
@@ -8392,6 +8750,69 @@ async function writeFirebaseDataMap(map){
     await batch.commit();
   }
 }
+function getGenericEventCollectionName(key){
+  const safe=String(key||'generic').replace(/^jb_/,'').replace(/[^a-zA-Z0-9_-]/g,'_')||'generic';
+  return 'events_'+safe;
+}
+function sanitizeGenericItemEvent(item,idx,base={}){
+  const id=getGenericItemId(item)||('idx:'+idx);
+  const serialized=(function(v){
+    try{return JSON.stringify(v||{});}catch(_e){return String(v||'');}
+  })(item);
+  const v=Math.max(normalizeGenericVersion(base.v),normalizeGenericVersion(item&&item.v));
+  const ts=Math.max(Number(base.ts)||Date.now(),Number(item&&item.updatedAt||item&&item.ts||0)||Number(base.ts)||Date.now());
+  const opId=String(item&&item.opId||item&&item.lastOpId||`${base.opId||createLocalMutationOpId('sync')}:${id}:${hashStringFast(serialized)}`);
+  return {id,op:'upsert',v,ts,opId,hash:hashStringFast(serialized),actor:base.actor||'system'};
+}
+function buildGenericEventDocFromPayload(key,value,event){
+  const parsed=(function(raw){
+    try{return typeof raw==='string'?JSON.parse(raw):raw;}catch(_e){return raw;}
+  })(value);
+  const now=Date.now();
+  const base={
+    ts:Number(event&&event.ts)||now,
+    v:normalizeGenericVersion(event&&event.v),
+    opId:String(event&&event.opId||createLocalMutationOpId(String(key||'sync').replace(/^jb_/,''))),
+    actor:String(event&&event.actor||(me&&me.email?me.email:'system'))
+  };
+  const list=Array.isArray(parsed)?parsed:[];
+  const itemEvents=Array.isArray(event&&event.itemEvents)&&event.itemEvents.length
+    ? event.itemEvents.map(function(it,idx){
+        return {
+          id:String(it&&it.id||('idx:'+idx)),
+          op:String(it&&it.op||'upsert'),
+          v:Math.max(base.v,normalizeGenericVersion(it&&it.v)),
+          ts:Math.max(base.ts,Number(it&&it.ts)||base.ts),
+          opId:String(it&&it.opId||`${base.opId}:${String(it&&it.id||idx)}`),
+          hash:String(it&&it.hash||''),
+          actor:String(it&&it.actor||base.actor)
+        };
+      })
+    : list.map(function(item,idx){ return sanitizeGenericItemEvent(item,idx,base); });
+  return {
+    key:String(key||''),
+    value:parsed,
+    ts:base.ts,
+    v:base.v,
+    opId:base.opId,
+    actor:base.actor,
+    mode:Array.isArray(parsed)?'array':'value',
+    itemEvents
+  };
+}
+async function writeGenericEventDocToFirebase(key,eventDoc){
+  if(!_firebaseDb||!key||!eventDoc) return;
+  const col=getGenericEventCollectionName(key);
+  const opId=String(eventDoc.opId||createLocalMutationOpId(String(key||'sync').replace(/^jb_/,'')));
+  await _firebaseDb.collection(col).doc(opId).set({
+    ...eventDoc,
+    opId,
+    key:String(key),
+    ts:Number(eventDoc.ts)||Date.now(),
+    v:normalizeGenericVersion(eventDoc.v),
+    savedAt:Date.now()
+  },{merge:true});
+}
 async function readFirebaseOrders(){
   const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).get();
   const list=getLiveOrdersOnly(snap.docs.map(firebaseDocToOrder));
@@ -8584,6 +9005,7 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path==='/api/sync'&&m==='POST'){
     const key=req&&req.key;
     const value=req&&req.value;
+    const event=req&&req.event;
     if(key) writeLocalJson(key,value);
     if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
     try{
@@ -8601,7 +9023,41 @@ async function handleFirebaseApiRequest(url,method,body){
             savedAt:Date.now()
           },{merge:true});
         }
+      }else if(key==='jb_generic_events'&&Array.isArray(value)){
+        for(const ev of value){
+          if(!ev||!ev.key) continue;
+          const opId=String(ev.opId||ev.id||createLocalMutationOpId('gevt'));
+          await _firebaseDb.collection(FIREBASE_COLLECTION_GENERIC_EVENTS).doc(opId).set({
+            ...ev,
+            opId,
+            ts:Number(ev.ts)||Date.now(),
+            savedAt:Date.now()
+          },{merge:true});
+        }
       }else{
+        const eventDoc=event?buildGenericEventDocFromPayload(key,value,event):null;
+        if(eventDoc&&eventDoc.opId&&key){
+          const ref=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(String(key));
+          const prevSnap=await ref.get();
+          const prev=prevSnap.exists?(prevSnap.data()||{}):{};
+          const prevOpId=String(prev.lastOpId||'');
+          const prevV=Math.max(0,Number(prev.v)||0);
+          const prevTs=Number(prev.updatedAt||0);
+          if(prevOpId && prevOpId===eventDoc.opId){
+            return jsonApiResponse({ok:true,idempotent:true,ackV:prevV||eventDoc.v,opId:eventDoc.opId});
+          }
+          if(prevV>eventDoc.v || (prevV===eventDoc.v && prevTs>eventDoc.ts)){
+            return jsonApiResponse({ok:true,staleIgnored:true,ackV:prevV,opId:prevOpId||eventDoc.opId});
+          }
+          await ref.set({
+            value:eventDoc.value,
+            updatedAt:Number(eventDoc.ts)||Date.now(),
+            v:normalizeGenericVersion(eventDoc.v),
+            lastOpId:String(eventDoc.opId||'')
+          },{merge:true});
+          await writeGenericEventDocToFirebase(String(key),eventDoc);
+          return jsonApiResponse({ok:true,ackV:eventDoc.v,opId:eventDoc.opId});
+        }
         await writeFirebaseDataKey(key,value);
       }
       return jsonApiResponse({ok:true});
@@ -9665,11 +10121,8 @@ async function pollAllChats(){
       });
       
       if(hasNewUnread){
-        // Sync read status to cloud
-        await fetch(api+'/api/sync', {
-          method: 'POST',
-          headers: getAuthHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({key: 'jb_chat_'+_chatReseller, value: msgs})
+        await syncChatThreadToCloud('jb_chat_'+_chatReseller,msgs,{
+          opId:createLocalMutationOpId('chatread')
         });
         renderMessages();
       }
@@ -9793,13 +10246,9 @@ async function openChatWith(resellerId){
   });
   
   if(hasUnread){
-    // Sync to cloud
     try{
-      const api = getApiBase();
-      await fetch(api+'/api/sync', {
-        method: 'POST',
-        headers: getAuthHeaders({'Content-Type':'application/json'}),
-        body: JSON.stringify({key: 'jb_chat_'+resellerId, value: msgs})
+      await syncChatThreadToCloud('jb_chat_'+resellerId,msgs,{
+        opId:createLocalMutationOpId('chatread')
       });
     }catch(e){}
   }
@@ -10018,10 +10467,8 @@ async function loadResellerMessages(){
       // Save read status to cloud
       if(hasUnread){
         try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-        await fetch('/api/sync', {
-          method: 'POST',
-          headers: getAuthHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({key: chatKey, value: msgs})
+        await syncChatThreadToCloud(chatKey,msgs,{
+          opId:createLocalMutationOpId('reschatread')
         });
       }
       
@@ -10098,7 +10545,10 @@ async function sendChatMsg(){
   renderMessages();
   try{
     const msgs = (_messages[_chatReseller]||[]).slice();
-    await syncToCloud(chatKey,JSON.stringify(msgs));
+    const synced=await syncChatThreadToCloud(chatKey,msgs,{
+      opId:createLocalMutationOpId('chatadmin')
+    });
+    if(!synced) throw new Error('chat sync failed');
     // Push notification to reseller
     const reseller = users.find(u => u.id === _chatReseller);
     if(reseller){
@@ -10118,15 +10568,14 @@ async function sendResellerChatMsg(){
   const chatKey='jb_chat_'+me.id;
   const msg={id:'m'+Date.now(),from:me.id,to:'admin',text,ts:Date.now()};
   try{
-    const api=getApiBase();
     let msgs=[];
     try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
     msgs.push(msg);
     try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-    // Save back
-    const syncRes=await fetch(api+'/api/sync',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),
-      body:JSON.stringify({key:chatKey,value:msgs})});
-    if(!syncRes.ok) throw new Error('chat sync failed');
+    const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
+      opId:createLocalMutationOpId('reschatmsg')
+    });
+    if(!syncOk) throw new Error('chat sync failed');
     renderResellerMessages(msgs);
     // Push notification to admin
     await sendPushToAdmin('💬 New Message', `${me.dname||me.email}: ${text.slice(0,50)}${text.length>50?'...':''}`);
@@ -11231,7 +11680,7 @@ async function upgradeFeedPostMediaAsync(postId){
   setFeedCache(posts,Date.now());
   renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
   if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
-  syncToCloud('jb_feed',JSON.stringify(posts))
+  syncGenericKeyToCloud('jb_feed',posts,{opId:createLocalMutationOpId('feedmedia')})
     .catch(function(err){ console.warn('[feed media upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
 }
 
@@ -11266,7 +11715,7 @@ async function createFeedPost(){
     if(me&&me.role==='Reseller') renderResFeed();
     renderAdminFeed();
     // Save back async (localOnly responses are queued by syncToCloud)
-    syncToCloud('jb_feed',JSON.stringify(posts))
+    syncGenericKeyToCloud('jb_feed',posts,{opId:createLocalMutationOpId('feedcreate')})
       .catch(function(err){ console.warn('[feed create sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
     // Convert media to remote URLs in background; user does not wait.
     upgradeFeedPostMediaAsync(post.id).catch(function(_e){});
@@ -11335,7 +11784,7 @@ async function deleteFeedPost(postId){
   try{
     const posts=getFeedPostsFromCache().filter(p=>p.id!==postId);
     setFeedCache(posts,Date.now());
-    syncToCloud('jb_feed',JSON.stringify(posts))
+    syncGenericKeyToCloud('jb_feed',posts,{opId:createLocalMutationOpId('feeddelete')})
       .catch(function(err){ console.warn('[feed delete sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
     toast('🗑️ Deleted','info');
     renderAdminFeed();
@@ -11464,8 +11913,9 @@ async function sendChatImage(input){
       _messages[_chatReseller].push(msg);
       try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
       renderMessages();
-      syncToCloud(chatKey,JSON.stringify(_messages[_chatReseller]))
-        .catch(function(err){ console.warn('[chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]); });
+      syncChatThreadToCloud(chatKey,_messages[_chatReseller],{
+        opId:createLocalMutationOpId('chatimg')
+      }).catch(function(err){ console.warn('[chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]); });
       toast('✅ Image sent','ok');
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
@@ -11478,8 +11928,9 @@ async function sendChatImage(input){
           found.text='[img]'+uploaded;
           try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
           renderMessages();
-          syncToCloud(chatKey,JSON.stringify(msgs))
-            .catch(function(err){ console.warn('[chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
+          syncChatThreadToCloud(chatKey,msgs,{
+            opId:createLocalMutationOpId('chatimgup')
+          }).catch(function(err){ console.warn('[chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
         }catch(_e){}
       },0);
     }catch(err){
@@ -11696,24 +12147,20 @@ async function sendVoiceMessage(audioBlob, from){
           _messages[_chatReseller].push(msg);
           try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
           renderMessages();
-          const syncRes=await fetch(api+'/api/sync', {
-            method: 'POST',
-            headers: getAuthHeaders({'Content-Type':'application/json'}),
-            body: JSON.stringify({key: chatKey, value: _messages[_chatReseller]})
+          const syncOk=await syncChatThreadToCloud(chatKey,_messages[_chatReseller],{
+            opId:createLocalMutationOpId('voiceadmin')
           });
-          if(!syncRes.ok) throw new Error('voice chat sync failed');
+          if(!syncOk) throw new Error('voice chat sync failed');
         } else {
           const chatKey='jb_chat_'+me.id;
           let msgs=[];
           try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
           msgs.push(msg);
           try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-          const syncRes=await fetch(api+'/api/sync', {
-            method: 'POST',
-            headers: getAuthHeaders({'Content-Type':'application/json'}),
-            body: JSON.stringify({key: chatKey, value: msgs})
+          const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
+            opId:createLocalMutationOpId('voiceres')
           });
-          if(!syncRes.ok) throw new Error('voice chat sync failed');
+          if(!syncOk) throw new Error('voice chat sync failed');
           renderResellerMessages(msgs);
         }
         
@@ -11744,8 +12191,9 @@ async function sendResChatImage(input){
       msgs.push(msg);
       try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
       renderResellerMessages(msgs);
-      syncToCloud(chatKey,JSON.stringify(msgs))
-        .catch(function(err){ console.warn('[res chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
+      syncChatThreadToCloud(chatKey,msgs,{
+        opId:createLocalMutationOpId('reschatimg')
+      }).catch(function(err){ console.warn('[res chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
       toast('✅ Image sent','ok');
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
@@ -11759,8 +12207,9 @@ async function sendResChatImage(input){
           found.text='[img]'+uploaded;
           try{localStorage.setItem(chatKey,JSON.stringify(live));}catch(_e){}
           renderResellerMessages(live);
-          syncToCloud(chatKey,JSON.stringify(live))
-            .catch(function(err){ console.warn('[res chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,live); });
+          syncChatThreadToCloud(chatKey,live,{
+            opId:createLocalMutationOpId('reschatimgup')
+          }).catch(function(err){ console.warn('[res chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,live); });
         }catch(_e){}
       },0);
     }catch(err){
@@ -12125,20 +12574,8 @@ async function staffSaveTracking(){
   }
   
   _staffCurrentOrder.ukTracking = tracking;
-  saveOrders();
-  
-  // 同步到云端
-  try{
-    const api = getApiBase();
-    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
-    if(k){
-      await fetch(api+'/api/sync', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json','Authorization':'Bearer '+k},
-        body: JSON.stringify({key: 'jb_orders', value: orders})
-      });
-    }
-  }catch(e){}
+  _staffCurrentOrder.updatedAt = Date.now();
+  await saveOrders([_staffCurrentOrder.id]);
   
   toast('✅ 运单号已保存','ok');
   
@@ -12157,20 +12594,8 @@ async function staffCompleteOrder(){
   if(!confirm('确认完成此订单？')) return;
   
   _staffCurrentOrder.status = 'Completed';
-  saveOrders();
-  
-  // 同步到云端
-  try{
-    const api = getApiBase();
-    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
-    if(k){
-      await fetch(api+'/api/sync', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json','Authorization':'Bearer '+k},
-        body: JSON.stringify({key: 'jb_orders', value: orders})
-      });
-    }
-  }catch(e){}
+  _staffCurrentOrder.updatedAt = Date.now();
+  await saveOrders([_staffCurrentOrder.id]);
   
   toast('✅ 订单已完成','ok');
   
