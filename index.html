@@ -8756,6 +8756,53 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
   const preservePendingLocalIds=new Set(Array.isArray(opts.preservePendingLocalIds)?opts.preservePendingLocalIds:[]);
   const source=String(opts.source||'');
   const pruneMissing=!!opts.pruneMissing;
+  const getProductImg=function(prod){
+    if(!prod) return '';
+    const v=String(prod.img||'').trim();
+    return (v && v!=='null' && v!=='undefined')?v:'';
+  };
+  const getDepotImg=function(prod){
+    if(!prod) return '';
+    const v=String(prod.depotPhoto||'').trim();
+    return (v && v!=='null' && v!=='undefined')?v:'';
+  };
+  const mapLocalProducts=function(list){
+    const byName=new Map();
+    const arr=Array.isArray(list)?list:[];
+    arr.forEach(function(item,idx){
+      if(!item) return;
+      const nameKey=String(item.name||'').trim().toLowerCase();
+      if(nameKey && !byName.has(nameKey)){
+        byName.set(nameKey,{item,idx});
+      }
+    });
+    return {arr,byName};
+  };
+  const mergeIncomingProductsWithLocal=function(incomingList,localList){
+    const incomingArr=Array.isArray(incomingList)?incomingList:[];
+    const localInfo=mapLocalProducts(localList);
+    if(!incomingArr.length){
+      // If remote has no products, do not wipe richer local product rows.
+      return localInfo.arr.map(function(item){return {...item};});
+    }
+    return incomingArr.map(function(p,idx){
+      const incomingProd=p&&typeof p==='object'?p:{};
+      const nameKey=String(incomingProd.name||'').trim().toLowerCase();
+      const byNameMatch=nameKey?(localInfo.byName.get(nameKey)||null):null;
+      const byIndexMatch=localInfo.arr[idx]||null;
+      const localProd=(byNameMatch&&byNameMatch.item)||byIndexMatch||null;
+      const incomingImg=getProductImg(incomingProd);
+      const localImg=getProductImg(localProd);
+      const incomingDepot=getDepotImg(incomingProd);
+      const localDepot=getDepotImg(localProd);
+      return {
+        ...incomingProd,
+        // Never let null/empty remote image wipe an existing local image.
+        img:incomingImg||localImg||null,
+        depotPhoto:incomingDepot||localDepot||null
+      };
+    });
+  };
   const byId=new Map((localOrders||[]).filter(o=>o&&o.id).map(o=>[String(o.id),{...o,status:normalizeStatus(o.status)}]));
   for(const incoming of (incomingOrders||[])){
     if(!incoming||!incoming.id) continue;
@@ -8775,10 +8822,7 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
     if(incomingWins){
       byId.set(cleanIncoming.id,{
         ...cleanIncoming,
-        products:incomingDeleted?[]:(cleanIncoming.products||[]).map(p=>{
-          const lp=(local.products||[]).find(x=>x.name===p.name);
-          return {...p,img:p.img||(lp&&lp.img)||null,depotPhoto:p.depotPhoto||(lp&&lp.depotPhoto)||null};
-        })
+        products:incomingDeleted?[]:mergeIncomingProductsWithLocal(cleanIncoming.products||[],local&&local.products)
       });
     }else if(localDeleted && !incomingDeleted && incomingV===localV && incomingTs>localTs){
       // Safety: if same version but fresher non-deleted payload arrives, allow recovery.
