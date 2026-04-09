@@ -2992,6 +2992,21 @@ function renderDash(){
   odEl.innerHTML=`<table style="width:100%;border-collapse:collapse;margin-top:7px;"><thead><tr>${['Ref','Customer','Status','Days'].map(h=>`<th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);">${h}</th>`).join('')}</tr></thead><tbody>${od.map(o=>{const d=daysSince(o.ts);return`<tr style="cursor:pointer;" onclick="navOrders('all',null);selectOrder('${o.id}')"><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;">${esc(o.name)}</td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="pill ${S_CLASS[o.status]||'p-new'}">${S_EMOJI[o.status]||''} ${displayStatus(o.status)}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-family:var(--mono);font-weight:700;color:${d>=5?'var(--red)':'var(--yellow)'};">${d}d</td></tr>`;}).join('')}</tbody></table>`;
 }
 
+function renderRealtimeCounters(){
+  if(!me) return;
+  // Keep badges/counters consistent across pages and devices whenever shared data keys change.
+  updateBadges();
+  if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+  if(document.getElementById('pg-alerts')?.classList.contains('on')) renderAlerts();
+  if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList(document.getElementById('chat-search')?.value||'');
+  if(me.role==='Reseller'){
+    if(typeof renderResellerView==='function') renderResellerView();
+    checkResellerUnreadMessages().catch(()=>{});
+  }else{
+    updateChatBadge();
+  }
+}
+
 // ── ALERTS ──
 let _acknowledgedAlerts = new Set(JSON.parse(localStorage.getItem('jb_ack_alerts')||'[]')); // Track acknowledged alerts
 function renderAlerts(){
@@ -4674,10 +4689,25 @@ function removeSupplier(id){if(!confirm('Remove?'))return;suppliers=suppliers.fi
 
 // ── TEMPLATES & NOTIFICATIONS ──
 function loadTemplates(){document.getElementById('tpl-order_confirmation').value=templates.order_confirmation||'';document.getElementById('tpl-tracking').value=templates.tracking||'';document.getElementById('tpl-supplier').value=templates.supplier||'';}
-function saveTpl(key){templates[key]=document.getElementById('tpl-'+key).value;localStorage.setItem('jb_templates',JSON.stringify(templates));toast('✅ Saved!','ok');}
+function saveTpl(key){
+  templates[key]=document.getElementById('tpl-'+key).value;
+  localStorage.setItem('jb_templates',JSON.stringify(templates));
+  syncGenericKeyToCloud('jb_templates',templates,{opId:createLocalMutationOpId('templates')}).catch(function(){});
+  toast('✅ Saved!','ok');
+}
 function insertVar(key,v){const ta=document.getElementById('tpl-'+key);const s=ta.selectionStart,e=ta.selectionEnd;ta.value=ta.value.substring(0,s)+v+ta.value.substring(e);ta.selectionStart=ta.selectionEnd=s+v.length;ta.focus();}
 function loadNotifSettings(){notifSettings=JSON.parse(localStorage.getItem('jb_notif')||'{"shipped":true}');const g=id=>document.getElementById(id);if(g('notif-depot')){g('notif-depot').checked=!!notifSettings.depot;g('notif-logistics').checked=!!notifSettings.logistics;g('notif-shipped').checked=!!notifSettings.shipped;g('notif-completed').checked=!!notifSettings.completed;}}
-function saveNotifSettings(){notifSettings={depot:document.getElementById('notif-depot').checked,logistics:document.getElementById('notif-logistics').checked,shipped:document.getElementById('notif-shipped').checked,completed:document.getElementById('notif-completed').checked};localStorage.setItem('jb_notif',JSON.stringify(notifSettings));toast('✅ Notification settings saved!','ok');}
+function saveNotifSettings(){
+  notifSettings={
+    depot:document.getElementById('notif-depot').checked,
+    logistics:document.getElementById('notif-logistics').checked,
+    shipped:document.getElementById('notif-shipped').checked,
+    completed:document.getElementById('notif-completed').checked
+  };
+  localStorage.setItem('jb_notif',JSON.stringify(notifSettings));
+  syncGenericKeyToCloud('jb_notif',notifSettings,{opId:createLocalMutationOpId('notif')}).catch(function(){});
+  toast('✅ Notification settings saved!','ok');
+}
 
 // ── USERS ──
 function renderUsers(){document.getElementById('users-list').innerHTML=users.map(u=>{const rc={Admin:'background:var(--accent-light);color:var(--accent);',Reseller:'background:var(--blue-bg);color:var(--blue);',Staff:'background:var(--green-bg);color:var(--green);'}[u.role]||'';return`<div class="card-row"><div style="width:32px;height:32px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:13px;flex-shrink:0;">${(u.dname||u.email)[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:600;">${esc(u.email)}${u.dname?` <span style="color:var(--muted);font-size:11px;">(${esc(u.dname)})</span>`:''}</div><div style="margin-top:3px;"><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;${rc}">${u.role}</span></div></div><div>${u.id==='u1'?'<span style="font-size:11px;color:var(--muted);">Super Admin</span>':`<button class="btn btn-danger btn-xs" onclick="removeUser('${u.id}')">Remove</button>`}</div></div>`;}).join('');}
@@ -4973,9 +5003,7 @@ function saveSettings(){
   settings.sessionTimeout=parseInt(g('cfg-session-timeout')?.value)||30;
   settings.messengerLink=g('cfg-messenger-link')?.value.trim()||'';
   localStorage.setItem('jb_settings',JSON.stringify(settings));
-  if(getFirebaseEnabled()){
-    syncSettingsToFirebase().catch(function(){});
-  }
+  syncGenericKeyToCloud('jb_settings',settings,{opId:createLocalMutationOpId('settings')}).catch(function(){});
   _sessionTimeout=(settings.sessionTimeout)*60*1000;
   updateBadges();toast('✅ Saved!','ok');
 }
@@ -4988,6 +5016,46 @@ function loadSettings(){
   if(g('cfg-firebase-enabled')) g('cfg-firebase-enabled').checked=getFirebaseEnabled();
   if(g('cfg-firebase-config')) g('cfg-firebase-config').value=localStorage.getItem('jb_firebase_config')||'';
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
+}
+function applyUsersRealtime(nextUsers){
+  users=normalizeUsersList(Array.isArray(nextUsers)?nextUsers:[]);
+  try{localStorage.setItem('jb_users',JSON.stringify(users));}catch(_e){}
+  if(me&&me.id){
+    const fresh=users.find(function(u){return u&&u.id===me.id;});
+    if(fresh){
+      me={...me,...fresh};
+      renderNav();
+    }
+  }
+  renderUsers();
+  renderChatList(document.getElementById('chat-search')?.value||'');
+}
+function applySuppliersRealtime(nextSuppliers){
+  suppliers=Array.isArray(nextSuppliers)?nextSuppliers:[];
+  try{localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));}catch(_e){}
+  renderSuppliers();
+  if(typeof renderSupPerf==='function') renderSupPerf();
+}
+function applyTemplatesRealtime(nextTemplates){
+  templates=(nextTemplates&&typeof nextTemplates==='object')?nextTemplates:{};
+  try{localStorage.setItem('jb_templates',JSON.stringify(templates));}catch(_e){}
+  loadTemplates();
+}
+function applyNotifRealtime(nextNotif){
+  notifSettings=(nextNotif&&typeof nextNotif==='object')?nextNotif:{shipped:true};
+  try{localStorage.setItem('jb_notif',JSON.stringify(notifSettings));}catch(_e){}
+  loadNotifSettings();
+}
+function applySettingsRealtime(nextSettings){
+  settings=(nextSettings&&typeof nextSettings==='object')?nextSettings:{};
+  try{localStorage.setItem('jb_settings',JSON.stringify(settings));}catch(_e){}
+  loadSettings();
+  _sessionTimeout=(parseInt(settings.sessionTimeout)||30)*60*1000;
+}
+function applyActivityRealtime(nextActivity){
+  activityLog=Array.isArray(nextActivity)?nextActivity:[];
+  try{localStorage.setItem('jb_activity',JSON.stringify(activityLog));}catch(_e){}
+  if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
 }
 
 // ── BACKUP ──
@@ -7474,9 +7542,7 @@ function saveFirebaseSettings(){
 }
 async function syncSettingsToFirebase(){
   try{
-    const ok=await initFirebaseRealtime({silent:true});
-    if(!ok||!_firebaseDb) return;
-    await writeFirebaseDataKey('jb_settings',settings||{});
+    await syncGenericKeyToCloud('jb_settings',settings||{},{opId:createLocalMutationOpId('settings')});
   }catch(_e){}
 }
 
@@ -7518,6 +7584,7 @@ let _firebaseAuth=null;
 let _firebaseReady=false;
 let _firebaseUnsubOrders=null;
 let _firebaseUnsubFeed=null;
+let _firebaseUnsubData=null;
 let _firebaseInitPromise=null;
 let _firebaseScriptsReady=false;
 let _firebaseRetryAt=0;
@@ -7537,9 +7604,11 @@ const _health={
   lastError:'',
   authState:'signed_out',
   feedRealtime:false,
-  ordersRealtime:false
+  ordersRealtime:false,
+  dataRealtime:false
 };
 let _realtimeRenderTimer=null;
+let _realtimeMetricsTimer=null;
 let _lastOrdersSaveAuditAt=0;
 const _nativeFetch=window.fetch.bind(window);
 
@@ -7925,8 +7994,90 @@ function scheduleRealtimeRender(){
   if(_realtimeRenderTimer) return;
   _realtimeRenderTimer=setTimeout(()=>{
     _realtimeRenderTimer=null;
-    if(me){updateBadges();render();}
+    if(me){
+      updateBadges();
+      refreshLiveCounters();
+      refreshRealtimeBadges();
+      render();
+    }
   },250);
+}
+
+function applyDataKeysFromRemote(remoteMap,opts={}){
+  const map=remoteMap&&typeof remoteMap==='object'?remoteMap:{};
+  const source=String(opts.source||'data_snapshot');
+  let changed=false;
+  const silent=!!opts.silent;
+  Object.entries(map).forEach(function(entry){
+    const key=entry[0];
+    const raw=entry[1];
+    if(!key || key==='jb_orders') return;
+    if(hasKeyLocalMutation(key)) return;
+    const row=(raw&&typeof raw==='object'&&!Array.isArray(raw)&&Object.prototype.hasOwnProperty.call(raw,'value'))?raw:{value:raw};
+    const incomingV=normalizeGenericVersion(row&&row.v);
+    const incomingTs=Number(row&&row.updatedAt)||Date.now();
+    const incomingValue=Object.prototype.hasOwnProperty.call(row,'value')?row.value:null;
+    let currentRaw=null;
+    let currentValue=null;
+    try{
+      currentRaw=localStorage.getItem(key);
+      currentValue=currentRaw===null?undefined:JSON.parse(currentRaw);
+    }catch(_e){
+      currentValue=undefined;
+    }
+    const currentMeta=readGenericMetaForKey(key);
+    const localV=normalizeGenericVersion(currentMeta&&currentMeta.v);
+    const localTs=Number(currentMeta&&currentMeta.updatedAt)||0;
+    if(localV>incomingV || (localV===incomingV && localTs>incomingTs)) return;
+    try{
+      const nextSerialized=JSON.stringify(incomingValue);
+      const currentSerialized=currentRaw===null||currentRaw===undefined?'':String(currentRaw);
+      if(currentSerialized!==nextSerialized){
+        localStorage.setItem(key,nextSerialized);
+        changed=true;
+      }
+      writeGenericMetaForKey(key,{
+        v:incomingV,
+        updatedAt:incomingTs,
+        lastOpId:String(row&&row.lastOpId||'')
+      });
+      if(key==='jb_settings'){
+        settings=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
+        if(!silent) loadSettings();
+      }else if(key==='jb_templates'){
+        templates=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
+        if(!silent) loadTemplates();
+      }else if(key==='jb_notif'){
+        notifSettings=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
+        if(!silent) loadNotifSettings();
+      }else if(key==='jb_users'){
+        users=normalizeUsersList(Array.isArray(incomingValue)?incomingValue:[]);
+      }else if(key==='jb_suppliers'){
+        suppliers=Array.isArray(incomingValue)?incomingValue:[];
+      }else if(key==='jb_catalog'){
+        catalog=Array.isArray(incomingValue)?incomingValue:[];
+      }else if(key==='jb_feed'){
+        setFeedCache(Array.isArray(incomingValue)?incomingValue:[],incomingTs);
+      }
+      clearKeyLocalMutation(key);
+      markSync(source+':'+key);
+    }catch(_e){}
+  });
+  if(changed){
+    if(me) scheduleRealtimeRender();
+  }
+}
+
+function refreshRealtimeBadges(){
+  if(me&&me.role==='Admin'){
+    updateChatBadge();
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
+    if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+  }
+  if(me&&me.role==='Reseller'){
+    checkResellerUnreadMessages().catch(()=>{});
+    if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+  }
 }
 
 function withTimeoutPromise(promise,ms,label){
@@ -8572,6 +8723,10 @@ function disconnectFirebaseRealtime(){
     try{_firebaseUnsubFeed();}catch(e){}
     _firebaseUnsubFeed=null;
   }
+  if(_firebaseUnsubData){
+    try{_firebaseUnsubData();}catch(_e){}
+    _firebaseUnsubData=null;
+  }
   if(_firebaseAuthWatcherUnsub){
     try{_firebaseAuthWatcherUnsub();}catch(_e){}
     _firebaseAuthWatcherUnsub=null;
@@ -8620,6 +8775,147 @@ async function subscribeFeedRealtime(opts={}){
     _health.feedRealtime=false;
     markError(e);
     if(!silent) console.warn('[subscribeFeedRealtime]',e&&e.message?e.message:e);
+    return false;
+  }
+}
+
+function applyRealtimeDataKey(key,value,updatedAt,opts={}){
+  const k=String(key||'').trim();
+  if(!k || k==='jb_orders') return;
+  if(hasKeyLocalMutation(k)) return;
+  const ts=Number(updatedAt)||Date.now();
+  const incomingV=normalizeGenericVersion(opts&&opts.v);
+  const incomingOpId=String(opts&&opts.lastOpId||opts&&opts.opId||'');
+  const localMeta=readGenericMetaForKey(k);
+  const localV=normalizeGenericVersion(localMeta&&localMeta.v);
+  const localMetaTs=Number(localMeta&&localMeta.updatedAt)||0;
+  if(localV>incomingV || (localV===incomingV && localMetaTs>ts)) return;
+  writeGenericMetaForKey(k,{v:incomingV,updatedAt:ts,lastOpId:incomingOpId});
+  if(k==='jb_feed'){
+    const localTs=readFeedUpdatedAt();
+    if(localTs && ts+1200<localTs) return;
+    setFeedCache(Array.isArray(value)?value:[],ts);
+    _health.feedRealtime=true;
+    clearKeyLocalMutation(k);
+    markSync('data_feed_snapshot');
+    if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
+    if(me&&me.role==='Admin') renderAdminFeed(document.getElementById('admin-feed-search')?.value||'');
+    refreshRealtimeBadges();
+    return;
+  }
+  localStorage.setItem(k,JSON.stringify(value));
+  if(k==='jb_users'){
+    users=normalizeUsersList(Array.isArray(value)?value:[]);
+    if(me&&me.id){
+      const mine=users.find(u=>u&&u.id===me.id) || users.find(u=>u&&String(u.email||'').toLowerCase()===String(me.email||'').toLowerCase());
+      if(mine){
+        const roleNow=String(mine.role||'');
+        if(roleNow && roleNow!==me.role){
+          me.role=roleNow;
+          renderNav();
+        }
+        me.dname=mine.dname||me.dname;
+      }
+    }
+    renderUsers();
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
+  }else if(k==='jb_suppliers'){
+    suppliers=Array.isArray(value)?value:[];
+    renderSuppliers();
+    if(typeof renderSupPerf==='function') renderSupPerf();
+  }else if(k==='jb_templates'){
+    templates=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+    loadTemplates();
+  }else if(k==='jb_notif'){
+    notifSettings=value&&typeof value==='object'&&!Array.isArray(value)?value:{shipped:true};
+    loadNotifSettings();
+  }else if(k==='jb_settings'){
+    settings=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+    loadSettings();
+    _sessionTimeout=(parseInt(settings.sessionTimeout)||30)*60*1000;
+  }else if(k==='jb_catalog'){
+    catalog=Array.isArray(value)?value:[];
+  }else if(k==='jb_activity'){
+    activityLog=Array.isArray(value)?value:[];
+    if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
+  }else if(k.indexOf('jb_chat_')===0){
+    const rid=k.replace('jb_chat_','');
+    _messages[String(rid||'')]=Array.isArray(value)?value:[];
+    if(_chatReseller && String(_chatReseller)===String(rid||'')) renderMessages();
+    if(me&&me.id&&String(me.id)===String(rid||'')) renderResellerMessages(Array.isArray(value)?value:[]);
+    updateChatBadge();
+    checkResellerUnreadMessages().catch(()=>{});
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
+  }else if(k==='jb_chat_index'){
+    // keep durable snapshot only
+  }
+  clearKeyLocalMutation(k);
+  markSync('data_snapshot:'+k);
+  refreshLiveCounters();
+  refreshRealtimeBadges();
+  if(me) scheduleRealtimeRender();
+}
+
+function renderLiveCounters(){
+  const allCount=Array.isArray(orders)?orders.length:0;
+  const completedCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.status==='Completed').length;
+  const readyCount=(Array.isArray(orders)?orders:[]).filter(function(o){
+    return o&&o.status==='At Depot'&&getShelfStatus(o).ready;
+  }).length;
+  const pendingApprovalCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.pendingApproval).length;
+  const setText=function(id,val){
+    const el=document.getElementById(id);
+    if(el) el.textContent=String(val);
+  };
+  setText('lc-total-orders',allCount);
+  setText('lc-completed-orders',completedCount);
+  setText('lc-ready-orders',readyCount);
+  setText('lc-pending-approval',pendingApprovalCount);
+}
+
+function refreshLiveCounters(){
+  renderLiveCounters();
+  if(me&&me.role==='Admin'){
+    const badge=document.getElementById('sync-state-dot');
+    if(badge){
+      const ok=!!(_health.firebaseConnected&&_health.ordersRealtime);
+      badge.style.background=ok?'#22c55e':'#f59e0b';
+      badge.title=ok?'Realtime connected':'Realtime reconnecting';
+    }
+  }
+}
+
+async function subscribeDataRealtime(opts={}){
+  const silent=!!opts.silent;
+  if(!_firebaseDb) return false;
+  if(_firebaseUnsubData){try{_firebaseUnsubData();}catch(_e){}}
+  try{
+    _firebaseUnsubData=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).onSnapshot(snap=>{
+      snap.docChanges().forEach(function(ch){
+        if(!ch||!ch.doc) return;
+        const key=String(ch.doc.id||'');
+        if(!key || key==='jb_orders' || key==='jb_feed') return;
+        const d=ch.doc.data?ch.doc.data():null;
+        applyRealtimeDataKey(key,d&&d.value,d&&d.updatedAt,{
+          source:'realtime',
+          v:d&&d.v,
+          lastOpId:d&&d.lastOpId
+        });
+      });
+      _health.dataRealtime=true;
+      markSync('data_collection_snapshot');
+      refreshLiveCounters();
+    },err=>{
+      _health.dataRealtime=false;
+      markError(err);
+      if(!silent) console.warn('[data snapshot]',err&&err.message?err.message:err);
+    });
+    _health.dataRealtime=true;
+    return true;
+  }catch(e){
+    _health.dataRealtime=false;
+    markError(e);
+    if(!silent) console.warn('[subscribeDataRealtime]',e&&e.message?e.message:e);
     return false;
   }
 }
@@ -8677,6 +8973,8 @@ async function initFirebaseRealtime(opts={}){
           if(_realtimeRenderTimer) clearTimeout(_realtimeRenderTimer);
           _realtimeRenderTimer=setTimeout(()=>{
             updateBadges();
+            refreshLiveCounters();
+            refreshRealtimeBadges();
             render();
           },120);
         }
@@ -8686,6 +8984,7 @@ async function initFirebaseRealtime(opts={}){
         console.warn('[Firebase snapshot]',err.message);
       });
       await subscribeFeedRealtime({silent:true});
+      await subscribeDataRealtime({silent:true});
       _firebaseReady=true;
       _health.firebaseConnected=true;
       _firebaseRetryAt=0;
@@ -10355,6 +10654,12 @@ function updateChatBadge(){
   const total=Object.values(_messages).reduce((s,msgs)=>s+msgs.filter(m=>m.from!=='admin'&&!m.read).length,0);
   const badge=document.getElementById('chat-badge');
   if(badge){badge.textContent=total;badge.style.display=total?'flex':'none';}
+}
+function refreshDashboardCounters(){
+  const pg=document.getElementById('pg-dash');
+  if(pg&&pg.classList.contains('on')){
+    renderDash();
+  }
 }
 
 
@@ -13070,6 +13375,7 @@ function updateBadges(){
   const nbPending=nb('nb-pending');if(nbPending)nbPending.textContent=pendingCount;
   const navPending=document.getElementById('nav-pending');
   if(navPending)navPending.style.display=(me&&me.role!=='Reseller'&&pendingCount>0)?'flex':'none';
+  renderLiveCounters();
 }
 function orderCompareSnapshot(order){
   const clean={
@@ -13265,8 +13571,14 @@ async function saveOrders(changedOrderIds){
     console.error('[saveOrders]', e);
   }
 }
-function saveUsers(){cloudSave('jb_users',JSON.stringify(users));}
-function saveSuppliers(){cloudSave('jb_suppliers',JSON.stringify(suppliers));}
+function saveUsers(){
+  localStorage.setItem('jb_users',JSON.stringify(users));
+  syncGenericKeyToCloud('jb_users',users,{opId:createLocalMutationOpId('users')}).catch(function(){});
+}
+function saveSuppliers(){
+  localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));
+  syncGenericKeyToCloud('jb_suppliers',suppliers,{opId:createLocalMutationOpId('suppliers')}).catch(function(){});
+}
 function fmtDate(ts){if(!ts)return'-';const d=new Date(ts);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
 function toast(msg,type='info'){const c=document.getElementById('toasts'),t=document.createElement('div');t.className='toast '+type;t.textContent=msg;c.appendChild(t);setTimeout(()=>t.remove(),3500);}
 
