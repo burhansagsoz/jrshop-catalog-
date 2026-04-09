@@ -2297,6 +2297,95 @@ function persistOrdersState(nextOrders){
   persistOrdersLocalSafe(arr);
   return arr;
 }
+function normalizeOrderProductNameKey(name){
+  return String(name||'').toLowerCase().replace(/\s*—.*$/,'').trim();
+}
+function isUsableOrderImage(url){
+  const v=String(url||'').trim();
+  if(!v) return false;
+  if(v==='null'||v==='undefined') return false;
+  return /^(https?:|data:|blob:)/i.test(v);
+}
+function buildCatalogImageLookup(){
+  const byName=new Map();
+  try{
+    const list=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
+    (Array.isArray(list)?list:[]).forEach(function(item){
+      const key=normalizeOrderProductNameKey(item&&item.name);
+      if(!key) return;
+      const images=[];
+      if(isUsableOrderImage(item&&item.img)) images.push(String(item.img));
+      if(Array.isArray(item&&item.images)){
+        item.images.forEach(function(src){
+          if(isUsableOrderImage(src)) images.push(String(src));
+        });
+      }
+      if(Array.isArray(item&&item.variantGroups)){
+        item.variantGroups.forEach(function(group){
+          (Array.isArray(group&&group.values)?group.values:[]).forEach(function(v){
+            if(isUsableOrderImage(v&&v.img)) images.push(String(v.img));
+          });
+        });
+      }
+      const first=images.find(function(src){return isUsableOrderImage(src);})||'';
+      if(first && !byName.has(key)) byName.set(key,first);
+    });
+  }catch(_e){}
+  return byName;
+}
+function buildOrderImageHints(orderList){
+  const byName=new Map();
+  const list=Array.isArray(orderList)?orderList:[];
+  list.forEach(function(order){
+    (Array.isArray(order&&order.products)?order.products:[]).forEach(function(prod){
+      const key=normalizeOrderProductNameKey(prod&&prod.name);
+      if(!key) return;
+      const img=isUsableOrderImage(prod&&prod.img)?String(prod.img):'';
+      if(img && !byName.has(key)) byName.set(key,img);
+    });
+  });
+  return byName;
+}
+function restoreMissingOrderImagesInOrders(orderList,opts={}){
+  const list=Array.isArray(orderList)?orderList:[];
+  const hintOrders=Array.isArray(opts.hintOrders)?opts.hintOrders:[];
+  const catalogLookup=buildCatalogImageLookup();
+  const hintLookup=buildOrderImageHints(hintOrders);
+  const changedIds=[];
+  const next=list.map(function(order){
+    if(!order||!Array.isArray(order.products)||!order.products.length) return order;
+    let changed=false;
+    const products=order.products.map(function(prod){
+      if(!prod) return prod;
+      if(isUsableOrderImage(prod.img)) return prod;
+      const key=normalizeOrderProductNameKey(prod.name);
+      const recovered=(key&&(hintLookup.get(key)||catalogLookup.get(key)))||'';
+      if(!isUsableOrderImage(recovered)) return prod;
+      changed=true;
+      return {...prod,img:recovered};
+    });
+    if(!changed) return order;
+    changedIds.push(String(order.id||''));
+    return {...order,products};
+  });
+  return {orders:next,changedIds:changedIds.filter(Boolean)};
+}
+function scheduleRecoveredImageSync(orderIds){
+  const ids=(Array.isArray(orderIds)?orderIds:[]).filter(Boolean);
+  if(!ids.length) return;
+  ids.forEach(function(id){_recoveredImageOrderIds.add(String(id));});
+  if(_recoveredImageSyncTimer) return;
+  _recoveredImageSyncTimer=setTimeout(async function(){
+    _recoveredImageSyncTimer=null;
+    const pending=[..._recoveredImageOrderIds];
+    _recoveredImageOrderIds.clear();
+    if(!pending.length) return;
+    if(!getFirebaseEnabled()||!_health.firebaseConnected) return;
+    try{
+      await saveOrders(pending);
+    }catch(_e){}
+  },1800);
+}
 function mergeArrayByTs(localArr,remoteArr){
   const local=Array.isArray(localArr)?localArr:[];
   const remote=Array.isArray(remoteArr)?remoteArr:[];
@@ -7474,6 +7563,7 @@ async function loadFromCloudSilent(){
     const after=JSON.stringify(finalOrders);
     if(before!==after){
       orders=finalOrders;
+      restoreOrderImagesFromLocalSources(orders,{source:'load_silent'});
       localStorage.setItem('jb_orders',JSON.stringify(orders));
       render();
     }
@@ -7537,6 +7627,7 @@ async function loadFromCloud(){
         // Server-authoritative merge: prune missing remote IDs except recent local mutations.
         orders=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'load',pruneMissing:true});
         orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
+        restoreOrderImagesFromLocalSources(orders,{source:'load'});
         localStorage.setItem('jb_orders',JSON.stringify(orders));
         // Reload variables from localStorage
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
@@ -7682,6 +7773,8 @@ const _health={
 };
 let _realtimeRenderTimer=null;
 let _realtimeMetricsTimer=null;
+let _recoveredImageSyncTimer=null;
+const _recoveredImageOrderIds=new Set();
 let _lastOrdersSaveAuditAt=0;
 const _nativeFetch=window.fetch.bind(window);
 
@@ -9130,6 +9223,7 @@ async function initFirebaseRealtime(opts={}){
         const incomingLive=getLiveOrdersOnly(incomingRaw);
         const merged=mergeOrdersByFreshness(orders,incomingLive,{source:'realtime',pruneMissing:true});
         orders=pruneLocalOrdersAgainstRemote(merged,incomingLive);
+        restoreOrderImagesFromLocalSources(orders,{source:'realtime'});
         localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
         _health.ordersRealtime=true;
         markSync('orders_snapshot');
