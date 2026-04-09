@@ -1502,18 +1502,13 @@ body.dark .modal-foot{background:#263548;}
               <span id="staff-order-status" style="padding:4px 10px;border-radius:20px;font-size:11px;font-weight:700;"></span>
             </div>
             
-            <!-- 客户信息 -->
-            <div style="background:var(--bg);border-radius:10px;padding:12px;margin-bottom:12px;">
-              <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px;">👤 收件人信息</div>
-              <div id="staff-customer-info"></div>
-            </div>
-            
-            <!-- 地址 -->
+            <!-- 单一卡片：完整可复制信息 -->
             <div style="background:rgba(220,38,38,.05);border:1px solid rgba(220,38,38,.2);border-radius:10px;padding:12px;margin-bottom:12px;">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                <div style="font-size:12px;font-weight:700;color:#dc2626;">📍 配送地址</div>
-                <button onclick="staffCopyAddress()" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;">📋 复制地址</button>
+                <div style="font-size:12px;font-weight:700;color:#dc2626;">📍 Copy-ready Full Details</div>
+                <button onclick="staffCopyAddress()" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;">📋 复制全部</button>
               </div>
+              <div id="staff-copy-text" style="margin-bottom:8px;"></div>
               <div id="staff-address-info" style="font-size:13px;line-height:1.6;"></div>
             </div>
             
@@ -1523,6 +1518,10 @@ body.dark .modal-foot{background:#263548;}
               <div id="staff-products-list"></div>
             </div>
             
+          </div>
+
+          <!-- 跟踪卡片（单独） -->
+          <div id="staff-tracking-card" style="display:none;background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px;border:1px solid var(--border);">
             <!-- UK运单号输入 -->
             <div style="background:var(--bg);border-radius:10px;padding:12px;margin-bottom:12px;">
               <div style="font-size:12px;font-weight:700;margin-bottom:8px;">🇬🇧 UK运单号 (Royal Mail)</div>
@@ -1724,6 +1723,13 @@ body.dark .modal-foot{background:#263548;}
             <button type="button" class="img-clear" onclick="clearCatImg()">✕</button>
           </div>
         </div>
+        <div class="fg">
+          <label class="fl">Extra Product Images</label>
+          <label for="cat-gallery-input" class="img-label"><span style="font-size:18px;">🖼️</span><span style="font-size:12px;color:var(--muted);">Select multiple images</span></label>
+          <input type="file" accept="image/*" id="cat-gallery-input" class="img-real-input" multiple onchange="handleCatGallery(this)">
+          <div id="cat-gallery-list" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px;">Use this for extra colour/angle photos. Main image stays first.</div>
+        </div>
         <div class="fg"><label class="fl">Product Name <span class="req">*</span></label><input type="text" class="fi" id="cat-name" placeholder="e.g. Nike Air Max 90"></div>
         <div class="fg"><label class="fl">Description</label><textarea class="fi" id="cat-desc" placeholder="Short description…" style="min-height:60px;"></textarea></div>
         <div class="fg"><label class="fl">Category</label><select class="fi" id="cat-category"><option value="">— Select category —</option></select></div>
@@ -1772,7 +1778,7 @@ body.dark .modal-foot{background:#263548;}
     </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" onclick="closeResellerOrderModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="submitResellerOrder()">📤 Submit Request</button>
+      <button type="button" id="reseller-order-submit-btn" class="btn btn-primary" onclick="submitResellerOrder()">📤 Submit Request</button>
     </div>
   </div>
 </div>
@@ -3580,6 +3586,8 @@ function saveEdit(){
 // ── RESELLER VIEW ──
 // ── RESELLER STATE ──
 let _resFilter='all', _resSearch='';
+let _resellerOrderSubmitting=false;
+const RESELLER_PENDING_LOCAL_GRACE_MS=15*60*1000;
 function setResellerFilter(btn,f){
   _resFilter=f;
   document.querySelectorAll('.res-filter-btn').forEach(b=>b.classList.remove('active'));
@@ -5057,6 +5065,7 @@ let catalogCategories = JSON.parse(localStorage.getItem('jb_cat_categories') || 
 let _activeCatalogCat = 'All';
 let roProdCount=0;
 let _catEditId=null, _catVariants=[], _catImg=null;
+let _catGallery=[];
 
 function saveCatalogCategories(){localStorage.setItem('jb_cat_categories',JSON.stringify(catalogCategories));}
 
@@ -5135,6 +5144,7 @@ function openCatalogModal(editId=null){
   _catEditId=editId;
   _catVariants=[];
   _catImg=null;
+  _catGallery=[];
   _variantGroups=[];
   // Safe helper
   const $=id=>document.getElementById(id);
@@ -5143,6 +5153,8 @@ function openCatalogModal(editId=null){
   if($('cat-instock')) $('cat-instock').checked=true;
   if($('cat-img-label')) $('cat-img-label').style.display='flex';
   if($('cat-img-prev')) $('cat-img-prev').style.display='none';
+  if($('cat-gallery-input')) $('cat-gallery-input').value='';
+  if($('cat-gallery-list')) $('cat-gallery-list').innerHTML='';
   const cvl=$('cat-variants-list');if(cvl)cvl.innerHTML='';
   // Populate category dropdown
   const catSel=$('cat-category');
@@ -5158,14 +5170,22 @@ function openCatalogModal(editId=null){
     if($('cat-instock')) $('cat-instock').checked=p.inStock!==false;
     if(catSel&&p.category) catSel.value=p.category;
     _catVariants=[...(p.variants||[])];
-    _catImg=p.img||null;
+    const allImages=(Array.isArray(p.images)?p.images:[]).filter(Boolean);
+    if(allImages.length){
+      _catImg=allImages[0]||null;
+      _catGallery=allImages.slice(1);
+    }else{
+      _catImg=p.img||null;
+      _catGallery=[];
+    }
     _variantGroups=JSON.parse(JSON.stringify(p.variantGroups||[]));
-    if(p.img){
+    if(_catImg){
       if($('cat-img-label')) $('cat-img-label').style.display='none';
       if($('cat-img-prev')) $('cat-img-prev').style.display='block';
-      if($('cat-img-img')) $('cat-img-img').src=p.img;
+      if($('cat-img-img')) $('cat-img-img').src=_catImg;
     }
   }
+  renderCatGallery();
   renderVariantGroups();
   const modal=$('catalog-modal');
   if(modal) modal.classList.add('open');
@@ -5175,7 +5195,7 @@ function editCatalogProduct(id){openCatalogModal(id);}
 
 function closeCatalogModal(){
   document.getElementById('catalog-modal').classList.remove('open');
-  _catEditId=null;_catVariants=[];_catImg=null;
+  _catEditId=null;_catVariants=[];_catImg=null;_catGallery=[];
 }
 
 // ── PRODUCT DETAIL MODAL (Ratings & Reviews) ──
@@ -5321,6 +5341,53 @@ function renderProductReviews(p){
   `).join('');
 }
 
+function compressCatImageFile(file,maxSize=900,quality=0.8){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onerror=()=>reject(new Error('read_failed'));
+    reader.onload=(e)=>{
+      const img=new Image();
+      img.onerror=()=>reject(new Error('image_parse_failed'));
+      img.onload=()=>{
+        const canvas=document.createElement('canvas');
+        let w=img.width||1;
+        let h=img.height||1;
+        if(w>maxSize||h>maxSize){
+          if(w>h){h=Math.round(h*maxSize/w);w=maxSize;}
+          else{w=Math.round(w*maxSize/h);h=maxSize;}
+        }
+        canvas.width=w;
+        canvas.height=h;
+        const ctx=canvas.getContext('2d');
+        if(!ctx){reject(new Error('canvas_failed'));return;}
+        ctx.drawImage(img,0,0,w,h);
+        resolve(canvas.toDataURL('image/jpeg',quality));
+      };
+      img.src=e.target&&e.target.result?e.target.result:'';
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderCatGallery(){
+  const el=document.getElementById('cat-gallery-list');
+  if(!el) return;
+  if(!_catGallery.length){
+    el.innerHTML='<div style="font-size:11px;color:var(--muted);">No extra images yet.</div>';
+    return;
+  }
+  el.innerHTML=_catGallery.map((src,idx)=>`
+    <div style="position:relative;width:66px;height:66px;border-radius:10px;overflow:hidden;border:1px solid var(--border);background:var(--bg);">
+      <img src="${src}" style="width:100%;height:100%;object-fit:cover;">
+      <button type="button" onclick="removeCatGalleryImage(${idx})" style="position:absolute;top:2px;right:2px;width:19px;height:19px;border:none;border-radius:50%;background:rgba(0,0,0,.65);color:#fff;font-size:11px;cursor:pointer;">✕</button>
+    </div>`).join('');
+}
+
+function removeCatGalleryImage(idx){
+  _catGallery=_catGallery.filter((_,i)=>i!==idx);
+  renderCatGallery();
+}
+
 async function handleCatImg(input){
   if(!input.files||!input.files[0])return;
   const file = input.files[0];
@@ -5329,67 +5396,34 @@ async function handleCatImg(input){
   document.getElementById('cat-img-label').innerHTML = '<span style="font-size:18px;">⏳</span><span style="font-size:12px;color:var(--muted);">Uploading...</span>';
   
   try{
-    // Compress image first
-    const compressed = await new Promise((resolve)=>{
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const img = new Image();
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          const maxSize = 800;
-          let w = img.width, h = img.height;
-          if(w > maxSize || h > maxSize){
-            if(w > h){ h = Math.round(h * maxSize / w); w = maxSize; }
-            else{ w = Math.round(w * maxSize / h); h = maxSize; }
-          }
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, w, h);
-          resolve(canvas.toDataURL('image/jpeg', 0.8));
-        };
-        img.src = e.target.result;
-      };
-      reader.readAsDataURL(file);
-    });
-    
-    // Try to upload to cloud
-    const api = getApiBase();
-    const k = (localStorage.getItem('jb_cloud_key') || '').trim();
-    
-    if(k){
-      try{
-        const res = await fetch(api+'/api/image', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer '+k },
-          body: JSON.stringify({ data: compressed, type: 'image/jpeg' })
-        });
-        if(res.ok){
-          const data = await res.json();
-          if(data.id){
-            _catImg = data.url || (api + '/api/image/' + data.id);
-            document.getElementById('cat-img-label').style.display = 'none';
-            document.getElementById('cat-img-prev').style.display = 'block';
-            document.getElementById('cat-img-img').src = _catImg;
-            document.getElementById('cat-img-label').innerHTML = '<span style="font-size:18px;">📷</span><span style="font-size:12px;color:var(--muted);">Tap to change</span>';
-            return;
-          }
-        }
-      }catch(e){ console.warn('Cloud upload failed, using base64'); }
-    }
-    
-    // Fallback to base64 (but warn user)
-    _catImg = compressed;
+    const compressed = await compressCatImageFile(file,900,0.82);
+    const uploaded=await uploadImageWithFallback(compressed,'image/jpeg',{allowDataFallback:true});
+    _catImg = uploaded&&uploaded.url ? uploaded.url : compressed;
     document.getElementById('cat-img-label').style.display = 'none';
     document.getElementById('cat-img-prev').style.display = 'block';
-    document.getElementById('cat-img-img').src = compressed;
+    document.getElementById('cat-img-img').src = _catImg;
     document.getElementById('cat-img-label').innerHTML = '<span style="font-size:18px;">📷</span><span style="font-size:12px;color:var(--muted);">Tap to change</span>';
-    toast('ℹ️ Image saved locally. Share catalog to upload.', 'info');
+    if(/^data:/i.test(_catImg)) toast('ℹ️ Main image saved locally (sync on next publish)', 'info');
     
   }catch(e){
     toast('❌ Failed to process image', 'err');
     document.getElementById('cat-img-label').innerHTML = '<span style="font-size:18px;">📷</span><span style="font-size:12px;color:var(--muted);">Tap to choose</span>';
   }
+}
+
+async function handleCatGallery(input){
+  const files=Array.from((input&&input.files)||[]);
+  if(!files.length) return;
+  toast('📤 Processing extra images...','info');
+  for(const file of files){
+    try{
+      const compressed=await compressCatImageFile(file,900,0.8);
+      const uploaded=await uploadImageWithFallback(compressed,'image/jpeg',{allowDataFallback:true});
+      _catGallery.push(uploaded&&uploaded.url?uploaded.url:compressed);
+    }catch(_e){}
+  }
+  if(input) input.value='';
+  renderCatGallery();
 }
 
 function clearCatImg(){
@@ -5501,18 +5535,30 @@ async function saveCatalogProduct(){
   if(!price||isNaN(price)){toast('⚠️ Price required','err');return;}
   
   let imgUrl = _catImg || null;
-  
-  // Upload image to cloud if it's base64
-  if(imgUrl && imgUrl.startsWith('data:')){
+  const galleryImages=[..._catGallery];
+  const variantGroups=JSON.parse(JSON.stringify(_variantGroups||[]));
+
+  if(imgUrl && /^data:/i.test(imgUrl)){
     toast('📤 Uploading image...','info');
     const uploaded=await uploadImageWithFallback(imgUrl,'image/jpeg',{allowDataFallback:true});
-    if(uploaded&&uploaded.url){
-      imgUrl=uploaded.url;
-      toast(/^data:/i.test(imgUrl)?'ℹ️ Saved locally, will sync later':'✅ Image uploaded','ok');
-    }else{
-      toast('⚠️ Image saved locally (will upload on share)','info');
+    imgUrl=(uploaded&&uploaded.url)?uploaded.url:imgUrl;
+  }
+  for(let i=0;i<galleryImages.length;i++){
+    const src=galleryImages[i];
+    if(!src||!/^data:/i.test(src)) continue;
+    const uploaded=await uploadImageWithFallback(src,'image/jpeg',{allowDataFallback:true});
+    galleryImages[i]=(uploaded&&uploaded.url)?uploaded.url:src;
+  }
+  for(const g of variantGroups){
+    for(const v of (g&&Array.isArray(g.values)?g.values:[])){
+      if(!v||!v.img||!/^data:/i.test(v.img)) continue;
+      const uploaded=await uploadImageWithFallback(v.img,'image/jpeg',{allowDataFallback:true});
+      v.img=(uploaded&&uploaded.url)?uploaded.url:v.img;
     }
   }
+  const allImages=[imgUrl,...galleryImages].filter(Boolean);
+  const dedupImages=[...new Set(allImages)];
+  if(!imgUrl&&dedupImages.length) imgUrl=dedupImages[0];
   
   const prod={
     id:_catEditId||('c'+Date.now()),
@@ -5521,9 +5567,10 @@ async function saveCatalogProduct(){
     desc:document.getElementById('cat-desc').value.trim(),
     price:parseFloat(price),
     variants:[..._catVariants],
-    variantGroups:JSON.parse(JSON.stringify(_variantGroups)),
+    variantGroups,
     inStock:document.getElementById('cat-instock').checked,
-    img:imgUrl
+    img:imgUrl,
+    images:dedupImages
   };
   if(_catEditId){
     const idx=catalog.findIndex(x=>x.id===_catEditId);
@@ -5561,7 +5608,10 @@ async function shareCatalog(){
     
     // Upload images to cloud first (convert base64 to URLs)
     const hasInlineCatalogImages=(catalog||[]).some(function(item){
-      return !!(item&&item.img&&String(item.img).startsWith('data:'));
+      const hasMain=!!(item&&item.img&&String(item.img).startsWith('data:'));
+      const hasGallery=Array.isArray(item&&item.images)&&item.images.some(src=>String(src||'').startsWith('data:'));
+      const hasVariant=Array.isArray(item&&item.variantGroups)&&item.variantGroups.some(g=>Array.isArray(g&&g.values)&&g.values.some(v=>v&&String(v.img||'').startsWith('data:')));
+      return hasMain||hasGallery||hasVariant;
     });
     toast(hasInlineCatalogImages?'📤 Uploading images...':'📦 Preparing catalog...','info');
     const cleanProducts = [];
@@ -5597,6 +5647,8 @@ async function shareCatalog(){
         category:p.category||'',
         price:parseFloat(String(p.price||'0').replace(/[^0-9.]/g,'')),
         variants:p.variants||[],
+        variantGroups:p.variantGroups||[],
+        images:Array.isArray(p.images)?p.images.filter(Boolean):(p.img?[p.img]:[]),
         inStock:p.inStock!==false,
         img:imgUrl
       });
@@ -6348,6 +6400,33 @@ init();
 
 
 // ── IMPORT ORDER FROM CODE ──
+function findCatalogOrderInLocalFallback(code){
+  const normalized=String(code||'').trim().toUpperCase();
+  if(!normalized) return null;
+  try{
+    const mapRaw=localStorage.getItem('jb_catalog_orders_map')||localStorage.getItem('catalog_orders_map');
+    const map=mapRaw?JSON.parse(mapRaw):{};
+    if(map&&typeof map==='object'){
+      const direct=map[normalized]||map[normalized.toLowerCase()];
+      if(direct&&typeof direct==='object') return {...direct,code:direct.code||normalized};
+      for(const k of Object.keys(map)){
+        if(String(k||'').toUpperCase()===normalized && map[k]&&typeof map[k]==='object'){
+          return {...map[k],code:map[k].code||normalized};
+        }
+      }
+    }
+  }catch(_e){}
+  try{
+    const arrRaw=localStorage.getItem('catalog_orders');
+    const arr=arrRaw?JSON.parse(arrRaw):[];
+    if(Array.isArray(arr)){
+      const hit=arr.find(x=>x&&String(x.code||'').toUpperCase()===normalized);
+      if(hit) return {...hit,code:hit.code||normalized};
+    }
+  }catch(_e){}
+  return null;
+}
+
 function importOrderFromCode(){
   const input=document.getElementById('import-order-input').value.trim();
   if(!input){toast('⚠️ Paste the order code','err');return;}
@@ -6357,6 +6436,12 @@ function importOrderFromCode(){
   if(shortCodeMatch){
     // Fetch from Firebase bridge
     const code = 'JR-' + shortCodeMatch[1].toUpperCase();
+    const localHit=findCatalogOrderInLocalFallback(code);
+    if(localHit){
+      previewImportOrder(localHit);
+      toast('✅ Order found in local cache','ok');
+      return;
+    }
     toast('🔍 Looking up order...','info');
     fetch('/api/catalog-order/'+code,{headers:getAuthHeaders()})
       .then(r => r.json())
@@ -6364,10 +6449,22 @@ function importOrderFromCode(){
         if(data && data.code){
           previewImportOrder(data);
         } else {
+          const fallback=findCatalogOrderInLocalFallback(code);
+          if(fallback){
+            previewImportOrder(fallback);
+            toast('✅ Order found in local cache','ok');
+            return;
+          }
           toast('⚠️ Order not found','err');
         }
       })
       .catch(e => {
+        const fallback=findCatalogOrderInLocalFallback(code);
+        if(fallback){
+          previewImportOrder(fallback);
+          toast('✅ Order found in local cache','ok');
+          return;
+        }
         toast('⚠️ Could not fetch order','err');
       });
     return;
@@ -6646,7 +6743,13 @@ function fillROFromCatalog(idx,sel){
   }
 }
 function removeROProd(idx){const el=document.getElementById('ropi-'+idx);if(el)el.remove();}
-function submitResellerOrder(){
+async function submitResellerOrder(){
+  if(!me||me.role!=='Reseller'){toast('⚠️ Session error. Please login again.','err');return;}
+  if(_resellerOrderSubmitting) return;
+  _resellerOrderSubmitting=true;
+  const submitBtn=document.getElementById('reseller-order-submit-btn');
+  if(submitBtn){submitBtn.disabled=true;submitBtn.textContent='Submitting...';}
+  try{
   const name=document.getElementById('ro-name').value.trim();
   const addr=document.getElementById('ro-addr').value.trim();
   const city=document.getElementById('ro-city').value.trim();
@@ -6679,12 +6782,17 @@ function submitResellerOrder(){
     note:'[RESELLER REQUEST] '+(document.getElementById('ro-note').value.trim()||''),
     pendingApproval:true
   };
-  orders.unshift(o);saveOrders([o.id]);updateBadges();
+  orders.unshift(o);
+  await saveOrders([o.id]);
+  updateBadges();
   logActivity('order_request',`Order request submitted by ${me.dname||me.email}: ${esc(o.ref)} for ${esc(name)}`,o.id);
+  _resFilter='pending';
   closeResellerOrderModal();renderResellerView();
-  // Force immediate cloud sync so admin sees it
-  syncToCloud('jb_orders',orders).catch(()=>{});
   toast('✅ Order request submitted!','ok');
+  }finally{
+    _resellerOrderSubmitting=false;
+    if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='📤 Submit Request';}
+  }
 }
 
 // ── CUSTOMER TRACKING PAGE ──
@@ -8575,8 +8683,12 @@ if('serviceWorker' in navigator){
         });
       });
     }).catch(()=>{});
-    // Reload when new SW takes control
+    // Avoid force-reload while a logged-in user is actively using the app.
     navigator.serviceWorker.addEventListener('controllerchange',()=>{
+      if(me){
+        toast('🔄 Update ready. It will apply next reopen.','info');
+        return;
+      }
       window.location.reload();
     });
   });
@@ -9029,11 +9141,22 @@ async function startPendingPoll(){
       }catch{newOrders=data.jb_orders||[];}
       if(newOrders.length){
         if(me.role==='Reseller'){
-          // For reseller: check if their orders changed (approved/rejected/status update)
-          const myOld=orders.filter(o=>o.resellerId===me.id);
-          const myNew=newOrders.filter(o=>o.resellerId===me.id);
-          orders=newOrders;
-          localStorage.setItem('jb_orders',JSON.stringify(orders));
+          // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
+          const prevOrders=Array.isArray(orders)?orders:[];
+          const myOld=prevOrders.filter(o=>o.resellerId===me.id);
+          let mergedOrders=mergeOrdersByFreshness(prevOrders,newOrders);
+          const nowTs=Date.now();
+          const recentLocalPending=myOld.filter(o=>
+            o&&o.id&&o.pendingApproval&&!o.rejected&&
+            !newOrders.find(n=>n&&n.id===o.id)&&
+            (nowTs-((o.updatedAt||o.ts||0)))<RESELLER_PENDING_LOCAL_GRACE_MS
+          );
+          if(recentLocalPending.length){
+            mergedOrders=mergeOrdersByFreshness(mergedOrders,recentLocalPending);
+          }
+          orders=mergedOrders;
+          persistOrdersLocalSafe(orders);
+          const myNew=orders.filter(o=>o.resellerId===me.id);
           // Detect status changes
           myNew.forEach(o=>{
             const old=myOld.find(x=>x.id===o.id);
@@ -11515,11 +11638,53 @@ async function staffProcessScan(){
   document.getElementById('staff-scan-input').value = '';
 }
 
+function normalizeStaffCountry(country){
+  const c = String(country || '').trim();
+  if(!c) return 'United Kingdom';
+  if(/^(gb|uk)$/i.test(c)) return 'United Kingdom';
+  return c;
+}
+
+function buildStaffAddressRows(order){
+  if(!order) return [];
+  const rows = [
+    {key:'name', label:'Name', value:order.name || ''},
+    {key:'phone', label:'Phone', value:order.phone || ''},
+    {key:'email', label:'Email', value:order.email || ''},
+    {key:'address', label:'Address', value:order.address || ''},
+    {key:'city', label:'City', value:order.city || ''},
+    {key:'state', label:'State/County', value:order.state || order.county || ''},
+    {key:'postcode', label:'Postcode', value:order.postcode || ''},
+    {key:'country', label:'Country', value:normalizeStaffCountry(order.country)}
+  ];
+  return rows.filter(function(row){
+    return String(row.value || '').trim();
+  });
+}
+
+function buildStaffAddressCopyText(order){
+  if(!order) return '';
+  const rows = buildStaffAddressRows(order);
+  const ref = order.ref || (order.id ? order.id.slice(-8) : '');
+  const lines = [];
+  if(ref) lines.push('Order Ref: ' + ref);
+  rows.forEach(function(row){
+    lines.push(row.label + ': ' + row.value);
+  });
+  return lines.join('\n');
+}
+
+function renderStaffAddressCopyBlock(order){
+  const text = buildStaffAddressCopyText(order);
+  if(!text) return '';
+  return `<pre style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55;font-family:var(--mono);background:var(--bg);border:1px dashed var(--border);border-radius:8px;padding:10px;">${esc(text)}</pre>`;
+}
+
 function staffShowOrder(order){
   const card = document.getElementById('staff-order-card');
   const statusEl = document.getElementById('staff-order-status');
-  const customerEl = document.getElementById('staff-customer-info');
   const addressEl = document.getElementById('staff-address-info');
+  const copyTextEl = document.getElementById('staff-copy-text');
   const productsEl = document.getElementById('staff-products-list');
   const trackingInput = document.getElementById('staff-uk-tracking');
   
@@ -11534,33 +11699,38 @@ function staffShowOrder(order){
   statusEl.style.cssText = statusColors[order.status] || 'background:var(--bg);color:var(--text);';
   statusEl.textContent = order.status;
   
-  // 客户信息
-  customerEl.innerHTML = `
-    <div style="font-size:15px;font-weight:700;margin-bottom:4px;">${esc(order.name)}</div>
-    <div style="font-size:12px;color:var(--muted);">📞 ${esc(order.phone || '—')}</div>
-    <div style="font-size:12px;color:var(--muted);">📧 ${esc(order.email || '—')}</div>
-    <div style="font-size:12px;font-family:monospace;color:var(--accent);margin-top:4px;">订单号: ${esc(order.ref || order.id.slice(-8))}</div>
-  `;
-  
-  // 地址
-  const address = [order.address, order.city, order.postcode].filter(Boolean).join(', ');
-  addressEl.innerHTML = `
-    <div style="font-weight:600;margin-bottom:4px;">${esc(order.name)}</div>
-    <div>${esc(address)}</div>
-    ${order.postcode ? `<div style="font-family:monospace;font-weight:700;color:#dc2626;margin-top:4px;">邮编: ${esc(order.postcode)}</div>` : ''}
-  `;
+  // 单一完整详情（用于核对与复制）
+  const addressRows = buildStaffAddressRows(order);
+  const ref = order.ref || order.id.slice(-8);
+  addressEl.innerHTML = `<div style="font-size:14px;font-weight:800;color:var(--accent);margin-bottom:8px;">Order Ref: ${esc(ref)}</div>` + (addressRows.length ? addressRows.map(function(row){
+    const isPostcode = row.key === 'postcode';
+    return `<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:5px;">
+      <div style="min-width:96px;font-size:11px;color:var(--muted);font-weight:600;">${esc(row.label)}</div>
+      <div style="font-size:13px;word-break:break-word;${isPostcode ? 'font-family:monospace;font-weight:700;color:#dc2626;' : ''}">${esc(row.value)}</div>
+    </div>`;
+  }).join('') : `<div style="font-size:12px;color:var(--muted);">No address details</div>`);
+  if(copyTextEl){
+    copyTextEl.innerHTML = renderStaffAddressCopyBlock(order);
+  }
   
   // 产品列表
   const prods = order.products || [];
-  productsEl.innerHTML = prods.map((p, i) => `
-    <div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--bg);border-radius:8px;margin-bottom:6px;">
-      <div style="width:8px;height:8px;border-radius:50%;background:${p.arrived ? '#22c55e' : p.cnTracking ? '#3b82f6' : '#f59e0b'};"></div>
-      <div style="flex:1;">
-        <div style="font-size:12px;font-weight:600;">${esc(p.name)}</div>
-        <div style="font-size:10px;color:var(--muted);">数量: ${p.qty || 1} ${p.cnTracking ? `· CN: ${esc(p.cnTracking)}` : ''}</div>
+  productsEl.innerHTML = prods.length ? prods.map((p) => {
+    const prod = p || {};
+    const hasImg = !!prod.img;
+    const safeImg = hasImg ? String(prod.img).replace(/'/g,"\\'") : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--bg);border-radius:8px;margin-bottom:6px;">
+      <div style="width:8px;height:8px;border-radius:50%;background:${prod.arrived ? '#22c55e' : prod.cnTracking ? '#3b82f6' : '#f59e0b'};"></div>
+      ${hasImg
+        ? `<img src="${prod.img}" style="width:44px;height:44px;border-radius:8px;object-fit:cover;border:1px solid var(--border);cursor:pointer;flex-shrink:0;" onclick="openLightbox('${safeImg}')" onerror="this.style.display='none';">`
+        : `<div style="width:44px;height:44px;border-radius:8px;background:var(--card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">📦</div>`
+      }
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;">${esc(prod.name)} ${hasImg?'<span style="font-size:10px;color:#16a34a;">🖼️</span>':''}</div>
+        <div style="font-size:10px;color:var(--muted);">数量: ${prod.qty || 1} ${prod.cnTracking ? `· CN: ${esc(prod.cnTracking)}` : ''}</div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('') : `<div style="font-size:12px;color:var(--muted);">No products</div>`;
   
   // UK跟踪号
   trackingInput.value = order.ukTracking || '';
@@ -11578,12 +11748,18 @@ function staffShowOrder(order){
   }
   
   card.style.display = 'block';
+  const trackingCard = document.getElementById('staff-tracking-card');
+  if(trackingCard) trackingCard.style.display = 'block';
 }
 
 function staffCopyAddress(){
   if(!_staffCurrentOrder) return;
   const o = _staffCurrentOrder;
-  const address = [o.name, o.address, o.city, o.postcode, 'United Kingdom'].filter(Boolean).join('\n');
+  const address = buildStaffAddressCopyText(o);
+  if(!address){
+    toast('❌ 没有可复制的地址信息','err');
+    return;
+  }
   navigator.clipboard.writeText(address).then(() => {
     toast('✅ 地址已复制','ok');
   }).catch(() => {
@@ -11658,6 +11834,8 @@ async function staffCompleteOrder(){
 
 function staffCloseCard(){
   document.getElementById('staff-order-card').style.display = 'none';
+  const trackingCard = document.getElementById('staff-tracking-card');
+  if(trackingCard) trackingCard.style.display = 'none';
   _staffCurrentOrder = null;
 }
 
