@@ -4257,7 +4257,7 @@ function addAnotherPhoto(){
   document.getElementById('depot-skip-btn').style.display='block';
 }
 
-function copyAndMarkLogistics(){
+async function copyAndMarkLogistics(){
   const o=orders.find(x=>x.id===_depotPhotoOrderId);if(!o)return;
   o.updatedAt=Date.now();
   const prods=o.products||[];
@@ -4272,7 +4272,7 @@ function copyAndMarkLogistics(){
     // Mark all products as arrived if not already
     prods.forEach(p=>p.arrived=true);
     o.status='At Depot'; // stays at depot, shelf.ready = true = "Ready to Ship"
-    saveOrders();updateBadges();
+    await saveOrders([o.id]);updateBadges();
     logActivity('status',`All items marked arrived, Ready to Ship: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     if(notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
     toast('📋 Address copied! Order is Ready to Ship.','ok');
@@ -4287,7 +4287,7 @@ function copyAndMarkLogistics(){
   } else {
     // Single product: At Depot → Sent to Logistics directly
     o.status='Sent to Logistics';
-    saveOrders();updateBadges();
+    await saveOrders([o.id]);updateBadges();
     logActivity('status',`Sent to Logistics (barcode scan): ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     if(notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
     toast('📋 Address copied & Sent to Logistics!','ok');
@@ -4302,10 +4302,10 @@ function copyAndMarkLogistics(){
   document.getElementById('depot-photo-section').style.display='none';
 }
 
-function markSentLogisticsFromBarcode(orderId){
+async function markSentLogisticsFromBarcode(orderId){
   const o=orders.find(x=>x.id===orderId);if(!o)return;o.updatedAt=Date.now();
   o.status='Sent to Logistics';
-  saveOrders();updateBadges();
+  await saveOrders([o.id]);updateBadges();
   logActivity('status',`Sent to Logistics: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   if(notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
   toast('🚛 Sent to Logistics!','ok');
@@ -4317,7 +4317,7 @@ function markSentLogisticsFromBarcode(orderId){
     </div>`;
 }
 
-function copyAddressOnly(){
+async function copyAddressOnly(){
   const o=orders.find(x=>x.id===_depotPhotoOrderId);if(!o)return;
   const addr=`${esc(o.name)}\n${o.address}\n${o.city}${o.state?', '+o.state:''}\n${o.postcode}\n${o.country||'GB'}${o.phone?'\nTel: '+o.phone:''}${o.email?'\nEmail: '+o.email:''}`;
   navigator.clipboard.writeText(addr).catch(()=>{const ta=document.createElement('textarea');ta.value=addr;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();});
@@ -4325,20 +4325,20 @@ function copyAddressOnly(){
   // Status progression based on current status
   if(['New','Sent to Factory'].includes(o.status)){
     o.status='At Depot';
-    saveOrders();updateBadges();
+    await saveOrders([o.id]);updateBadges();
     toast('🏭 Status: At Depot','info');
   } else if(o.status==='At Depot'){
     o.status='Sent to Logistics';
-    saveOrders();updateBadges();
+    await saveOrders([o.id]);updateBadges();
     toast('🚛 Status: Sent to Logistics','info');
   }
 }
 
 
-function quickMarkDepot(id){
+async function quickMarkDepot(id){
   const o=orders.find(x=>x.id===id);if(!o)return;
   o.updatedAt=Date.now();
-  o.status='At Depot';saveOrders();updateBadges();
+  o.status='At Depot';await saveOrders([o.id]);updateBadges();
   toast('✅ At Depot!','ok');
   showBarcodeResult(o,-1);
 }
@@ -12372,7 +12372,10 @@ async function saveOrders(changedOrderIds){
             console.warn('[saveOrders] remote save pending/localOnly for',o.id);
             queuedFallback=true;
           }
-        }catch(_e){ console.warn('[saveOrders] network error',_e.message); }
+        }catch(_e){
+          console.warn('[saveOrders] network error',_e&&_e.message?_e.message:_e);
+          queuedFallback=true;
+        }
       }
       // Propagate deletions too; otherwise removed orders can reappear after reload.
       for(const deletedId of deletedOrderIds){
