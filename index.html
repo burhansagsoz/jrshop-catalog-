@@ -7664,7 +7664,7 @@ let _firebasePasswordRetryAt=0;
 let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
-const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=5*60*1000;
+const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
 const UPLOAD_TIMEOUT_MS=7000;
@@ -8074,11 +8074,27 @@ function startRealtimeMaintenanceLoop(){
   if(_realtimeMetricsTimer) return;
   _realtimeMetricsTimer=setInterval(function(){
     if(!getFirebaseEnabled()) return;
-    if(!_health.firebaseConnected) return;
-    flushLocalSyncFallback().catch(function(){});
+    tryFirebaseAuthRecoveryNow().catch(function(){});
+    if(_health.firebaseConnected) flushLocalSyncFallback().catch(function(){});
   },12000);
 }
 startRealtimeMaintenanceLoop();
+
+async function tryFirebaseAuthRecoveryNow(){
+  if(!getFirebaseEnabled()) return false;
+  try{
+    await initFirebaseRealtime({silent:true,force:true});
+    if(!_firebaseAuth) return false;
+    const u=await ensureFirebaseOnlineAuth({allowAnonymous:true,ignoreRetryGuards:true});
+    if(!u) return false;
+    if(!_health.ordersRealtime || !_health.feedRealtime || !_health.dataRealtime){
+      await initFirebaseRealtime({silent:true,force:true});
+    }
+    return true;
+  }catch(_e){
+    return false;
+  }
+}
 
 function scheduleRealtimeRender(){
   if(_realtimeRenderTimer) return;
@@ -9098,7 +9114,7 @@ async function initFirebaseRealtime(opts={}){
       if(!authedUser){
         disconnectFirebaseRealtime();
         const authWait=getFirebaseAuthRetryRemainingMs();
-        _firebaseRetryAt=Date.now()+Math.max(30000,authWait);
+        _firebaseRetryAt=Date.now()+Math.max(5000,Math.min(15000,authWait||0));
         if(!silent){
           const hint=firebaseAuthHint({code:_health.authState,message:_health.lastError||''});
           toast('⚠️ Firebase auth gerekli. '+(hint?('Hint: '+hint):'Tekrar giriş yapın.'),'err');
@@ -9878,9 +9894,8 @@ async function connectFirebaseNow(){
   const waitMs=getFirebaseAuthRetryRemainingMs();
   resetHealthCounters();
   if(waitMs>0){
-    const mins=Math.max(1,Math.ceil(waitMs/60000));
     _health.authState='auth_rate_limited';
-    toast('⚠️ Firebase Email/Password geçici limitte ('+mins+' dk). Güvenli realtime mod deneniyor...','info');
+    toast('⚠️ Firebase Email/Password geçici limitte. Güvenli realtime modu deneniyor...','info');
   }
   await initFirebaseRealtime({silent:false,force:true});
 }
