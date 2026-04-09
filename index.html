@@ -11665,9 +11665,7 @@ function buildStaffAddressRows(order){
 function buildStaffAddressCopyText(order){
   if(!order) return '';
   const rows = buildStaffAddressRows(order);
-  const ref = order.ref || (order.id ? order.id.slice(-8) : '');
   const lines = [];
-  if(ref) lines.push('Order Ref: ' + ref);
   rows.forEach(function(row){
     lines.push(row.label + ': ' + row.value);
   });
