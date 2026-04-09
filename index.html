@@ -8901,7 +8901,9 @@ function disconnectFirebaseRealtime(){
   _health.firebaseConnected=false;
   _health.ordersRealtime=false;
   _health.feedRealtime=false;
-  _health.authState='signed_out';
+  _health.dataRealtime=false;
+  // Do not force signed_out here: auth watcher/auth recovery should decide current state.
+  if(_health.authState!=='anonymous') _health.authState='waiting_login';
 }
 function stopFirebaseRealtime(){
   disconnectFirebaseRealtime();
