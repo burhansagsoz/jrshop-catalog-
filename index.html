@@ -2491,7 +2491,8 @@ async function login(){
         const cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         if(cloudOrders.length){
-          orders=mergeOrdersByFreshness(localOrders,cloudOrders).map(function(o){
+          const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
+          orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
             return {
               ...o,
               status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status
@@ -2683,26 +2684,11 @@ async function rejectOrder(id){
   if(note===null)return;
   const o=orders.find(x=>x.id===id);
   if(!o){toast('⚠️ Order not found','err');return;}
-  orders=orders.filter(x=>x.id!==id);
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
-  updateBadges();renderPendingInTable();
+  const opId=createLocalMutationOpId('reject');
+  await deleteOrderWithTombstone(id,{opId,previousOrder:o});
+  updateBadges();renderPendingInTable();render();
   logActivity('status',`Order rejected: ${esc(o.ref||o.id.slice(-6))} — ${note}`,o.id);
   toast('❌ Rejected & deleted','info');
-  let removed=false;
-  try{
-    const ready=await initFirebaseRealtime({silent:true});
-    if(ready&&_firebaseDb){
-      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
-      removed=true;
-    }
-  }catch(_e){}
-  if(!removed){
-    const api=getApiBase();
-    const k=localStorage.getItem('jb_cloud_key')||'';
-    const headers={};
-    if(k) headers['Authorization']='Bearer '+k;
-    fetch(api+'/api/order/'+id,{method:'DELETE',headers}).catch(()=>{});
-  }
 }
 
 async function navOrders(status,el){
@@ -2727,7 +2713,8 @@ async function navOrders(status,el){
         if(ordRes.ok){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
-            orders=mergeOrdersByFreshness(localOrders,od.orders);
+            const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
+            orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
             localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
             updateBadges();
             loaded=true;
@@ -2738,7 +2725,8 @@ async function navOrders(status,el){
           if(res.ok){
             const {data}=await res.json();
             if(data&&Array.isArray(data.jb_orders)){
-              orders=mergeOrdersByFreshness(localOrders,data.jb_orders);
+              const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
+              orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
               localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
               updateBadges();
             }
@@ -3538,14 +3526,10 @@ async function deleteOrder(){
   const o=orders.find(x=>x.id===selId);
   if(o)logActivity('deleted',`Order deleted: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`);
   const did=selId;
-  orders=orders.filter(x=>x.id!==did);
+  await deleteOrderWithTombstone(did,{opId:createLocalMutationOpId('delete'),previousOrder:o||null});
   selId=null;
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
   closeDetail();render();updateBadges();
   toast('🗑️ Deleted','info');
-  // Delete from cloud immediately
-  const api=getApiBase();
-  fetch(api+'/api/order/'+did,{method:'DELETE',headers:getAuthHeaders()}).catch(()=>{});
 }
 
 // ── EDIT ORDER ──
@@ -4475,13 +4459,16 @@ async function sendBulkEmails(emailsStr, btn){
   clearBulkSelect();
 }
 
-function deleteBulkOrders(){
+async function deleteBulkOrders(){
   if(!_selected.size){toast('⚠️ Select orders first','err');return;}
   if(!confirm(`Delete ${_selected.size} orders? This cannot be undone.`)) return;
   
   const count = _selected.size;
-  orders = orders.filter(o => !_selected.has(o.id));
-  saveOrders();
+  const ids=[..._selected];
+  for(const id of ids){
+    const prev=(orders||[]).find(o=>o&&o.id===id)||null;
+    await deleteOrderWithTombstone(id,{opId:createLocalMutationOpId('bulkdel'),previousOrder:prev});
+  }
   clearBulkSelect();
   render();
   updateBadges();
@@ -6952,6 +6939,94 @@ async function flushLocalSyncFallback(){
   let synced=0;
   for(const [key,entry] of entries){
     try{
+      if(key==='jb_order_ops'){
+        const ops=Array.isArray(entry&&entry.value)?entry.value:[];
+        if(!ops.length){
+          clearLocalSyncFallbackKey(key);
+          continue;
+        }
+        const remaining=[];
+        for(const op of ops){
+          if(!op||!op.orderId) continue;
+          try{
+            let res=null;
+            if(op.op==='delete'){
+              res=await fetch('/api/order/'+encodeURIComponent(op.orderId),{
+                method:'DELETE',
+                headers:getAuthHeaders({'Content-Type':'application/json'}),
+                body:JSON.stringify({
+                  opId:op.opId||'',
+                  v:Number(op.v)||0,
+                  deletedAt:Number(op.deletedAt||op.ts)||Date.now(),
+                  event:op.event||null
+                })
+              });
+            }else{
+              res=await fetch('/api/order',{
+                method:'POST',
+                headers:getAuthHeaders({'Content-Type':'application/json'}),
+                body:JSON.stringify({
+                  order:op.order||null,
+                  opId:op.opId||'',
+                  v:Number(op.v)||0,
+                  event:op.event||null
+                })
+              });
+            }
+            let payload={};
+            try{payload=await res.json();}catch(_e){payload={};}
+            if(!res.ok || (payload&&payload.localOnly)){
+              remaining.push(op);
+            }else{
+              clearLocalOrderMutation(op.orderId);
+            }
+          }catch(_e){
+            remaining.push(op);
+          }
+        }
+        if(remaining.length){
+          persistLocalSyncFallback(key,remaining);
+        }else{
+          clearLocalSyncFallbackKey(key);
+          synced++;
+        }
+        continue;
+      }
+      if(key==='jb_order_events'){
+        const events=Array.isArray(entry&&entry.value)?entry.value:[];
+        if(!events.length){
+          clearLocalSyncFallbackKey(key);
+          continue;
+        }
+        let allOk=true;
+        const remaining=[];
+        for(const ev of events){
+          if(!ev||!ev.orderId) continue;
+          try{
+            const res=await fetch('/api/order-event',{
+              method:'POST',
+              headers:getAuthHeaders({'Content-Type':'application/json'}),
+              body:JSON.stringify(ev)
+            });
+            let payload={};
+            try{payload=await res.json();}catch(_e){payload={};}
+            if(!res.ok || (payload&&payload.localOnly)){
+              allOk=false;
+              remaining.push(ev);
+            }
+          }catch(_e){
+            allOk=false;
+            remaining.push(ev);
+          }
+        }
+        if(allOk){
+          clearLocalSyncFallbackKey(key);
+          synced++;
+        }else{
+          persistLocalSyncFallback(key,remaining);
+        }
+        continue;
+      }
       const res=await fetch('/api/sync',{
         method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
@@ -7072,46 +7147,22 @@ async function loadFromCloudSilent(){
       localStorage.setItem(key,JSON.stringify(data[key]));
     }
 
-    // Siparişler: sadece cloud'da YENİ olan veya DAHA YENİ olanı al
+    // Otoriter sipariş snapshot'u: realtime kapalı olsa bile cihazlar tutarlı olsun.
     const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
     const ordPayload=await ordRes.json();
     const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
-    // Guard: never treat fallback/no-data response as authoritative overwrite.
-    if((ordPayload&&ordPayload.localOnly)||!cloudOrders.length){
+    if(ordPayload&&ordPayload.localOnly){
       return false;
     }
 
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    let changed=false;
-
-    for(const co of cloudOrders){
-      const lo=localOrders.find(x=>x.id===co.id);
-      if(!lo){
-        // Yeni sipariş (başka cihazdan eklenmiş) - ekle
-        localOrders.push(co);
-        changed=true;
-      } else {
-        const cloudTime=co.updatedAt||co.ts||0;
-        const localTime=lo.updatedAt||lo.ts||0;
-        if(cloudTime > localTime){
-          // Cloud daha yeni - güncelle (başka cihazdan değiştirilmiş)
-          const idx2=localOrders.indexOf(lo);
-          localOrders[idx2]={
-            ...co,
-            products:(co.products||[]).map(p=>{
-              const lp=lo.products?.find(x=>x.name===p.name);
-              return {...p, img:p.img||(lp?.img||null), depotPhoto:p.depotPhoto||(lp?.depotPhoto||null)};
-            })
-          };
-          changed=true;
-        }
-        // Local daha yeni veya eşit → dokunma (kullanıcı az önce değiştirdi)
-      }
-    }
-
-    if(changed){
-      orders=localOrders;
+    const merged=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'silent',pruneMissing:true});
+    const finalOrders=pruneLocalOrdersAgainstRemote(merged,cloudOrders);
+    const before=JSON.stringify(Array.isArray(localOrders)?localOrders:[]);
+    const after=JSON.stringify(finalOrders);
+    if(before!==after){
+      orders=finalOrders;
       localStorage.setItem('jb_orders',JSON.stringify(orders));
       render();
     }
@@ -7160,45 +7211,19 @@ async function loadFromCloud(){
           const od=await ordRes.json();
           const isLocalOnly=!!(od&&od.localOnly);
           cloudOrders=Array.isArray(od&&od.orders)?od.orders:[];
-          if(isLocalOnly||!cloudOrders.length){
-            // Never wipe local orders on local-only/no-data responses.
-            console.warn('[Remote] Skipping merge from localOnly/empty orders payload');
+          if(isLocalOnly){
+            // Never wipe local orders on local-only responses.
+            console.warn('[Remote] Skipping merge from localOnly orders payload');
             return false;
           }
         } else {
           cloudOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
           if(!cloudOrders.length) return false;
         }
-        // Smart merge: timestamp bazlı - hangisi daha yeniyse o kazanır
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-        orders=cloudOrders.map(co=>{
-          const lo=localOrders.find(x=>x.id===co.id);
-          if(!lo){
-            // Local'de yok - cloud'dan al, status düzelt
-            return {...co, status:co.status==='At Depott'?'At Depot':co.status==='Sent to Wechat'||co.status==='Sent to WeChat'?'Sent to Factory':co.status};
-          }
-          const localTime=lo.updatedAt||lo.ts||0;
-          const cloudTime=co.updatedAt||co.ts||0;
-          // Hangisi daha yeniyse onu al
-          const winner = localTime >= cloudTime ? lo : co;
-          const loser  = localTime >= cloudTime ? co : lo;
-          return {
-            ...winner,
-            status:winner.status==='At Depott'?'At Depot':winner.status==='Sent to Wechat'||winner.status==='Sent to WeChat'?'Sent to Factory':winner.status,
-            products:(winner.products||[]).map(p=>{
-              const lp=lo.products?.find(x=>x.name===p.name);
-              const cp=co.products?.find(x=>x.name===p.name);
-              return {...p,
-                img:p.img||(lp?.img||cp?.img||null),
-                depotPhoto:p.depotPhoto||(lp?.depotPhoto||cp?.depotPhoto||null)
-              };
-            })
-          };
-        });
-        // Keep local-only orders (not yet synced to cloud)
-        // Preserve ALL local orders not in cloud - they may not have been synced yet
-        const localOnly=localOrders.filter(lo=>!orders.find(o=>o.id===lo.id));
-        orders=[...orders,...localOnly];
+        // Server-authoritative merge: prune missing remote IDs except recent local mutations.
+        orders=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'load',pruneMissing:true});
+        orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
         localStorage.setItem('jb_orders',JSON.stringify(orders));
         // Reload variables from localStorage
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
@@ -7297,10 +7322,12 @@ const FIREBASE_COLLECTION_MEDIA='media';
 const FIREBASE_COLLECTION_CATALOG_ORDERS='catalog_orders';
 const FIREBASE_COLLECTION_AUDIT='audit_logs';
 const FIREBASE_COLLECTION_USER_ROLES='user_roles';
+const FIREBASE_COLLECTION_ORDER_EVENTS='order_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
+const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
@@ -7346,6 +7373,136 @@ function ensureFirebaseConfigDefaults(){
   }
 }
 ensureFirebaseConfigDefaults();
+
+function readLocalOrderMutations(){
+  try{
+    const raw=localStorage.getItem(LOCAL_MUTATION_TS_KEY);
+    const map=raw?JSON.parse(raw):{};
+    return map&&typeof map==='object'?map:{};
+  }catch(_e){
+    return {};
+  }
+}
+function writeLocalOrderMutations(map){
+  try{localStorage.setItem(LOCAL_MUTATION_TS_KEY,JSON.stringify(map||{}));}catch(_e){}
+}
+function cleanupLocalOrderMutations(map){
+  const src=map&&typeof map==='object'?{...map}:readLocalOrderMutations();
+  const now=Date.now();
+  let changed=false;
+  Object.keys(src).forEach(function(id){
+    const row=src[id]||{};
+    const ts=Number(row.ts)||0;
+    if(!ts || (now-ts)>=LOCAL_ORDER_MUTATION_KEEP_MS){
+      delete src[id];
+      changed=true;
+    }
+  });
+  if(changed) writeLocalOrderMutations(src);
+  return src;
+}
+function getActiveLocalOrderMutationIds(){
+  const map=cleanupLocalOrderMutations();
+  return Object.keys(map);
+}
+function createLocalMutationOpId(prefix){
+  return `${prefix||'ord'}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
+}
+function markLocalOrderMutation(orderId,type,meta={}){
+  if(!orderId) return;
+  const map=readLocalOrderMutations();
+  map[String(orderId)]={
+    type:type||'upsert',
+    ts:Date.now(),
+    opId:meta.opId||'',
+    v:Number(meta.v)||0
+  };
+  writeLocalOrderMutations(map);
+}
+function clearLocalOrderMutation(orderId){
+  if(!orderId) return;
+  const map=readLocalOrderMutations();
+  if(!Object.prototype.hasOwnProperty.call(map,String(orderId))) return;
+  delete map[String(orderId)];
+  writeLocalOrderMutations(map);
+}
+function hasActiveLocalOrderMutation(orderId){
+  if(!orderId) return false;
+  const map=cleanupLocalOrderMutations();
+  const row=map[String(orderId)];
+  if(!row) return false;
+  const ts=Number(row.ts)||0;
+  return (Date.now()-ts) < LOCAL_ORDER_MUTATION_KEEP_MS;
+}
+function getOrderVersion(order){
+  return Math.max(0,Number(order&&order.v)||0);
+}
+function nextOrderVersion(currentOrder,previousOrder){
+  return Math.max(getOrderVersion(currentOrder),getOrderVersion(previousOrder))+1;
+}
+function buildOrderEvent(op,orderId,meta={}){
+  const id=String(orderId||'').trim();
+  const ts=Number(meta.ts)||Date.now();
+  const opId=String(meta.opId||createLocalMutationOpId(op||'evt'));
+  return {
+    id:'evt_'+opId,
+    orderId:id,
+    op:String(op||'upsert'),
+    ts,
+    actor:meta.actor||(me&&me.email?me.email:'system'),
+    opId,
+    v:Math.max(0,Number(meta.v)||0),
+    source:meta.source||'client'
+  };
+}
+function queueOrderEventFallback(event){
+  if(!event||!event.orderId) return;
+  const q=readLocalSyncFallback();
+  const arr=Array.isArray((q['jb_order_events']&&q['jb_order_events'].value))?q['jb_order_events'].value:[];
+  const key=String(event.opId||event.id||'');
+  const dedup=arr.filter(ev=>String(ev&& (ev.opId||ev.id||''))!==key);
+  dedup.push(event);
+  persistLocalSyncFallback('jb_order_events',dedup);
+}
+function queueOrderOpFallback(op){
+  if(!op||!op.orderId) return;
+  const q=readLocalSyncFallback();
+  const arr=Array.isArray((q['jb_order_ops']&&q['jb_order_ops'].value))?q['jb_order_ops'].value:[];
+  const opId=String(op.opId||'');
+  const dedup=opId?arr.filter(function(row){return String(row&&row.opId||'')!==opId;}):arr.slice();
+  dedup.push(op);
+  persistLocalSyncFallback('jb_order_ops',dedup);
+}
+function ackLocalMutationsFromIncoming(incomingOrders){
+  const map=cleanupLocalOrderMutations();
+  if(!Object.keys(map).length) return;
+  let changed=false;
+  for(const incoming of (incomingOrders||[])){
+    if(!incoming||!incoming.id) continue;
+    const id=String(incoming.id);
+    const row=map[id];
+    if(!row) continue;
+    const incomingV=Math.max(0,Number(incoming.v)||0);
+    const rowV=Math.max(0,Number(row.v)||0);
+    const incomingTs=Number(incoming.updatedAt||incoming.ts||0);
+    const rowTs=Number(row.ts)||0;
+    if((incomingV&&incomingV>=rowV) || (!incomingV && incomingTs>=rowTs)){
+      delete map[id];
+      changed=true;
+    }
+  }
+  if(changed) writeLocalOrderMutations(map);
+}
+function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
+  const local=Array.isArray(localOrders)?localOrders:[];
+  const remote=Array.isArray(remoteOrders)?remoteOrders:[];
+  const remoteIds=new Set(remote.filter(o=>o&&o.id).map(o=>String(o.id)));
+  return local.filter(function(o){
+    if(!o||!o.id) return false;
+    if(remoteIds.has(String(o.id))) return true;
+    return hasActiveLocalOrderMutation(o.id);
+  });
+}
 
 function markSync(source){
   _health.lastSyncAt=Date.now();
@@ -7483,6 +7640,68 @@ function firebaseAuthStateHint(state){
 function firebaseDocToOrder(doc){
   const data=doc.data()||{};
   return {...data,id:data.id||doc.id,status:normalizeStatus(data.status)};
+}
+
+function getLiveOrdersOnly(list){
+  return (Array.isArray(list)?list:[]).filter(function(order){
+    return order && order.id && !isOrderDeleted(order);
+  });
+}
+
+function isOrderDeleted(order){
+  return !!(order && order.deletedAt);
+}
+
+function applyOrderDeleteLocally(orderId,deletedAt){
+  const id=String(orderId||'').trim();
+  if(!id) return null;
+  const ts=Number(deletedAt)||Date.now();
+  orders=(orders||[]).filter(function(o){return o&&o.id!==id;});
+  persistOrdersLocalSafe(orders);
+  return {id,status:'Deleted',deletedAt:ts,updatedAt:ts};
+}
+
+async function deleteOrderWithTombstone(orderId,meta={}){
+  const id=String(orderId||'').trim();
+  if(!id) return false;
+  const ts=Number(meta.ts)||Date.now();
+  const previous=meta.previousOrder||((Array.isArray(orders)?orders:[]).find(o=>o&&o.id===id))||null;
+  const v=Math.max(1,Number(meta.v)||nextOrderVersion(null,previous));
+  const opId=String(meta.opId||createLocalMutationOpId('delete'));
+  const event=buildOrderEvent('delete',id,{opId,v,ts,source:'client'});
+  markLocalOrderMutation(id,'delete',{opId,v});
+  applyOrderDeleteLocally(id,ts);
+  const api=getApiBase();
+  let acked=false;
+  let staleIgnored=false;
+  try{
+    const res=await fetch(api+'/api/order/'+encodeURIComponent(id),{
+      method:'DELETE',
+      headers:getAuthHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({opId,v,deletedAt:ts,event})
+    });
+    let payload={};
+    try{payload=await res.json();}catch(_e){payload={};}
+    acked=!!(res.ok && !(payload&&payload.localOnly));
+    staleIgnored=!!(payload&&payload.staleIgnored);
+  }catch(_e){
+    acked=false;
+  }
+  if(acked||staleIgnored){
+    clearLocalOrderMutation(id);
+  }else{
+    queueOrderOpFallback({
+      op:'delete',
+      orderId:id,
+      opId,
+      v,
+      ts,
+      deletedAt:ts,
+      event
+    });
+    queueOrderEventFallback(event);
+  }
+  return true;
 }
 
 function loadScriptOnce(src){
@@ -7937,29 +8156,53 @@ function sanitizeOrderForRemote(order){
   return clean;
 }
 
-function mergeOrdersByFreshness(localOrders,incomingOrders){
-  const byId=new Map((localOrders||[]).map(o=>[o.id,{...o,status:normalizeStatus(o.status)}]));
+function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
+  const preservePendingLocalIds=new Set(Array.isArray(opts.preservePendingLocalIds)?opts.preservePendingLocalIds:[]);
+  const source=String(opts.source||'');
+  const pruneMissing=!!opts.pruneMissing;
+  const byId=new Map((localOrders||[]).filter(o=>o&&o.id).map(o=>[String(o.id),{...o,status:normalizeStatus(o.status)}]));
   for(const incoming of (incomingOrders||[])){
     if(!incoming||!incoming.id) continue;
-    const cleanIncoming={...incoming,status:normalizeStatus(incoming.status)};
+    const cleanIncoming={...incoming,id:String(incoming.id),status:normalizeStatus(incoming.status)};
     const local=byId.get(cleanIncoming.id);
     if(!local){
       byId.set(cleanIncoming.id,cleanIncoming);
       continue;
     }
-    const incomingTs=cleanIncoming.updatedAt||cleanIncoming.ts||0;
-    const localTs=local.updatedAt||local.ts||0;
-    if(incomingTs>=localTs){
+    const incomingV=Math.max(0,Number(cleanIncoming.v)||0);
+    const localV=Math.max(0,Number(local.v)||0);
+    const incomingTs=Number(cleanIncoming.updatedAt||cleanIncoming.ts||0);
+    const localTs=Number(local.updatedAt||local.ts||0);
+    const incomingDeleted=!!cleanIncoming.deletedAt;
+    const localDeleted=!!local.deletedAt;
+    const incomingWins=incomingV>localV || (incomingV===localV && incomingTs>=localTs);
+    if(incomingWins){
       byId.set(cleanIncoming.id,{
         ...cleanIncoming,
-        products:(cleanIncoming.products||[]).map(p=>{
+        products:incomingDeleted?[]:(cleanIncoming.products||[]).map(p=>{
           const lp=(local.products||[]).find(x=>x.name===p.name);
           return {...p,img:p.img||(lp&&lp.img)||null,depotPhoto:p.depotPhoto||(lp&&lp.depotPhoto)||null};
         })
       });
+    }else if(localDeleted && !incomingDeleted && incomingV===localV && incomingTs>localTs){
+      // Safety: if same version but fresher non-deleted payload arrives, allow recovery.
+      byId.set(cleanIncoming.id,cleanIncoming);
     }
   }
-  return [...byId.values()].sort((a,b)=>(b.ts||0)-(a.ts||0));
+  let merged=[...byId.values()];
+  if(pruneMissing){
+    const incomingIds=new Set((incomingOrders||[]).filter(o=>o&&o.id).map(o=>String(o.id)));
+    merged=merged.filter(function(o){
+      if(!o||!o.id) return false;
+      if(incomingIds.has(String(o.id))) return true;
+      if(preservePendingLocalIds.has(String(o.id))) return true;
+      if(hasActiveLocalOrderMutation(o.id)) return true;
+      return false;
+    });
+  }
+  return merged
+    .filter(o=>o&&o.id&&!isOrderDeleted(o))
+    .sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0));
 }
 
 function disconnectFirebaseRealtime(){
@@ -8064,10 +8307,12 @@ async function initFirebaseRealtime(opts={}){
       }
       if(_firebaseUnsubOrders){try{_firebaseUnsubOrders();}catch(e){}}
       _firebaseUnsubOrders=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).onSnapshot(snap=>{
-        const incoming=snap.docs.map(firebaseDocToOrder);
-        const merged=mergeOrdersByFreshness(orders,incoming);
-        orders=merged;
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        const incomingRaw=snap.docs.map(firebaseDocToOrder);
+        ackLocalMutationsFromIncoming(incomingRaw);
+        const incomingLive=getLiveOrdersOnly(incomingRaw);
+        const merged=mergeOrdersByFreshness(orders,incomingLive,{source:'realtime',pruneMissing:true});
+        orders=pruneLocalOrdersAgainstRemote(merged,incomingLive);
+        localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
         _health.ordersRealtime=true;
         markSync('orders_snapshot');
         if(me){
@@ -8149,8 +8394,12 @@ async function writeFirebaseDataMap(map){
 }
 async function readFirebaseOrders(){
   const snap=await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).get();
-  const list=snap.docs.map(firebaseDocToOrder);
-  return list.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const list=getLiveOrdersOnly(snap.docs.map(firebaseDocToOrder));
+  return list.sort((a,b)=>{
+    const bt=Number(b.updatedAt||b.ts)||0;
+    const at=Number(a.updatedAt||a.ts)||0;
+    return bt-at;
+  });
 }
 async function saveMediaToFirebase(data,type){
   const id='m'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
@@ -8341,6 +8590,17 @@ async function handleFirebaseApiRequest(url,method,body){
       if(key==='jb_orders'&&Array.isArray(value)){
         await pushOrdersToFirebase([...(value||[])]);
         await deleteFirebaseDataKey('jb_orders');
+      }else if(key==='jb_order_events'&&Array.isArray(value)){
+        for(const ev of value){
+          if(!ev||!ev.orderId) continue;
+          const opId=String(ev.opId||ev.id||createLocalMutationOpId('evt'));
+          await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(opId).set({
+            ...ev,
+            opId,
+            ts:Number(ev.ts)||Date.now(),
+            savedAt:Date.now()
+          },{merge:true});
+        }
       }else{
         await writeFirebaseDataKey(key,value);
       }
@@ -8353,49 +8613,152 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path==='/api/orders'&&m==='GET'){
     if(firebaseOnline){
       try{
-        const remoteOrders=await readFirebaseOrders();
+        const remoteOrders=getLiveOrdersOnly(await readFirebaseOrders());
         writeLocalJson('jb_orders',remoteOrders);
         return jsonApiResponse({orders:remoteOrders});
       }catch(err){
         markError(err);
       }
     }
-    return jsonApiResponse({orders:readLocalOrders(),localOnly:true});
+    return jsonApiResponse({orders:getLiveOrdersOnly(readLocalOrders()),localOnly:true});
   }
   if(path==='/api/order'&&m==='POST'){
     const order=req&&req.order;
     if(!order||!order.id) return jsonApiResponse({error:'order missing'},400);
-    const localOrder=sanitizeOrderForRemote(order);
-    upsertLocalOrder(localOrder);
-    orders=mergeOrdersByFreshness(orders,[localOrder]);
-    // Overwrite the whole document so removed fields (e.g. pendingApproval) are actually deleted.
-    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
+    const id=String(order.id);
+    const previous=(orders||[]).find(o=>o&&String(o.id)===id)||null;
+    const opId=String((req&&req.opId)||order.opId||createLocalMutationOpId('upsert'));
+    const requestedV=Math.max(0,Number((req&&req.v)||order.v)||0);
+    const v=Math.max(1,requestedV||nextOrderVersion(order,previous));
+    const ts=Number(order.updatedAt||order.ts)||Date.now();
+    const deletedAt=Number(order.deletedAt)||0;
+    const localOrder=sanitizeOrderForRemote({
+      ...order,
+      id,
+      v,
+      opId,
+      lastOpId:opId,
+      updatedAt:ts,
+      ts:Number(order.ts)||ts,
+      deletedAt:deletedAt||undefined,
+      status:deletedAt?'Deleted':normalizeStatus(order.status||'New'),
+      products:deletedAt?[]:(order.products||[])
+    });
+    if(deletedAt){
+      applyOrderDeleteLocally(id,deletedAt||ts);
+    }else{
+      orders=mergeOrdersByFreshness(orders,[localOrder],{source:'api_upsert'});
+      localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+    }
+    const event=(req&&req.event&&typeof req.event==='object')
+      ? {...req.event,orderId:id,opId:String(req.event.opId||opId),v,ts:Number(req.event.ts)||ts}
+      : buildOrderEvent(deletedAt?'delete':'upsert',id,{opId,v,ts,source:'api'});
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
     try{
-      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(order.id).set(localOrder);
-      writeAuditEvent('order_upsert',{orderId:order.id,status:order.status||'',source:'api'}).catch(()=>{});
-      return jsonApiResponse({ok:true});
+      const ref=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id);
+      const prevSnap=await ref.get();
+      const prevData=prevSnap.exists?firebaseDocToOrder(prevSnap):null;
+      const prevV=Math.max(0,Number(prevData&&prevData.v)||0);
+      const prevOpId=String(prevData&&prevData.lastOpId||'');
+      const prevUpdated=Number(prevData&&prevData.updatedAt||0);
+      if(opId && prevOpId===opId){
+        return jsonApiResponse({ok:true,idempotent:true,ackV:prevV||v,opId});
+      }
+      if(prevV>v || (prevV===v && prevUpdated>ts)){
+        return jsonApiResponse({ok:true,staleIgnored:true,ackV:prevV,opId:prevOpId||opId});
+      }
+      await ref.set(localOrder);
+      const evId=String(event.opId||event.id||opId);
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(evId).set({
+        ...event,
+        id:event.id||('evt_'+evId),
+        orderId:id,
+        opId:evId,
+        v,
+        ts:Number(event.ts)||ts,
+        savedAt:Date.now()
+      },{merge:true});
+      writeAuditEvent(deletedAt?'order_tombstone':'order_upsert',{orderId:id,status:localOrder.status||'',source:'api',v,opId}).catch(()=>{});
+      return jsonApiResponse({ok:true,ackV:v,opId});
     }catch(err){
       markError(err);
-      return jsonApiResponse({ok:true,localOnly:true});
+      return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
     }
   }
   if(path.startsWith('/api/order/')&&m==='DELETE'){
-    const id=path.split('/').pop();
-    if(id){
-      deleteLocalOrder(id);
-      orders=(orders||[]).filter(o=>o&&o.id!==id);
-    }
-    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true});
-    if(id){
-      try{
-        await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id).delete();
-        writeAuditEvent('order_delete',{orderId:id,source:'api'}).catch(()=>{});
-      }catch(err){
-        markError(err);
-        return jsonApiResponse({ok:true,localOnly:true});
+    const id=String(path.split('/').pop()||'');
+    if(!id) return jsonApiResponse({error:'order id missing'},400);
+    const previous=(orders||[]).find(o=>o&&String(o.id)===id)||null;
+    const ts=Number((req&&req.deletedAt)||Date.now())||Date.now();
+    const opId=String((req&&req.opId)||createLocalMutationOpId('delete'));
+    const v=Math.max(1,Number((req&&req.v)||0)||nextOrderVersion(null,previous));
+    const tombstone={
+      id,
+      status:'Deleted',
+      deletedAt:ts,
+      updatedAt:ts,
+      ts:previous&&previous.ts?previous.ts:ts,
+      v,
+      opId,
+      lastOpId:opId
+    };
+    applyOrderDeleteLocally(id,ts);
+    const event=(req&&req.event&&typeof req.event==='object')
+      ? {...req.event,orderId:id,opId:String(req.event.opId||opId),v,ts:Number(req.event.ts)||ts}
+      : buildOrderEvent('delete',id,{opId,v,ts,source:'api'});
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
+    try{
+      const ref=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(id);
+      const prevSnap=await ref.get();
+      const prevData=prevSnap.exists?firebaseDocToOrder(prevSnap):null;
+      const prevV=Math.max(0,Number(prevData&&prevData.v)||0);
+      const prevOpId=String(prevData&&prevData.lastOpId||'');
+      const prevDeletedAt=Number(prevData&&prevData.deletedAt||0);
+      if(opId && prevOpId===opId){
+        return jsonApiResponse({ok:true,idempotent:true,ackV:prevV||v,opId});
       }
+      if(prevV>v || (prevV===v && prevDeletedAt>=ts)){
+        return jsonApiResponse({ok:true,staleIgnored:true,ackV:prevV,opId:prevOpId||opId});
+      }
+      await ref.set(tombstone);
+      const evId=String(event.opId||event.id||opId);
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(evId).set({
+        ...event,
+        id:event.id||('evt_'+evId),
+        orderId:id,
+        opId:evId,
+        v,
+        ts:Number(event.ts)||ts,
+        savedAt:Date.now()
+      },{merge:true});
+      writeAuditEvent('order_tombstone',{orderId:id,source:'api',v,opId}).catch(()=>{});
+      return jsonApiResponse({ok:true,ackV:v,opId});
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,localOnly:true,ackV:v,opId});
     }
-    return jsonApiResponse({ok:true});
+  }
+  if(path==='/api/order-event'&&m==='POST'){
+    const event=req&&req.event?req.event:req;
+    if(!event||!event.orderId) return jsonApiResponse({error:'event missing'},400);
+    const opId=String(event.opId||event.id||createLocalMutationOpId('evt'));
+    const payload={
+      ...event,
+      id:event.id||('evt_'+opId),
+      opId,
+      orderId:String(event.orderId),
+      ts:Number(event.ts)||Date.now(),
+      v:Math.max(0,Number(event.v)||0),
+      savedAt:Date.now()
+    };
+    if(!firebaseOnline) return jsonApiResponse({ok:true,localOnly:true,opId});
+    try{
+      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDER_EVENTS).doc(opId).set(payload,{merge:true});
+      return jsonApiResponse({ok:true,opId});
+    }catch(err){
+      markError(err);
+      return jsonApiResponse({ok:true,localOnly:true,opId});
+    }
   }
   if(path==='/api/image'&&m==='POST'){
     if(firebaseOnline){
@@ -9084,13 +9447,13 @@ function quickAdvance(id){
   playSound('success');
   toast(`✅ ${esc(o.name)} → ${next}`,'ok');
 }
-function quickDelete(id){
+async function quickDelete(id){
   if(!confirm('Bu siparişi sil?'))return;
   const o=orders.find(x=>x.id===id);
   if(o) logActivity('deleted',`Order deleted: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`);
-  orders=orders.filter(x=>x.id!==id);
+  await deleteOrderWithTombstone(id,{opId:createLocalMutationOpId('quickdel'),previousOrder:o||null});
   if(selId===id){selId=null;closeDetail();}
-  saveOrders();render();updateBadges();
+  render();updateBadges();
   toast('🗑️ Deleteindi','info');
 }
 function duplicateOrder(id){
@@ -9139,22 +9502,24 @@ async function startPendingPoll(){
         if(ordRes.ok){const od=await ordRes.json();newOrders=od.orders||[];}
         else{newOrders=data.jb_orders||[];}
       }catch{newOrders=data.jb_orders||[];}
-      if(newOrders.length){
+      if(Array.isArray(newOrders)){
         if(me.role==='Reseller'){
           // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
           const prevOrders=Array.isArray(orders)?orders:[];
           const myOld=prevOrders.filter(o=>o.resellerId===me.id);
-          let mergedOrders=mergeOrdersByFreshness(prevOrders,newOrders);
           const nowTs=Date.now();
           const recentLocalPending=myOld.filter(o=>
             o&&o.id&&o.pendingApproval&&!o.rejected&&
             !newOrders.find(n=>n&&n.id===o.id)&&
             (nowTs-((o.updatedAt||o.ts||0)))<RESELLER_PENDING_LOCAL_GRACE_MS
           );
-          if(recentLocalPending.length){
-            mergedOrders=mergeOrdersByFreshness(mergedOrders,recentLocalPending);
-          }
-          orders=mergedOrders;
+          const preserveIds=recentLocalPending.map(o=>String(o.id));
+          const mergedOrders=mergeOrdersByFreshness(prevOrders,newOrders,{
+            source:'poll_reseller',
+            pruneMissing:true,
+            preservePendingLocalIds:preserveIds
+          });
+          orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
           persistOrdersLocalSafe(orders);
           const myNew=orders.filter(o=>o.resellerId===me.id);
           // Detect status changes
@@ -9173,25 +9538,11 @@ async function startPendingPoll(){
             }
           });
         } else {
-          // For admin/staff: smart merge — preserve local status changes
+          // For admin/staff use server-authoritative merge with local-mutation grace.
           const oldPending=orders.filter(o=>o.pendingApproval).length;
           const newPending=newOrders.filter(o=>o.pendingApproval).length;
-          const now=Date.now();
-          // Merge: for each cloud order, if local version has different status and was updated recently, keep local
-          const mergedOrders=newOrders.map(cloudOrder=>{
-            const localOrder=orders.find(o=>o.id===cloudOrder.id);
-            if(!localOrder)return cloudOrder;
-            // If local was updated in last 60 seconds and has different status, keep local
-            const localUpdated=localOrder.updatedAt||localOrder.ts||0;
-            const cloudUpdated=cloudOrder.updatedAt||cloudOrder.ts||0;
-            if(localUpdated>cloudUpdated){
-              return localOrder; // local is newer, keep it
-            }
-            return cloudOrder;
-          });
-          // Also keep local-only orders (not yet in cloud)
-          const localOnly=orders.filter(o=>!newOrders.find(n=>n.id===o.id)&&(now-o.ts)<30000);
-          orders=[...mergedOrders,...localOnly];
+          const mergedOrders=mergeOrdersByFreshness(orders,newOrders,{source:'poll_admin',pruneMissing:true});
+          orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
           localStorage.setItem('jb_orders',JSON.stringify(orders));
           updateBadges();
           if(newPending>oldPending){
@@ -12349,58 +12700,142 @@ async function saveOrders(changedOrderIds){
     }));
   }
   try{
-    // Keep per-order updatedAt so merge logic can resolve conflicts correctly.
-      orders=orders.map(o=>({...o,status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status,updatedAt:o.updatedAt||o.ts||Date.now()}));
-      // Save to localStorage (cache)
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
-      // Write changed orders through Firebase bridge.
-      const api=getApiBase();
-      let queuedFallback=false;
-      for(const o of targetOrders){
-        const clean={...o,products:(o.products||[]).map(p=>({...p,
-          img:p.img||null,
-          depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
-        }))};
-        try{
-          const _sr=await fetch(api+'/api/order',{method:'POST',
-            headers:getAuthHeaders({'Content-Type':'application/json'}),
-            body:JSON.stringify({order:clean})
-          });
-          let _payload={};
-          try{_payload=await _sr.json();}catch(_e){_payload={};}
-          if(!_sr.ok || (_payload&&_payload.localOnly)){
-            console.warn('[saveOrders] remote save pending/localOnly for',o.id);
-            queuedFallback=true;
-          }
-        }catch(_e){
-          console.warn('[saveOrders] network error',_e&&_e.message?_e.message:_e);
-          queuedFallback=true;
+    orders=orders.map(function(o){
+      if(!o||!o.id) return o;
+      const prev=prevById.get(o.id)||null;
+      const isChanged=changedSet.has(o.id);
+      const updatedAt=Number(o.updatedAt||o.ts||nowTs)||nowTs;
+      const nextV=isChanged?nextOrderVersion(o,prev):Math.max(1,Number(o.v)||Number(prev&&prev.v)||1);
+      return {
+        ...o,
+        status:normalizeStatus(o.status),
+        updatedAt,
+        ts:Number(o.ts)||updatedAt,
+        v:nextV
+      };
+    }).filter(o=>o&&o.id&&!isOrderDeleted(o));
+    localStorage.setItem('jb_orders',JSON.stringify(orders));
+
+    const api=getApiBase();
+    let queuedFallback=false;
+
+    for(const o of targetOrders){
+      const live=(orders||[]).find(x=>x&&x.id===o.id);
+      if(!live) continue;
+      const opId=createLocalMutationOpId('upsert');
+      live.opId=opId;
+      live.lastOpId=opId;
+      const v=Math.max(1,Number(live.v)||nextOrderVersion(live,prevById.get(live.id)||null));
+      live.v=v;
+      markLocalOrderMutation(live.id,'upsert',{opId,v});
+      const event=buildOrderEvent('upsert',live.id,{opId,v,ts:Number(live.updatedAt)||nowTs,source:'client'});
+      const clean=sanitizeOrderForRemote({
+        ...live,
+        id:String(live.id),
+        updatedAt:Number(live.updatedAt)||nowTs,
+        ts:Number(live.ts)||Number(live.updatedAt)||nowTs,
+        v,
+        opId,
+        lastOpId:opId
+      });
+      try{
+        const _sr=await fetch(api+'/api/order',{method:'POST',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({order:clean,opId,v,event})
+        });
+        let _payload={};
+        try{_payload=await _sr.json();}catch(_e){_payload={};}
+        if(_payload&&Number(_payload.ackV)>v){
+          live.v=Number(_payload.ackV);
         }
-      }
-      // Propagate deletions too; otherwise removed orders can reappear after reload.
-      for(const deletedId of deletedOrderIds){
-        try{
-          const _dr=await fetch(api+'/api/order/'+encodeURIComponent(deletedId),{
-            method:'DELETE',
-            headers:getAuthHeaders()
-          });
-          let _payload={};
-          try{_payload=await _dr.json();}catch(_e){_payload={};}
-          if(!_dr.ok || (_payload&&_payload.localOnly)){
-            console.warn('[saveOrders] remote delete pending/localOnly for',deletedId);
-            queuedFallback=true;
-          }
-        }catch(_e){
-          console.warn('[saveOrders] delete network error',_e.message);
-          queuedFallback=true;
+        if(_payload&&_payload.staleIgnored){
+          clearLocalOrderMutation(live.id);
+          continue;
         }
+        if(!_sr.ok || (_payload&&_payload.localOnly)){
+          queuedFallback=true;
+          queueOrderOpFallback({
+            op:'upsert',
+            orderId:live.id,
+            opId,
+            v,
+            ts:Number(clean.updatedAt)||nowTs,
+            order:clean,
+            event
+          });
+          queueOrderEventFallback(event);
+        }else{
+          clearLocalOrderMutation(live.id);
+        }
+      }catch(_e){
+        queuedFallback=true;
+        queueOrderOpFallback({
+          op:'upsert',
+          orderId:live.id,
+          opId,
+          v,
+          ts:Number(clean.updatedAt)||nowTs,
+          order:clean,
+          event
+        });
+        queueOrderEventFallback(event);
       }
-      if(queuedFallback) persistLocalSyncFallback('jb_orders',orders);
-      if(getFirebaseEnabled()){
-        pushOrdersToFirebase([...(targetOrders||[])]).catch(function(_e){ console.warn('[saveOrders][firebase]', _e&&_e.message?_e.message:_e); });
+    }
+
+    for(const deletedId of deletedOrderIds){
+      const prev=prevById.get(deletedId)||null;
+      const opId=createLocalMutationOpId('delete');
+      const v=Math.max(1,nextOrderVersion(null,prev));
+      const deletedAt=nowTs;
+      markLocalOrderMutation(deletedId,'delete',{opId,v});
+      const event=buildOrderEvent('delete',deletedId,{opId,v,ts:deletedAt,source:'client'});
+      try{
+        const _dr=await fetch(api+'/api/order/'+encodeURIComponent(deletedId),{
+          method:'DELETE',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({opId,v,deletedAt,event})
+        });
+        let _payload={};
+        try{_payload=await _dr.json();}catch(_e){_payload={};}
+        if(_payload&&_payload.staleIgnored){
+          clearLocalOrderMutation(deletedId);
+          continue;
+        }
+        if(!_dr.ok || (_payload&&_payload.localOnly)){
+          queuedFallback=true;
+          queueOrderOpFallback({
+            op:'delete',
+            orderId:deletedId,
+            opId,
+            v,
+            ts:deletedAt,
+            deletedAt,
+            event
+          });
+          queueOrderEventFallback(event);
+        }else{
+          clearLocalOrderMutation(deletedId);
+        }
+      }catch(_e){
+        queuedFallback=true;
+        queueOrderOpFallback({
+          op:'delete',
+          orderId:deletedId,
+          opId,
+          v,
+          ts:deletedAt,
+          deletedAt,
+          event
+        });
+        queueOrderEventFallback(event);
       }
-      markSync('orders_save');
-      writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system'}).catch(()=>{});
+    }
+    if(queuedFallback){
+      console.warn('[saveOrders] queued order events for retry');
+    }
+    localStorage.setItem('jb_orders',JSON.stringify(orders));
+    markSync('orders_save');
+    writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
   } catch(e) {
     console.error('[saveOrders]', e);
   }
