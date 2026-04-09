@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JRSHOP ERP Sandbox Preview</title>
+  <style>
+    :root{
+      --bg:#0b1220;
+      --card:#101a2d;
+      --card2:#13213a;
+      --text:#e7edf9;
+      --muted:#9fb0d1;
+      --line:#243553;
+      --accent:#f97316;
+      --ok:#22c55e;
+      --warn:#f59e0b;
+      --err:#ef4444;
+      --info:#38bdf8;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      color:var(--text);
+      background:linear-gradient(180deg,#0a1120 0%,#0d1728 100%);
+    }
+    .wrap{
+      max-width:1300px;
+      margin:0 auto;
+      padding:20px 16px 30px;
+    }
+    .top{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px;
+      display:flex;
+      gap:12px;
+      align-items:center;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .title{
+      font-size:18px;
+      font-weight:800;
+      letter-spacing:.2px;
+    }
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:4px 9px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:700;
+    }
+    .dot{
+      width:8px;height:8px;border-radius:50%;
+      background:var(--ok);
+      box-shadow:0 0 0 3px rgba(34,197,94,.2);
+    }
+    .note{
+      margin-top:10px;
+      padding:10px 12px;
+      border-radius:10px;
+      background:rgba(56,189,248,.08);
+      border:1px solid rgba(56,189,248,.28);
+      color:#b7e8ff;
+      font-size:13px;
+      line-height:1.45;
+    }
+    .grid{
+      margin-top:14px;
+      display:grid;
+      grid-template-columns:repeat(12,minmax(0,1fr));
+      gap:12px;
+    }
+    .card{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+      min-height:130px;
+    }
+    .h{
+      margin:0 0 8px;
+      font-size:13px;
+      font-weight:800;
+      color:#d8e5ff;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+    }
+    .muted{color:var(--muted);font-size:12px}
+    .row{display:flex;gap:8px;align-items:center}
+    .kpi{
+      display:grid;
+      grid-template-columns:repeat(4,minmax(0,1fr));
+      gap:8px;
+    }
+    .kpi div{
+      background:var(--card2);
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:8px;
+    }
+    .kpi .v{font-size:18px;font-weight:800}
+    .kpi .l{font-size:11px;color:var(--muted);margin-top:2px}
+    button,input,select{
+      background:#0f1930;
+      color:var(--text);
+      border:1px solid var(--line);
+      border-radius:9px;
+      padding:7px 9px;
+      font-size:12px;
+    }
+    button{cursor:pointer;font-weight:700}
+    button.primary{background:rgba(249,115,22,.15);border-color:rgba(249,115,22,.42);color:#ffd7bb}
+    button.ok{background:rgba(34,197,94,.14);border-color:rgba(34,197,94,.4);color:#c8ffd8}
+    button.warn{background:rgba(245,158,11,.15);border-color:rgba(245,158,11,.35);color:#ffe0a6}
+    .list{display:flex;flex-direction:column;gap:6px;max-height:230px;overflow:auto}
+    .item{
+      background:var(--card2);
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:8px;
+      font-size:12px;
+    }
+    .pill{
+      font-size:10px;
+      border-radius:999px;
+      padding:2px 7px;
+      border:1px solid var(--line);
+      color:var(--muted);
+      background:#111d36;
+    }
+    .pill.unread{color:#ffd7bb;border-color:rgba(249,115,22,.38);background:rgba(249,115,22,.12)}
+    .pill.ok{color:#c6fbd4;border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.12)}
+    .pill.warn{color:#ffe2ab;border-color:rgba(245,158,11,.45);background:rgba(245,158,11,.12)}
+    table{
+      width:100%;
+      border-collapse:collapse;
+      font-size:12px;
+    }
+    th,td{
+      border-bottom:1px solid var(--line);
+      text-align:left;
+      padding:7px 5px;
+      vertical-align:top;
+    }
+    th{color:var(--muted);font-weight:700;font-size:11px}
+    .small{font-size:11px;color:var(--muted)}
+    .col-12{grid-column:span 12}
+    .col-8{grid-column:span 8}
+    .col-7{grid-column:span 7}
+    .col-6{grid-column:span 6}
+    .col-5{grid-column:span 5}
+    .col-4{grid-column:span 4}
+    @media(max-width:1000px){
+      .col-8,.col-7,.col-6,.col-5,.col-4{grid-column:span 12}
+      .kpi{grid-template-columns:repeat(2,minmax(0,1fr))}
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="title">JRSHOP Mini ERP - Sandbox Preview</div>
+        <div class="small">Alibaba / AliExpress / Dianxiaomi inspired interaction preview (non-production)</div>
+      </div>
+      <div class="row">
+        <span class="badge"><span class="dot"></span> Realtime Stream: Simulated</span>
+        <span class="badge">Mode: Preview Only</span>
+      </div>
+    </div>
+    <div class="note">
+      This page is only a UI/flow sandbox. It does not write to your live orders.
+      You can test chat ranking behavior, rule previews, wave picking, auto-tracking mock, label bundle, and manifest grouping.
+    </div>
+
+    <div class="grid">
+      <section class="card col-8">
+        <h3 class="h">Realtime Stability + Counters <span class="small">anti-flap batch preview</span></h3>
+        <div class="kpi">
+          <div><div class="v" id="k-total">0</div><div class="l">Total Orders</div></div>
+          <div><div class="v" id="k-pending">0</div><div class="l">Pending Approval</div></div>
+          <div><div class="v" id="k-ready">0</div><div class="l">Ready to Ship</div></div>
+          <div><div class="v" id="k-completed">0</div><div class="l">Completed</div></div>
+        </div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap">
+          <button class="primary" id="btn-simulate-events">Simulate 30 rapid events</button>
+          <button id="btn-apply-delta">Apply one delta event</button>
+          <span class="small" id="batch-log">No recent batch.</span>
+        </div>
+      </section>
+
+      <section class="card col-4">
+        <h3 class="h">Order Rules Engine <span class="small">IF / THEN preview</span></h3>
+        <div class="row" style="margin-bottom:6px">
+          <select id="rule-country"><option>GB</option><option>DE</option><option>FR</option></select>
+          <select id="rule-category"><option>Shoes</option><option>Bags</option><option>Accessories</option></select>
+        </div>
+        <div class="row" style="margin-bottom:6px">
+          <select id="rule-carrier"><option>Evri</option><option>Royal Mail</option><option>DPD</option></select>
+          <select id="rule-service"><option>Standard</option><option>Express</option></select>
+        </div>
+        <div class="row">
+          <button class="ok" id="btn-preview-rule">Preview result</button>
+          <span class="small" id="rule-result">No rule test yet.</span>
+        </div>
+      </section>
+
+      <section class="card col-7">
+        <h3 class="h">Chat Inbox (Ali-style sorting)</h3>
+        <div class="small" style="margin-bottom:6px">Unread first, then latest message timestamp desc.</div>
+        <div class="list" id="chat-list"></div>
+        <div class="row" style="margin-top:8px">
+          <select id="chat-target"></select>
+          <button id="btn-new-msg" class="primary">Inject new message</button>
+          <button id="btn-mark-read">Mark thread read</button>
+        </div>
+      </section>
+
+      <section class="card col-5">
+        <h3 class="h">Shipping: Auto Tracking + Label + Manifest</h3>
+        <div class="small">Mock adapter output for batch shipping.</div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap">
+          <button class="primary" id="btn-create-labels">Create labels for Ready</button>
+          <button class="ok" id="btn-close-manifest">Close manifest</button>
+        </div>
+        <div class="list" id="shipment-log" style="margin-top:8px"></div>
+      </section>
+
+      <section class="card col-6">
+        <h3 class="h">Wave Picking (Dianxiaomi style)</h3>
+        <table>
+          <thead><tr><th>Wave</th><th>Orders</th><th>SKU Lines</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody id="wave-table"></tbody>
+        </table>
+      </section>
+
+      <section class="card col-6">
+        <h3 class="h">Replenishment Suggestions</h3>
+        <table>
+          <thead><tr><th>SKU</th><th>Stock</th><th>Daily Sales</th><th>Days Left</th><th>Suggestion</th></tr></thead>
+          <tbody id="repl-table"></tbody>
+        </table>
+      </section>
+
+      <section class="card col-12">
+        <h3 class="h">Role / Permission Matrix (preview)</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Module</th>
+              <th>Admin</th>
+              <th>Staff</th>
+              <th>Reseller</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="perm-table"></tbody>
+        </table>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    // ---- Mock data
+    const orders = [];
+    const statuses = ["New","Pending Approval","At Depot","Ready","Shipped","Completed"];
+    const names = ["Ayse","Fatma","Elif","Can","Deniz","Yusuf","Mert","Leyla","Sena","Emre"];
+    for(let i=1;i<=120;i++){
+      const st = statuses[Math.floor(Math.random()*statuses.length)];
+      orders.push({
+        id:"o"+i,
+        ref:"JR-PRV-"+String(i).padStart(4,"0"),
+        name:names[Math.floor(Math.random()*names.length)],
+        status:st,
+        pendingApproval:st==="Pending Approval",
+        updatedAt:Date.now()-Math.floor(Math.random()*86400000),
+        ready:st==="Ready"
+      });
+    }
+
+    const threads = [
+      {id:"r-1001",name:"Reseller A",unread:3,lastTs:Date.now()-300000,last:"Need stock update"},
+      {id:"r-1002",name:"Reseller B",unread:0,lastTs:Date.now()-180000,last:"Thanks"},
+      {id:"r-1003",name:"Reseller C",unread:1,lastTs:Date.now()-120000,last:"Tracking?"},
+      {id:"r-1004",name:"Reseller D",unread:0,lastTs:Date.now()-90000,last:"ok"},
+      {id:"r-1005",name:"Reseller E",unread:5,lastTs:Date.now()-45000,last:"urgent please"}
+    ];
+
+    const skus = [
+      {sku:"SH-RED-39",stock:18,daily:4.2},
+      {sku:"SH-BLK-41",stock:6,daily:3.8},
+      {sku:"BAG-IVY-M",stock:42,daily:1.1},
+      {sku:"ACC-BELT-L",stock:9,daily:1.9},
+      {sku:"SH-WHT-40",stock:3,daily:2.6}
+    ];
+
+    const permRows = [
+      ["Orders","Full","Scan/Update","Create/Track","State-machine guarded"],
+      ["Shipping","Full","Label/Manifest","View only","Carrier adapter"],
+      ["Catalog","Full","View","View","No direct shipment effect"],
+      ["Chat","Full","View","Full (own)","Unread rank + SLA"],
+      ["Analytics","Full","Limited","Own metrics","Read model based"]
+    ];
+
+    // ---- Helpers
+    function fmtTime(ts){
+      const d=new Date(ts);
+      return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    }
+    function countBy(fn){return orders.filter(fn).length;}
+    function renderKpi(){
+      document.getElementById("k-total").textContent=String(orders.length);
+      document.getElementById("k-pending").textContent=String(countBy(o=>o.pendingApproval));
+      document.getElementById("k-ready").textContent=String(countBy(o=>o.ready));
+      document.getElementById("k-completed").textContent=String(countBy(o=>o.status==="Completed"));
+    }
+
+    // ---- Anti-flap batch simulation
+    let batchTimer=null;
+    let pendingEvents=0;
+    function scheduleBatchApply(){
+      if(batchTimer) return;
+      batchTimer=setTimeout(()=>{
+        batchTimer=null;
+        const applyCount=pendingEvents;
+        pendingEvents=0;
+        // Just mock applying small event deltas
+        for(let i=0;i<Math.min(applyCount,8);i++){
+          const idx=Math.floor(Math.random()*orders.length);
+          const o=orders[idx];
+          if(!o) continue;
+          if(o.status==="Pending Approval"){o.status="At Depot";o.pendingApproval=false;}
+          else if(o.status==="At Depot"){o.status="Ready";o.ready=true;}
+          o.updatedAt=Date.now();
+        }
+        renderKpi();
+        document.getElementById("batch-log").textContent="Applied "+applyCount+" events in one render batch.";
+      },280);
+    }
+    document.getElementById("btn-simulate-events").addEventListener("click",()=>{
+      for(let i=0;i<30;i++){pendingEvents++;scheduleBatchApply();}
+    });
+    document.getElementById("btn-apply-delta").addEventListener("click",()=>{
+      pendingEvents++;scheduleBatchApply();
+    });
+
+    // ---- Rule engine preview
+    document.getElementById("btn-preview-rule").addEventListener("click",()=>{
+      const c=document.getElementById("rule-country").value;
+      const k=document.getElementById("rule-category").value;
+      const carrier=document.getElementById("rule-carrier").value;
+      const service=document.getElementById("rule-service").value;
+      document.getElementById("rule-result").textContent=
+        "IF country="+c+" and category="+k+" THEN carrier="+carrier+" service="+service+".";
+    });
+
+    // ---- Chat sorting preview
+    function sortThreads(){
+      threads.sort((a,b)=>{
+        const ua=(a.unread||0)>0?1:0;
+        const ub=(b.unread||0)>0?1:0;
+        if(ua!==ub) return ub-ua;
+        return (b.lastTs||0)-(a.lastTs||0);
+      });
+    }
+    function renderThreads(){
+      sortThreads();
+      const box=document.getElementById("chat-list");
+      box.innerHTML=threads.map(t=>`
+        <div class="item">
+          <div class="row" style="justify-content:space-between">
+            <strong>${t.name}</strong>
+            <span class="pill ${t.unread>0?"unread":""}">${t.unread>0?("Unread "+t.unread):"Read"}</span>
+          </div>
+          <div class="small" style="margin-top:4px">${t.last}</div>
+          <div class="small" style="margin-top:3px">last: ${fmtTime(t.lastTs)}</div>
+        </div>
+      `).join("");
+      const sel=document.getElementById("chat-target");
+      sel.innerHTML=threads.map(t=>`<option value="${t.id}">${t.name}</option>`).join("");
+    }
+    document.getElementById("btn-new-msg").addEventListener("click",()=>{
+      const id=document.getElementById("chat-target").value;
+      const t=threads.find(x=>x.id===id);
+      if(!t) return;
+      t.unread=(t.unread||0)+1;
+      t.lastTs=Date.now();
+      t.last="New incoming message";
+      renderThreads();
+    });
+    document.getElementById("btn-mark-read").addEventListener("click",()=>{
+      const id=document.getElementById("chat-target").value;
+      const t=threads.find(x=>x.id===id);
+      if(!t) return;
+      t.unread=0;
+      renderThreads();
+    });
+
+    // ---- Shipping preview
+    let manifestSeq=100;
+    function trackingCode(){
+      return "TRK"+Math.floor(Math.random()*900000+100000);
+    }
+    function renderShipLog(lines){
+      const box=document.getElementById("shipment-log");
+      if(lines&&lines.length){
+        box.innerHTML=lines.map(x=>`<div class="item">${x}</div>`).join("");
+      }
+    }
+    document.getElementById("btn-create-labels").addEventListener("click",()=>{
+      const ready = orders.filter(o=>o.status==="Ready").slice(0,12);
+      if(!ready.length){
+        renderShipLog(["No Ready orders in current mock dataset."]);
+        return;
+      }
+      const lines = ready.map(o=>{
+        const trk=trackingCode();
+        o.status="Shipped";
+        o.ready=false;
+        o.tracking=trk;
+        return o.ref+" -> label created, tracking: "+trk;
+      });
+      renderShipLog(lines);
+      renderKpi();
+    });
+    document.getElementById("btn-close-manifest").addEventListener("click",()=>{
+      manifestSeq++;
+      const shipped = orders.filter(o=>o.status==="Shipped").slice(0,20);
+      const line1="Manifest M-"+manifestSeq+" closed with "+shipped.length+" shipments.";
+      const line2="Carrier handover window: 17:00-18:00";
+      renderShipLog([line1,line2]);
+    });
+
+    // ---- Wave picking preview
+    function renderWaves(){
+      const body=document.getElementById("wave-table");
+      const waves=[
+        {name:"W-01",orders:24,sku:53,status:"Picking"},
+        {name:"W-02",orders:18,sku:41,status:"Queued"},
+        {name:"W-03",orders:30,sku:67,status:"Packed"}
+      ];
+      body.innerHTML=waves.map(w=>`
+        <tr>
+          <td>${w.name}</td>
+          <td>${w.orders}</td>
+          <td>${w.sku}</td>
+          <td><span class="pill ${w.status==="Packed"?"ok":w.status==="Picking"?"warn":""}">${w.status}</span></td>
+          <td><button>Scan</button></td>
+        </tr>
+      `).join("");
+    }
+
+    // ---- Replenishment preview
+    function renderRepl(){
+      const body=document.getElementById("repl-table");
+      body.innerHTML=skus.map(s=>{
+        const days=s.daily>0?(s.stock/s.daily):999;
+        const sug=days<4?("Urgent PO: "+Math.ceil((14*s.daily)-s.stock)):(days<9?("Plan PO: "+Math.ceil((21*s.daily)-s.stock)):"No action");
+        return `
+          <tr>
+            <td>${s.sku}</td>
+            <td>${s.stock}</td>
+            <td>${s.daily.toFixed(1)}</td>
+            <td>${days.toFixed(1)}</td>
+            <td>${sug}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    // ---- Permission table
+    function renderPerms(){
+      const body=document.getElementById("perm-table");
+      body.innerHTML=permRows.map(r=>`
+        <tr>
+          <td>${r[0]}</td>
+          <td>${r[1]}</td>
+          <td>${r[2]}</td>
+          <td>${r[3]}</td>
+          <td>${r[4]}</td>
+        </tr>
+      `).join("");
+    }
+
+    // ---- Init
+    renderKpi();
+    renderThreads();
+    renderWaves();
+    renderRepl();
+    renderPerms();
+  </script>
+</body>
+</html>
