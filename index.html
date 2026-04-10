@@ -2512,6 +2512,7 @@ function warmFirebaseConnect(){
 async function login(){
   const em=document.getElementById('l-em').value.trim().toLowerCase();
   const pw=document.getElementById('l-pw').value;
+  clearFirebaseAuthNeedsFreshLogin();
   resetHealthCounters();
   users=normalizeUsersList(users);
   let u=findUserForLogin(em,pw);
@@ -2631,7 +2632,7 @@ async function login(){
     }).catch(function(){});
   },1000);
 }
-function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{if(_firebaseAuth&&_firebaseAuth.currentUser){_firebaseAuth.signOut().catch(()=>{});}}catch(_e){}try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}resetHealthCounters();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
+function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{if(_firebaseAuth&&_firebaseAuth.currentUser){_firebaseAuth.signOut().catch(()=>{});}}catch(_e){}try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}clearFirebaseAuthNeedsFreshLogin();resetHealthCounters();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
 
 // ── SIDEBAR ──
 let _sbOpen=window.innerWidth>900;
@@ -7756,6 +7757,7 @@ let _firebasePasswordRetryAt=0;
 let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
+let _firebaseAuthNeedsFreshLogin=false;
 const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
@@ -8488,6 +8490,12 @@ function clearFirebaseLoginCreds(opts={}){
     }
   }catch(_e){}
 }
+function markFirebaseAuthNeedsFreshLogin(){
+  _firebaseAuthNeedsFreshLogin=true;
+}
+function clearFirebaseAuthNeedsFreshLogin(){
+  _firebaseAuthNeedsFreshLogin=false;
+}
 function mapFirebaseAuthState(err,defaultState='auth_error'){
   const code=err&&err.code?String(err.code):'';
   if(!code) return defaultState;
@@ -8532,7 +8540,7 @@ function clearFirebaseAuthRetryGuards(){
 }
 
 function getFirebaseLoginCreds(){
-  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH || !me) return null;
+  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH || !me || _firebaseAuthNeedsFreshLogin) return null;
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   if(!isValidAuthEmail(meEmail)) return null;
   const mePw=me&&me.password?String(me.password):'';
@@ -8648,6 +8656,10 @@ async function ensureFirebaseOnlineAuth(opts={}){
     _health.authState='auth_rate_limited';
     return null;
   }
+  if(_firebaseAuthNeedsFreshLogin){
+    _health.authState='waiting_login';
+    return null;
+  }
   const creds=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseLoginCreds():null;
   if(!creds||!creds.email||!creds.password){
     _health.authState='waiting_login';
@@ -8696,6 +8708,7 @@ async function firebaseSignInForSession(email,password){
       _health.authState='auth_rate_limited';
       // Stop retrying cached email/password in a tight loop.
       clearFirebaseLoginCreds({includeRemember:true});
+      markFirebaseAuthNeedsFreshLogin();
       setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
       setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
       return null;
@@ -8703,6 +8716,7 @@ async function firebaseSignInForSession(email,password){
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
       // Soft fail: app login may still be valid even when Firebase password differs.
       clearFirebaseLoginCreds({includeRemember:true});
+      markFirebaseAuthNeedsFreshLogin();
       setFirebasePasswordRetry(FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS);
       _health.authState=resolveSignedInAuthState('waiting_login');
       return null;
