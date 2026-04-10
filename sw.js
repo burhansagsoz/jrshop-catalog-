@@ -1,5 +1,5 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260407-cloudflare-only-ui-r2';
+const CACHE_VERSION = 'jrshop-v20260410-notify-anim-v1';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
@@ -148,4 +148,22 @@ self.addEventListener('notificationclick', event => {
 self.addEventListener('notificationclose', event => {
   // Optional: Track notification dismissal
   console.log('Notification closed:', event.notification);
+});
+
+self.addEventListener('message', event => {
+  const data = event && event.data ? event.data : null;
+  if (!data || typeof data !== 'object') return;
+  if (data.type !== 'SHOW_LOCAL_NOTIFICATION') return;
+  const title = data.title || 'JRSHOP';
+  const options = {
+    body: data.body || 'New activity',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: data.tag || ('jrshop-' + Date.now()),
+    renotify: !!data.renotify,
+    requireInteraction: !!data.requireInteraction,
+    vibrate: Array.isArray(data.vibrate) ? data.vibrate : [160, 90, 160],
+    data: data.data || {}
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
 });

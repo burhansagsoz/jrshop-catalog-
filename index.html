@@ -68,6 +68,19 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);height:100dv
 .lf input::placeholder{color:rgba(255,255,255,.2);}
 .lf input:focus{border-color:var(--accent);background:rgba(249,115,22,.07);}
 .login-btn{width:100%;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font);margin-top:4px;}
+.login-card{animation:loginFadeIn .55s ease both,cardPop .6s cubic-bezier(.34,1.56,.64,1) both;}
+.login-brand .ico{animation:logoFloat 2.6s ease-in-out infinite;}
+.login-btn{transition:transform .2s ease,box-shadow .25s ease,filter .2s ease;box-shadow:0 8px 26px rgba(249,115,22,.28);}
+.login-btn:hover{transform:translateY(-1px);box-shadow:0 14px 34px rgba(249,115,22,.36);}
+.login-btn:active{transform:translateY(0) scale(.99);filter:saturate(1.1);}
+.ni,.btn,.res-order-card,.feed-post,.card-row{transition:transform .2s ease,box-shadow .25s ease,background-color .2s ease;}
+.btn:hover,.ni:hover{transform:translateY(-1px);}
+.res-order-card:hover,.card-row:hover{transform:translateY(-2px);box-shadow:var(--shadow);}
+.topbar{backdrop-filter:blur(8px);}
+.page-enter{animation:pageSlide .3s ease both;}
+.pulse-live{animation:statusRing 1.8s infinite;}
+@keyframes notifPulse{0%{transform:scale(1);}35%{transform:scale(1.22);}100%{transform:scale(1);}}
+.notif-pulse{animation:notifPulse .42s ease;}
 
 /* APP */
 #app{display:none;height:100dvh;flex-direction:row;flex:1;min-height:0;}
@@ -2834,6 +2847,7 @@ function showPage(id){
   const pg=document.getElementById(id);
   if(pg){
     pg.classList.add('on');
+    pg.classList.remove('page-enter');
     // orders-page needs flex-direction:row, others column
     pg.style.display='flex';
     if(pg.classList.contains('orders-page')){
@@ -2845,6 +2859,7 @@ function showPage(id){
       pg.style.flexDirection='column';
     }
     pg.scrollTop=0;
+    requestAnimationFrame(()=>pg.classList.add('page-enter'));
   }
   if(id!=='pg-orders') closeDetail();
   if(id!=='pg-barcode') stopCamera();
@@ -10666,12 +10681,14 @@ async function subscribeToPush(){
 async function sendPushToReseller(resellerId, title, body){
   try{
     const api=getApiBase();
-    await fetch(api+'/api/push/send',{
+    const res=await fetch(api+'/api/push/send',{
       method:'POST',
       headers:getAuthHeaders({'Content-Type':'application/json'}),
       body:JSON.stringify({userId:resellerId,title,body})
     });
+    return !!(res&&res.ok);
   }catch(e){console.warn('Push send failed:',e);}
+  return false;
 }
 
 // Send push notification to all admins
@@ -10680,14 +10697,18 @@ async function sendPushToAdmin(title, body){
     const api=getApiBase();
     // Send to all admin users
     const admins = users.filter(u => u.role === 'Admin');
+    let allOk=true;
     for(const admin of admins){
-      await fetch(api+'/api/push/send',{
+      const res=await fetch(api+'/api/push/send',{
         method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({userId:admin.id,title,body})
       });
+      if(!res||!res.ok) allOk=false;
     }
+    return allOk;
   }catch(e){console.warn('Push send to admin failed:',e);}
+  return false;
 }
 
 // Play notification sound
@@ -10714,6 +10735,7 @@ function playNotificationSound(){
 // Auto-subscribe on login for resellers
 async function initPushForReseller(){
   if(!me||me.role!=='Reseller')return;
+  subscribeToPush().catch(()=>{});
   // Ask for notification permission after 3 seconds
   setTimeout(async()=>{
     if(Notification.permission==='default'){
@@ -10729,6 +10751,7 @@ async function initPushForReseller(){
 // Auto-subscribe on login for admins
 async function initPushForAdmin(){
   if(!me||me.role!=='Admin')return;
+  subscribeToPush().catch(()=>{});
   // Ask for notification permission after 3 seconds
   setTimeout(async()=>{
     if(Notification.permission==='default'){
@@ -10981,8 +11004,105 @@ const _sounds={
   complete:()=>{const a=new AudioContext();[520,660,784].forEach((f,i)=>{const o=a.createOscillator();const g=a.createGain();o.connect(g);g.connect(a.destination);o.frequency.setValueAtTime(f,a.currentTime+i*0.1);g.gain.setValueAtTime(0.12,a.currentTime+i*0.1);g.gain.exponentialRampToValueAtTime(0.001,a.currentTime+i*0.1+0.2);o.start(a.currentTime+i*0.1);o.stop(a.currentTime+i*0.1+0.2);});}
 };
 let _soundEnabled=localStorage.getItem('jb_sound')!=='off';
+function triggerNotificationVibration(pattern){
+  try{
+    if(!navigator||typeof navigator.vibrate!=='function') return;
+    const p=Array.isArray(pattern)&&pattern.length?pattern:[120,70,120];
+    navigator.vibrate(p);
+  }catch(_e){}
+}
+function pulseElementById(id){
+  const el=document.getElementById(String(id||''));
+  if(!el) return;
+  el.classList.remove('notif-pulse');
+  void el.offsetWidth;
+  el.classList.add('notif-pulse');
+}
 function playSound(type){if(!_soundEnabled)return;try{_sounds[type]&&_sounds[type]();}catch(e){}}
 function toggleSound(){_soundEnabled=!_soundEnabled;localStorage.setItem('jb_sound',_soundEnabled?'on':'off');toast(_soundEnabled?'🔔 Sesler active':'🔕 Sounds off','info');}
+
+// ── UNIFIED REALTIME NOTIFICATION ENGINE ──
+const _rtNotifSeen=new Map();
+const RT_NOTIF_TTL_MS=90*1000;
+function makeRtNotifKey(kind,id){
+  return String(kind||'')+':'+String(id||'');
+}
+function shouldDispatchRtNotif(kind,id){
+  const key=makeRtNotifKey(kind,id);
+  const now=Date.now();
+  const prev=Number(_rtNotifSeen.get(key)||0);
+  if(prev && (now-prev)<RT_NOTIF_TTL_MS) return false;
+  _rtNotifSeen.set(key,now);
+  if(_rtNotifSeen.size>300){
+    for(const [k,ts] of _rtNotifSeen){
+      if((now-Number(ts||0))>RT_NOTIF_TTL_MS) _rtNotifSeen.delete(k);
+    }
+  }
+  return true;
+}
+function vibrateDevice(pattern){
+  try{
+    if(!navigator||typeof navigator.vibrate!=='function') return;
+    navigator.vibrate(pattern);
+  }catch(_e){}
+}
+async function ensureLocalNotificationPermission(){
+  if(typeof Notification==='undefined') return false;
+  return Notification.permission==='granted';
+}
+async function dispatchRealtimeNotification(opts={}){
+  const kind=String(opts.kind||'generic');
+  const eventId=String(opts.eventId||'');
+  if(eventId && !shouldDispatchRtNotif(kind,eventId)) return false;
+  const title=String(opts.title||'JRSHOP');
+  const body=String(opts.body||'');
+  const toastType=String(opts.toastType||'info');
+  if(body) toast(body,toastType);
+  if(_soundEnabled) playNotificationSound();
+  if(opts.vibrate!==false){
+    const pattern=Array.isArray(opts.vibratePattern)?opts.vibratePattern:[180,80,180];
+    vibrateDevice(pattern);
+  }
+  if(Array.isArray(opts.badgeElementIds)){
+    opts.badgeElementIds.forEach(function(id){pulseElementById(id);});
+  }
+  if(opts.localNotification!==false){
+    const canNotify=await ensureLocalNotificationPermission();
+    if(canNotify){
+      try{
+        const tag=String(opts.tag||('rt-'+kind));
+        const vibrate=Array.isArray(opts.vibratePattern)?opts.vibratePattern:[180,80,180];
+        if('serviceWorker' in navigator){
+          const reg=await navigator.serviceWorker.ready;
+          if(reg && typeof reg.showNotification==='function'){
+            await reg.showNotification(title,{
+              body,
+              icon:'/icon-192.png',
+              badge:'/icon-192.png',
+              tag,
+              renotify:true,
+              vibrate
+            });
+          }else{
+            new Notification(title,{body,icon:'/icon-192.png',tag,renotify:true});
+          }
+        }else{
+          new Notification(title,{body,icon:'/icon-192.png',tag,renotify:true});
+        }
+      }catch(_e){
+        try{
+          new Notification(title,{
+            body,
+            icon:'/icon-192.png',
+            tag:String(opts.tag||('rt-'+kind)),
+            renotify:true
+          });
+        }catch(_ignored){}
+      }
+    }
+  }
+  return true;
+}
 
 // ── SESSION TIMEOUT ──
 let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
@@ -11045,13 +11165,40 @@ async function startPendingPoll(){
             const old=myOld.find(x=>x.id===o.id);
             if(!old)return;
             if(old.pendingApproval&&!o.pendingApproval&&!o.rejected){
-              toast('✅ Order approved! '+esc(o.ref),'ok');
+              dispatchRealtimeNotification({
+                kind:'reseller_order_approved',
+                eventId:String(o.id)+'_approved_'+String(o.approvedAt||o.updatedAt||Date.now()),
+                title:'✅ Order Approved',
+                body:'Order approved: '+String(o.ref||''),
+                toastType:'ok',
+                localNotification:document.visibilityState!=='visible',
+                tag:'order-approved',
+                vibratePattern:[200,80,120]
+              }).catch(()=>{});
               renderResellerView();
             } else if(!old.rejected&&o.rejected){
-              toast('❌ Order rejected: '+esc(o.ref),'err');
+              dispatchRealtimeNotification({
+                kind:'reseller_order_rejected',
+                eventId:String(o.id)+'_rejected_'+String(o.updatedAt||Date.now()),
+                title:'❌ Order Rejected',
+                body:'Order rejected: '+String(o.ref||''),
+                toastType:'err',
+                localNotification:document.visibilityState!=='visible',
+                tag:'order-rejected',
+                vibratePattern:[260,80,260]
+              }).catch(()=>{});
               renderResellerView();
             } else if(old.status!==o.status){
-              toast('📦 Order status updated: '+esc(o.ref)+' → '+getStatusLabel(o.status),'info');
+              dispatchRealtimeNotification({
+                kind:'reseller_order_status',
+                eventId:String(o.id)+'_status_'+String(o.status),
+                title:'📦 Order Status Updated',
+                body:String(o.ref||'')+' → '+getStatusLabel(o.status),
+                toastType:'info',
+                localNotification:document.visibilityState!=='visible',
+                tag:'order-status',
+                vibratePattern:[120,60,120]
+              }).catch(()=>{});
               renderResellerView();
             }
           });
@@ -11064,7 +11211,17 @@ async function startPendingPoll(){
           localStorage.setItem('jb_orders',JSON.stringify(orders));
           updateBadges();
           if(newPending>oldPending){
-            toast('🔔 New sipariş onay bekliyor!','info');
+            const latestPending=newOrders.filter(function(o){return o&&o.pendingApproval;}).sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0];
+            dispatchRealtimeNotification({
+              kind:'admin_pending_order',
+              eventId:String(latestPending&&latestPending.id||Date.now())+'_pending',
+              title:'🔔 New Order Request',
+              body:'A reseller order is waiting for approval.',
+              toastType:'info',
+              localNotification:document.visibilityState!=='visible',
+              tag:'pending-approval',
+              vibratePattern:[160,80,160]
+            }).catch(()=>{});
           }
         }
       }
@@ -11140,9 +11297,9 @@ async function pollAllChats(){
     // Check each reseller's chat key
     const resellers=users.filter(u=>u.role==='Reseller');
     let totalUnread=0;
-    let needsSync = false;
     let hasNewMessages = false;
     let newMessageFrom = '';
+    let newestEventId = '';
     
     resellers.forEach(u=>{
       const msgs=data['jb_chat_'+u.id]||[];
@@ -11154,21 +11311,25 @@ async function pollAllChats(){
         if(hasUnreadNew){
           hasNewMessages = true;
           newMessageFrom = u.dname || u.email;
+          const latestUnread=[...newMsgs].reverse().find(function(m){return m && m.from !== 'admin' && !m.read;});
+          if(latestUnread) newestEventId=String(latestUnread.id||(`${u.id}_${latestUnread.ts||Date.now()}`));
         }
       }
       _messages[u.id] = msgs;
     });
     
     // Show local notification if new messages and page not focused on chat
-    if(hasNewMessages && document.visibilityState !== 'visible'){
-      playNotificationSound();
-      if(Notification.permission === 'granted'){
-        new Notification('💬 New Message', {
-          body: `Message from ${newMessageFrom}`,
-          icon: '/icon-192.png',
-          tag: 'chat-notification'
-        });
-      }
+    if(hasNewMessages){
+      dispatchRealtimeNotification({
+        kind:'admin_chat',
+        eventId:newestEventId||('from_'+newMessageFrom),
+        title:'💬 New Message',
+        body:`Message from ${newMessageFrom}`,
+        toastType:'info',
+        localNotification:document.visibilityState!=='visible',
+        tag:'chat-notification',
+        vibratePattern:[120,70,120]
+      }).catch(()=>{});
     }
     
     // If a chat is open, mark as read and sync to cloud
@@ -11451,15 +11612,19 @@ async function checkResellerUnreadMessages(){
     const unreadCount = msgs.filter(m => m.from === 'admin' && !m.read).length;
     
     // Check for new messages (unread count increased)
-    if(unreadCount > _lastResUnreadCount && document.visibilityState !== 'visible'){
-      playNotificationSound();
-      if(Notification.permission === 'granted'){
-        new Notification('💬 New Message from Admin', {
-          body: 'You have a new message',
-          icon: '/icon-192.png',
-          tag: 'reseller-chat'
-        });
-      }
+    if(unreadCount > _lastResUnreadCount){
+      const lastUnread=[...msgs].reverse().find(function(m){return m&&m.from==='admin'&&!m.read;});
+      const eventId=String(lastUnread&&lastUnread.id||('admin_'+(lastUnread&&lastUnread.ts||Date.now())));
+      dispatchRealtimeNotification({
+        kind:'reseller_chat',
+        eventId,
+        title:'💬 New Message from Admin',
+        body:'You have a new message',
+        toastType:'info',
+        localNotification:document.visibilityState!=='visible',
+        tag:'reseller-chat',
+        vibratePattern:[180,90,180]
+      }).catch(()=>{});
     }
     _lastResUnreadCount = unreadCount;
     
