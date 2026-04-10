@@ -2135,6 +2135,35 @@ function normalizeUsersList(raw){
     return [...DEFAULT_BOOT_USERS];
   }
 }
+function userIdentityKey(u){
+  const email=String(u&&u.email||'').trim().toLowerCase();
+  if(email) return 'em:'+email;
+  return 'id:'+String(u&&u.id||'');
+}
+function mergeUsersSafely(localRaw,remoteRaw){
+  const local=normalizeUsersList(localRaw);
+  const remote=normalizeUsersList(remoteRaw);
+  const byKey=new Map();
+  for(const u of local){
+    byKey.set(userIdentityKey(u),u);
+  }
+  for(const u of remote){
+    const key=userIdentityKey(u);
+    const prev=byKey.get(key)||{};
+    byKey.set(key,{...prev,...u});
+  }
+  const merged=[...byKey.values()];
+  return normalizeUsersList(merged.length?merged:[...DEFAULT_BOOT_USERS]);
+}
+function persistUsersLocalSafe(remoteUsers,source=''){
+  let localUsers=[];
+  try{localUsers=JSON.parse(localStorage.getItem('jb_users')||'[]');}catch(_e){localUsers=[];}
+  const merged=mergeUsersSafely(localUsers,remoteUsers);
+  try{localStorage.setItem('jb_users',JSON.stringify(merged));}catch(_e){}
+  users=merged;
+  if(source) console.log('[Users] merged from',source,'local',Array.isArray(localUsers)?localUsers.length:0,'remote',Array.isArray(remoteUsers)?remoteUsers.length:0,'final',merged.length);
+  return merged;
+}
 function findUserForLogin(identifier,password){
   const id=String(identifier||'').trim().toLowerCase();
   const pw=String(password||'');
@@ -2201,7 +2230,13 @@ function getApiBaseEarly(){
       .then(function(r){return r.json();})
       .then(function(res){
         if(res.data){
-          Object.keys(res.data).forEach(function(k){localStorage.setItem(k,JSON.stringify(res.data[k]));});
+          Object.keys(res.data).forEach(function(k){
+            if(k==='jb_users'){
+              persistUsersLocalSafe(res.data[k],'boot');
+            }else{
+              localStorage.setItem(k,JSON.stringify(res.data[k]));
+            }
+          });
           users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
         scheduleFirebaseAutoConnect('boot');
           const savedEm=localStorage.getItem('jb_saved_email');
@@ -2531,8 +2566,7 @@ async function login(){
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
-        users=normalizeUsersList(res.data.jb_users);
-        localStorage.setItem('jb_users',JSON.stringify(users));
+        users=persistUsersLocalSafe(res.data.jb_users,'login_retry');
         const u2=findUserForLogin(em,pw);
         if(u2){if(loginBtn)loginBtn.textContent='Sign In →';login();return;}
       }
@@ -2599,22 +2633,38 @@ async function login(){
   else{document.getElementById('topbar-right').style.display='none';goDash(document.querySelector('.ni'));startPendingPoll();
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
   scheduleFirebaseAutoConnect('login');
-  setTimeout(function(){
+  setTimeout(async function(){
     fetch(getApiBase()+'/api/data')
     .then(function(r){return r.json();})
-    .then(function(res){
+    .then(async function(res){
       if(res.data){
         Object.keys(res.data).forEach(function(k){
           if(k==='jb_orders') return;
+          if(k==='jb_users'){
+            persistUsersLocalSafe(res.data[k],'login_sync');
+            return;
+          }
           if(k==='jb_feed' || k.indexOf('jb_chat_')===0){
             mergeKeyWithLocalFirst(k,res.data[k]);
           }else{
             localStorage.setItem(k,JSON.stringify(res.data[k]));
           }
         });
-        // Critical: never overwrite local changes on login with stale cloud snapshot.
-        const cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
+        // Prefer authoritative /api/orders on login; fallback to /api/data snapshot only if needed.
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+        let cloudOrders=[];
+        try{
+          const ordRes=await fetch(getApiBase()+'/api/orders',{headers:getAuthHeaders()});
+          if(ordRes.ok){
+            const ordPayload=await ordRes.json();
+            cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
+          }
+        }catch(_e){
+          cloudOrders=[];
+        }
+        if(!cloudOrders.length){
+          cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
+        }
         if(cloudOrders.length){
           const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
@@ -5132,8 +5182,7 @@ function loadSettings(){
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
 }
 function applyUsersRealtime(nextUsers){
-  users=normalizeUsersList(Array.isArray(nextUsers)?nextUsers:[]);
-  try{localStorage.setItem('jb_users',JSON.stringify(users));}catch(_e){}
+  users=persistUsersLocalSafe(Array.isArray(nextUsers)?nextUsers:[],'realtime');
   if(me&&me.id){
     const fresh=users.find(function(u){return u&&u.id===me.id;});
     if(fresh){
