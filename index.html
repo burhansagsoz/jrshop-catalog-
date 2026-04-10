@@ -7667,15 +7667,9 @@ async function loadFromCloud(){
   }
 }
 async function saveAllToCloud(){
-  const api=getApiBase();
-  toast('Syncing backup to Firebase...','info');
-  try{
-    const data={};
-    for(const key of SYNC_KEYS){const val=localStorage.getItem(key);if(val)try{data[key]=JSON.parse(val);}catch{data[key]=val;}}
-    const res=await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(data)});
-    if(res.ok)toast('All data saved to Firebase!','ok');
-    else toast('Firebase save error','err');
-  }catch(e){toast('Connection error: '+e.message,'err');}
+  // Keep this action as full backup (metadata + all order rows),
+  // otherwise /api/orders can lag behind and appear as "missing orders" on reload.
+  return uploadToCloud();
 }
 async function recoverOrdersNow(){
   toast('Recovering orders...','info');
