@@ -8567,17 +8567,27 @@ function ensureFirebaseAuthWatcher(){
       _health.authState=authUser.isAnonymous?'anonymous':'signed_in';
       return;
     }
-    _health.authState='waiting_login';
+    const resolveWaitingState=function(){
+      return getFirebaseAuthRetryRemainingMs()>0?'auth_rate_limited':'waiting_login';
+    };
+    _health.authState=resolveWaitingState();
     if(_firebaseReauthTimer) clearTimeout(_firebaseReauthTimer);
-    const retryWaitMs=Math.max(700,Math.min(60000,getFirebaseAuthRetryRemainingMs()+500));
-    _firebaseReauthTimer=setTimeout(async()=>{
+    const retryWaitMs=Math.max(700,Math.min(12000,getFirebaseAuthRetryRemainingMs()+500));
+    const tryRecoverNow=async function(){
       try{
-        const u=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+        const u=await ensureFirebaseOnlineAuth({allowAnonymous:true,ignoreRetryGuards:true});
         if(u && (!_firebaseReady || !_health.ordersRealtime || !_health.feedRealtime)){
           initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
+        }else if(!u){
+          _health.authState=resolveWaitingState();
         }
-      }catch(_e){}
-    },retryWaitMs);
+      }catch(_e){
+        _health.authState=resolveWaitingState();
+      }
+    };
+    // Try once immediately to avoid anonymous->waiting_login flips.
+    tryRecoverNow().catch(()=>{});
+    _firebaseReauthTimer=setTimeout(tryRecoverNow,retryWaitMs);
   });
 }
 
@@ -8995,8 +9005,10 @@ function disconnectFirebaseRealtime(){
   _health.ordersRealtime=false;
   _health.feedRealtime=false;
   _health.dataRealtime=false;
-  // Do not force signed_out here: auth watcher/auth recovery should decide current state.
-  if(_health.authState!=='anonymous') _health.authState='waiting_login';
+  // Keep recoverable auth state; do not downgrade stable fallback states.
+  if(!['anonymous','signed_in','auth_rate_limited'].includes(String(_health.authState||''))){
+    _health.authState='waiting_login';
+  }
 }
 function stopFirebaseRealtime(){
   disconnectFirebaseRealtime();
