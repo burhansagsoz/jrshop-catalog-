@@ -7760,6 +7760,7 @@ const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
 const UPLOAD_TIMEOUT_MS=7000;
+const LAST_ANON_AUTH_TS_KEY='jb_last_anon_auth_ts';
 const _health={
   firebaseConnected:false,
   lastSyncAt:0,
@@ -8519,9 +8520,14 @@ function setFirebaseRateLimitRetry(ms){
 }
 function markAnonymousAuthSeen(){
   _lastAnonymousAuthAt=Date.now();
+  try{localStorage.setItem(LAST_ANON_AUTH_TS_KEY,String(_lastAnonymousAuthAt));}catch(_e){}
 }
 function hasRecentAnonymousAuth(){
-  return (Date.now()-Number(_lastAnonymousAuthAt||0)) < 2*60*1000;
+  let persistedTs=0;
+  try{persistedTs=Number(localStorage.getItem(LAST_ANON_AUTH_TS_KEY)||0);}catch(_e){persistedTs=0;}
+  const ts=Math.max(Number(_lastAnonymousAuthAt||0),persistedTs||0);
+  // Keep fallback state sticky long enough to avoid anonymous -> waiting_login flap.
+  return (Date.now()-ts) < 20*60*1000;
 }
 function resolveStableAuthState(base='waiting_login'){
   if(hasRecentAnonymousAuth() || String(_health.authState||'')==='anonymous') return 'anonymous';
