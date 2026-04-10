@@ -1569,6 +1569,7 @@ body.dark .modal-foot{background:#263548;}
             <div class="fg"><label class="fl">Sound notifications</label><button class="btn btn-secondary btn-sm" onclick="toggleSound()" id="sound-toggle-btn">🔔 Sounds On</button></div>
           </div>
           <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
+          <div id="cfg-cloud-active" style="margin-top:8px;font-size:11px;color:var(--muted);"></div>
         <div class="info-card" style="margin-top:16px;">
           <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">☁️ Cloudflare Sync</div>
           <div style="padding:13px 16px;">
@@ -5098,6 +5099,7 @@ function saveSettings(){
     if(cloudKey) localStorage.setItem('jb_cloud_key',cloudKey);
     else localStorage.removeItem('jb_cloud_key');
   }catch(_e){}
+  renderCloudApiSummary();
   localStorage.setItem('jb_settings',JSON.stringify(settings));
   syncGenericKeyToCloud('jb_settings',settings,{opId:createLocalMutationOpId('settings')}).catch(function(){});
   _sessionTimeout=(settings.sessionTimeout)*60*1000;
@@ -5111,6 +5113,7 @@ function loadSettings(){
   if(g('cfg-messenger-link')) g('cfg-messenger-link').value=settings.messengerLink||'';
   if(g('cfg-cloud-api')) g('cfg-cloud-api').value=localStorage.getItem('jb_cloud_api')||location.origin;
   if(g('cfg-cloud-key')) g('cfg-cloud-key').value=localStorage.getItem('jb_cloud_key')||'';
+  renderCloudApiSummary();
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
 }
 function applyUsersRealtime(nextUsers){
@@ -7097,6 +7100,13 @@ function getApiBase(){
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
   return CLOUD_API_DEFAULT;
 }
+function renderCloudApiSummary(){
+  const el=document.getElementById('cfg-cloud-active');
+  if(!el) return;
+  const api=getApiBase();
+  const hasKey=!!(localStorage.getItem('jb_cloud_key')||'').trim();
+  el.textContent=`Active API base: ${api} · API key: ${hasKey?'set':'not set'}`;
+}
 function apiUrl(path){
   return getApiBase()+String(path||'');
 }
@@ -7515,6 +7525,12 @@ async function uploadToCloud(){
     const testRes=await fetch(api+'/api/test',{headers:getAuthHeaders()});
     if(!testRes.ok){
       throw new Error(`Cloud API test failed at ${api}/api/test (HTTP ${testRes.status})`);
+    }
+    let testPayload={};
+    try{testPayload=await testRes.json();}catch(_e){testPayload={};}
+    if(!testPayload || testPayload.ok!==true){
+      const reason=String((testPayload&&testPayload.message)||(testPayload&&testPayload.error)||'api_test_not_ready');
+      throw new Error(`Cloud API test not ready at ${api}/api/test (${reason})`);
     }
     // Upload non-order data
     const payload={};

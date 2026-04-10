@@ -28,7 +28,27 @@ export default {
     const method = request.method;
 
     // Public endpoints
-    if (path === '/api/test') return json({ ok: true, message: 'Worker çalışıyor!', ts: Date.now() });
+    if (path === '/api/test') {
+      const hasDbBinding = !!env.DB;
+      let dbReady = false;
+      if (hasDbBinding) {
+        try {
+          await env.DB.prepare('SELECT 1 as ok').first();
+          dbReady = true;
+        } catch (_e) {
+          dbReady = false;
+        }
+      }
+      return json({
+        ok: hasDbBinding && dbReady,
+        message: hasDbBinding
+          ? (dbReady ? 'Worker + DB hazır' : 'DB sorgu hatası')
+          : 'DB binding eksik (Functions > Bindings > D1 Database name: DB)',
+        hasDbBinding,
+        dbReady,
+        ts: Date.now()
+      }, hasDbBinding && dbReady ? 200 : 503);
+    }
     if (path === '/catalog' && method === 'GET') return await getCatalog(env);
     if (path.startsWith('/api/image/') && method === 'GET') return await getImage(env, path.replace('/api/image/', ''));
 
