@@ -1568,22 +1568,22 @@ body.dark .modal-foot{background:#263548;}
           </div>
           <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
         <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase Sync</div>
+          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">☁️ Cloudflare Sync</div>
           <div style="padding:13px 16px;">
             <div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:8px;">
-              Runtime is now Firebase/Firestore only. Legacy Cloudflare Worker sync is disabled.
+              Runtime is now Cloudflare Worker API mode. Firebase realtime bridge is disabled.
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Firebase</button>
+              <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Cloudflare</button>
               <button class="btn btn-blue" onclick="recoverOrdersNow()">⬇️ Recover Orders</button>
             </div>
           </div>
         </div>
         <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase Realtime Sync</div>
+          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">⚠️ Legacy Firebase Panel (disabled)</div>
           <div style="padding:13px 16px;">
             <div class="fg" style="margin-bottom:10px;">
-              <label class="fl">Enable Firebase</label>
+              <label class="fl">Enable Firebase (not used in Cloudflare mode)</label>
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);">
                 <input type="checkbox" id="cfg-firebase-enabled">
                 Realtime updates
@@ -1594,7 +1594,7 @@ body.dark .modal-foot{background:#263548;}
               <textarea class="fi" id="cfg-firebase-config" rows="6" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","appId":"...","storageBucket":"...","messagingSenderId":"..."}'></textarea>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-primary" onclick="saveFirebaseSettings()">💾 Save Firebase</button>
+              <button class="btn btn-primary" onclick="saveFirebaseSettings()">☁️ Keep Cloudflare Mode</button>
               <button class="btn btn-blue" id="btn-connect-firebase-now" onclick="connectFirebaseNow()">🔌 Connect Now</button>
               <button class="btn btn-ghost" onclick="migrateAllToFirebase()">⬆️ Migrate Current Data</button>
             </div>
@@ -1608,7 +1608,7 @@ body.dark .modal-foot{background:#263548;}
           <div id="last-backup-info" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="btn btn-green" onclick="exportBackup()">📤 Export Backup</button>
-            <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">🔥 Firebase Backup</button>
+            <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">☁️ Cloudflare Backup</button>
             <label class="btn btn-ghost" style="cursor:pointer;">📥 Import<input type="file" accept=".json" onchange="importBackup(this)" style="display:none;"></label>
           
             <button class="btn btn-danger btn-sm" onclick="clearCache()">🧹 Clear Cache</button></div>
@@ -2197,15 +2197,14 @@ function displayStatus(s){
 // ── DARK MODE ──
 function toggleDark(){const d=document.body.classList.toggle('dark');document.getElementById('dark-btn').textContent=d?'☀️':'🌙';localStorage.setItem('jb_dark',d?'1':'0');}
 (function(){
-  // Firebase-first boot: keep API calls on current origin (/api/* bridge).
-  localStorage.setItem('jb_cloud_api',location.origin);
+  // Keep user-defined Cloudflare API endpoint (worker route or same-origin /api).
   const savedUsers=localStorage.getItem('jb_users');
   const hasUsers=savedUsers&&JSON.parse(savedUsers||'[]').length>0;
   if(!hasUsers){
     setTimeout(function(){
       const loginBtn=document.querySelector('.login-btn');
       if(loginBtn)loginBtn.textContent='Loading...';
-      fetch('/api/data')
+      fetch(getApiBase()+'/api/data')
       .then(function(r){return r.json();})
       .then(function(res){
         if(res.data){
@@ -2517,10 +2516,10 @@ async function login(){
   users=normalizeUsersList(users);
   let u=findUserForLogin(em,pw);
   if(!u){
-    // Firebase-first login retry
+    // Cloudflare API login retry
     const loginBtn=document.querySelector('.login-btn');
     if(loginBtn)loginBtn.textContent='Checking...';
-    fetch('/api/data')
+    fetch(getApiBase()+'/api/data')
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
@@ -2593,8 +2592,7 @@ async function login(){
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
   scheduleFirebaseAutoConnect('login');
   setTimeout(function(){
-    localStorage.setItem('jb_cloud_api',location.origin);
-    fetch('/api/data')
+    fetch(getApiBase()+'/api/data')
     .then(function(r){return r.json();})
     .then(function(res){
       if(res.data){
@@ -5041,7 +5039,7 @@ async function uploadProdImages(){
     const src=prodImages[idx];
     if(src && src.startsWith('data:')){
       try{
-        const res=await fetch('/api/image',{
+        const res=await fetch(apiUrl('/api/image'),{
           method:'POST',
           headers:getAuthHeaders({'Content-Type':'application/json'}),
           body:JSON.stringify({data:src,type:'image/jpeg'})
@@ -5049,7 +5047,7 @@ async function uploadProdImages(){
         if(res.ok){
           const d=await res.json();
           if(d.url||d.id){
-            prodImages[idx]=d.url||('/api/image/'+d.id);
+            prodImages[idx]=d.url||apiUrl('/api/image/'+d.id);
           }else{
             prodImages[idx]=src;
           }
@@ -6551,7 +6549,7 @@ function sendOrder(){
   if(MESSENGER_LINK)window.open(MESSENGER_LINK,'_blank');
   alert('\u2705 Order code copied: '+orderCode);
   cart=[];updateCartBadge();
-  try{fetch('/api/catalog-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orderData)});}catch(e){}
+  try{fetch(apiUrl('/api/catalog-order'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orderData)});}catch(e){}
 }
 init();
 <\/script>
@@ -6626,7 +6624,7 @@ function importOrderFromCode(){
       return;
     }
     toast('🔍 Looking up order...','info');
-    fetch('/api/catalog-order/'+code,{headers:getAuthHeaders()})
+    fetch(apiUrl('/api/catalog-order/'+code),{headers:getAuthHeaders()})
       .then(r => r.json())
       .then(data => {
         if(data && data.code){
@@ -7100,6 +7098,9 @@ function getApiBase(){
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
   return CLOUD_API_DEFAULT;
 }
+function apiUrl(path){
+  return getApiBase()+String(path||'');
+}
 function getAuthHeaders(extra){
   const headers={...(extra||{})};
   const k=(localStorage.getItem('jb_cloud_key')||'').trim();
@@ -7202,7 +7203,7 @@ async function flushLocalSyncFallback(){
           try{
             let res=null;
             if(op.op==='delete'){
-              res=await fetch('/api/order/'+encodeURIComponent(op.orderId),{
+              res=await fetch(apiUrl('/api/order/'+encodeURIComponent(op.orderId)),{
                 method:'DELETE',
                 headers:getAuthHeaders({'Content-Type':'application/json'}),
                 body:JSON.stringify({
@@ -7213,7 +7214,7 @@ async function flushLocalSyncFallback(){
                 })
               });
             }else{
-              res=await fetch('/api/order',{
+              res=await fetch(apiUrl('/api/order'),{
                 method:'POST',
                 headers:getAuthHeaders({'Content-Type':'application/json'}),
                 body:JSON.stringify({
@@ -7254,7 +7255,7 @@ async function flushLocalSyncFallback(){
         for(const ev of events){
           if(!ev||!ev.orderId) continue;
           try{
-            const res=await fetch('/api/order-event',{
+            const res=await fetch(apiUrl('/api/order-event'),{
               method:'POST',
               headers:getAuthHeaders({'Content-Type':'application/json'}),
               body:JSON.stringify(ev)
@@ -7288,7 +7289,7 @@ async function flushLocalSyncFallback(){
         for(const ev of events){
           if(!ev||!ev.key) continue;
           try{
-            const res=await fetch('/api/sync',{
+            const res=await fetch(apiUrl('/api/sync'),{
               method:'POST',
               headers:getAuthHeaders({'Content-Type':'application/json'}),
               body:JSON.stringify({
@@ -7316,7 +7317,7 @@ async function flushLocalSyncFallback(){
         }
         continue;
       }
-      const res=await fetch('/api/sync',{
+      const res=await fetch(apiUrl('/api/sync'),{
         method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({key,value:entry&&Object.prototype.hasOwnProperty.call(entry,'value')?entry.value:null})
@@ -7685,37 +7686,9 @@ async function recoverOrdersNow(){
   }
 }
 function saveFirebaseSettings(){
-  const enabledEl=document.getElementById('cfg-firebase-enabled');
-  const cfgEl=document.getElementById('cfg-firebase-config');
-  const enabled=!!(enabledEl&&enabledEl.checked);
-  const raw=(cfgEl&&cfgEl.value?cfgEl.value:'').trim();
-  if(enabled){
-    if(!raw){
-      toast('⚠️ Firebase config gerekli','err');
-      return;
-    }
-    try{
-      const parsed=JSON.parse(raw);
-      if(!parsed.projectId||!parsed.apiKey||!parsed.appId){
-        toast('❌ Firebase config missing required fields','err');
-        return;
-      }
-      localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(parsed));
-    }catch(e){
-      toast('❌ Firebase config JSON formatı hatalı','err');
-      return;
-    }
-  }
-  localStorage.setItem(FIREBASE_ENABLED_KEY,enabled?'1':'0');
-  if(enabled){
-    clearFirebaseAuthNeedsFreshLogin();
-    clearFirebaseAuthRetryGuards();
-    toast('✅ Firebase ayarları kaydedildi','ok');
-    initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
-  }else{
-    stopFirebaseRealtime();
-    toast('ℹ️ Firebase devre dışı bırakıldı','info');
-  }
+  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
+  stopFirebaseRealtime();
+  toast('ℹ️ Cloudflare backend modu aktif (Firebase kapalı).','info');
 }
 async function syncSettingsToFirebase(){
   try{
@@ -8356,13 +8329,7 @@ function normalizeStatus(s){
 }
 
 function getFirebaseEnabled(){
-  try{
-    const raw=localStorage.getItem(FIREBASE_ENABLED_KEY);
-    if(raw===null||raw===undefined||raw==='') return true;
-    return raw==='1';
-  }catch(_e){
-    return true;
-  }
+  return false;
 }
 function isFirebaseEnabled(){
   return getFirebaseEnabled();
@@ -10036,6 +10003,10 @@ async function pushOrdersToFirebase(changedOrders){
 }
 
 async function migrateAllToFirebase(){
+  if(!getFirebaseEnabled()){
+    toast('ℹ️ Cloudflare backend modu aktif. Firebase migration kapalı.','info');
+    return;
+  }
   const connected=await initFirebaseRealtime({silent:false,force:true});
   if(!connected) return;
   try{
@@ -10095,6 +10066,10 @@ async function migrateAllToFirebase(){
 }
 
 async function connectFirebaseNow(){
+  if(!getFirebaseEnabled()){
+    toast('ℹ️ Cloudflare backend modu aktif. Connect Now devre dışı.','info');
+    return;
+  }
   resetHealthCounters();
   if(_firebaseAuthNeedsFreshLogin){
     clearFirebaseAuthNeedsFreshLogin();
