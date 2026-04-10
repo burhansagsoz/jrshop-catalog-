@@ -8472,6 +8472,17 @@ function cacheFirebaseLoginCreds(email,password){
     localStorage.setItem(FIREBASE_AUTH_PASSWORD_KEY,encodeSavedPassword(pw));
   }catch(_e){}
 }
+function clearFirebaseLoginCreds(opts={}){
+  const includeRemember=opts.includeRemember!==false;
+  try{
+    localStorage.removeItem(FIREBASE_AUTH_EMAIL_KEY);
+    localStorage.removeItem(FIREBASE_AUTH_PASSWORD_KEY);
+    if(includeRemember){
+      localStorage.removeItem('jb_remember_email');
+      localStorage.removeItem('jb_remember_pw');
+    }
+  }catch(_e){}
+}
 function mapFirebaseAuthState(err,defaultState='auth_error'){
   const code=err&&err.code?String(err.code):'';
   if(!code) return defaultState;
@@ -8680,12 +8691,15 @@ async function firebaseSignInForSession(email,password){
     if(authCode==='auth/too-many-requests'){
       markError(err);
       _health.authState='auth_rate_limited';
+      // Stop retrying cached email/password in a tight loop; keep app on anonymous fallback.
+      clearFirebaseLoginCreds({includeRemember:true});
       setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
       setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
       return null;
     }
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
       // Soft fail: app login may still be valid even when Firebase password differs.
+      clearFirebaseLoginCreds({includeRemember:true});
       setFirebasePasswordRetry(FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS);
       _health.authState=resolveStableAuthState('waiting_login');
       return null;
