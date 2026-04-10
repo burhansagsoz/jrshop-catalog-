@@ -11356,6 +11356,11 @@ function renderResellerMessages(msgs){
   const el=document.getElementById('res-chat-messages')||document.getElementById('res-chat-msgs');
   if(!el){ console.warn('[renderResellerMessages] element bulunamadı'); return; }
   if(!msgs) msgs = [];
+  const prevScrollTop=el.scrollTop||0;
+  const prevClientHeight=el.clientHeight||0;
+  const prevScrollHeight=el.scrollHeight||0;
+  const wasAtBottom=(prevScrollTop+prevClientHeight)>=prevScrollHeight-24;
+  const prevLen=el.querySelectorAll('.msg-item').length;
   if(!msgs.length){el.innerHTML='<div style="text-align:center;color:var(--muted);font-size:13px;padding:20px;">No messages yet. Say hi! 👋</div>';return;}
   
   // Get admin photo
@@ -11395,6 +11400,7 @@ function renderResellerMessages(msgs){
       </div>
     </div>`;
   }).join('');
+  const newLen=msgs.length;
   if(wasAtBottom || (typeof newLen!=="undefined" && newLen > prevLen)) el.scrollTop=el.scrollHeight;
 }
 
