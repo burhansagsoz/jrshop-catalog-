@@ -7755,6 +7755,7 @@ let _firebasePasswordRetryAt=0;
 let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
+let _lastAnonymousAuthAt=0;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
@@ -8505,6 +8506,17 @@ function setFirebaseRateLimitRetry(ms){
   _firebaseRateLimitRetryAt=Math.max(_firebaseRateLimitRetryAt,Date.now()+delay);
   clampFirebaseAuthRetryGuards();
 }
+function markAnonymousAuthSeen(){
+  _lastAnonymousAuthAt=Date.now();
+}
+function hasRecentAnonymousAuth(){
+  return (Date.now()-Number(_lastAnonymousAuthAt||0)) < 2*60*1000;
+}
+function resolveStableAuthState(base='waiting_login'){
+  if(hasRecentAnonymousAuth() || String(_health.authState||'')==='anonymous') return 'anonymous';
+  if(getFirebaseAuthRetryRemainingMs()>0) return 'auth_rate_limited';
+  return String(base||'waiting_login');
+}
 function clearFirebaseAuthRetryGuards(){
   _firebasePasswordRetryAt=0;
   _firebaseRateLimitRetryAt=0;
@@ -8546,13 +8558,13 @@ async function ensureFirebaseAuthSession(){
     const unsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
       saveAuthSession(authUser||null);
       if(authUser){
+        if(authUser.isAnonymous) markAnonymousAuthSeen();
         _health.authState=authUser.isAnonymous?'anonymous':'signed_in';
         resolve(authUser);
         try{unsub();}catch(_e){}
         return;
       }
-      // Do not force anonymous auth; wait for explicit login credentials.
-      _health.authState='waiting_login';
+      _health.authState=resolveStableAuthState('waiting_login');
       resolve(null);
       try{unsub();}catch(_e){}
     });
@@ -8564,11 +8576,12 @@ function ensureFirebaseAuthWatcher(){
   _firebaseAuthWatcherUnsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
     saveAuthSession(authUser||null);
     if(authUser){
+      if(authUser.isAnonymous) markAnonymousAuthSeen();
       _health.authState=authUser.isAnonymous?'anonymous':'signed_in';
       return;
     }
     const resolveWaitingState=function(){
-      return getFirebaseAuthRetryRemainingMs()>0?'auth_rate_limited':'waiting_login';
+      return resolveStableAuthState('waiting_login');
     };
     _health.authState=resolveWaitingState();
     if(_firebaseReauthTimer) clearTimeout(_firebaseReauthTimer);
@@ -8597,6 +8610,7 @@ async function ensureFirebaseOnlineAuth(opts={}){
   if(!_firebaseAuth) return null;
   if(_firebaseAuth.currentUser){
     const current=_firebaseAuth.currentUser;
+    if(current.isAnonymous) markAnonymousAuthSeen();
     _health.authState=current.isAnonymous?'anonymous':'signed_in';
     if(!current.isAnonymous) clearFirebaseAuthRetryGuards();
     return current;
@@ -8618,15 +8632,16 @@ async function ensureFirebaseOnlineAuth(opts={}){
     try{
       const anon=await _firebaseAuth.signInAnonymously();
       saveAuthSession(anon&&anon.user?anon.user:null);
+      markAnonymousAuthSeen();
       _health.authState='anonymous';
       return anon&&anon.user?anon.user:null;
     }catch(err){
       markError(err);
-      _health.authState=mapFirebaseAuthState(err,'waiting_login');
+      _health.authState=resolveStableAuthState(mapFirebaseAuthState(err,'waiting_login'));
       return null;
     }
   }
-  _health.authState='waiting_login';
+  _health.authState=resolveStableAuthState('waiting_login');
   return null;
 }
 
@@ -8635,7 +8650,7 @@ async function firebaseSignInForSession(email,password){
   const em=String(email||'').trim().toLowerCase();
   const pw=String(password||'');
   if(!isValidAuthEmail(em)||!pw){
-    _health.authState='waiting_login';
+    _health.authState=resolveStableAuthState('waiting_login');
     return null;
   }
   try{
@@ -8672,7 +8687,7 @@ async function firebaseSignInForSession(email,password){
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
       // Soft fail: app login may still be valid even when Firebase password differs.
       setFirebasePasswordRetry(FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS);
-      _health.authState='waiting_login';
+      _health.authState=resolveStableAuthState('waiting_login');
       return null;
     }
     markError(err);
