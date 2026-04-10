@@ -59,11 +59,23 @@ export default {
         // Tablolar
         await db.prepare('CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
         await db.prepare('CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)').run();
-        // Admin kullanıcısı ekle
-        const users = [{"id":"u1","email":"joobuyadmin@gmail.com","password":"joobuy1212.","role":"Admin","dname":"Admin"}];
+        // Admin kullanıcısı ekle (mevcut kullanıcı listesini EZME)
+        const adminUser = {"id":"u1","email":"joobuyadmin@gmail.com","password":"joobuy1212.","role":"Admin","dname":"Admin"};
+        const currentUsersRow = await db.prepare("SELECT value FROM kv_store WHERE key='jb_users'").first();
+        let users = [];
+        if (currentUsersRow && currentUsersRow.value) {
+          try {
+            users = JSON.parse(currentUsersRow.value) || [];
+          } catch {
+            users = [];
+          }
+        }
+        if (!Array.isArray(users)) users = [];
+        const hasAdmin = users.some(u => u && String(u.email || '').toLowerCase() === String(adminUser.email).toLowerCase());
+        if (!hasAdmin) users.unshift(adminUser);
         await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
           .bind('jb_users', JSON.stringify(users)).run();
-        return json({ ok: true, message: 'Setup tamam! Giriş yapabilirsiniz.' });
+        return json({ ok: true, message: 'Setup tamam! Kullanıcı listesi korundu.', usersCount: users.length });
       } catch(e) { return json({ error: e.message }, 500); }
     }
 
