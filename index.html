@@ -10604,7 +10604,7 @@ async function startPendingPoll(){
         newOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
       }
       if(!shouldAcceptRemoteOrders(newOrders)){
-        continue;
+        return;
       }
       if(Array.isArray(newOrders)){
         if(me.role==='Reseller'){
