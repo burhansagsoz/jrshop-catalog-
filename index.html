@@ -1595,7 +1595,7 @@ body.dark .modal-foot{background:#263548;}
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
               <button class="btn btn-primary" onclick="saveFirebaseSettings()">💾 Save Firebase</button>
-              <button class="btn btn-blue" onclick="connectFirebaseNow()">🔌 Connect Now</button>
+              <button class="btn btn-blue" id="btn-connect-firebase-now" onclick="connectFirebaseNow()">🔌 Connect Now</button>
               <button class="btn btn-ghost" onclick="migrateAllToFirebase()">⬆️ Migrate Current Data</button>
             </div>
             <div id="firebase-health-panel" style="margin-top:10px;"></div>
@@ -2496,6 +2496,7 @@ function safeApplyRemoteOrders(remoteOrders){
 }
 function scheduleFirebaseAutoConnect(reason){
   if(!getFirebaseEnabled()) return;
+  if(!me) return;
   const delayMs=reason==='boot'?180:80;
   setTimeout(function(){
     initFirebaseRealtime({silent:true,force:true}).then(function(ok){
@@ -2512,7 +2513,6 @@ async function login(){
   const em=document.getElementById('l-em').value.trim().toLowerCase();
   const pw=document.getElementById('l-pw').value;
   resetHealthCounters();
-  cacheFirebaseLoginCreds(em,pw);
   users=normalizeUsersList(users);
   let u=findUserForLogin(em,pw);
   if(!u){
@@ -7729,6 +7729,7 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
+const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
@@ -7755,6 +7756,7 @@ let _firebasePasswordRetryAt=0;
 let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
+const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
@@ -7784,6 +7786,10 @@ function ensureFirebaseConfigDefaults(){
   }
   if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
     localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
+  }
+  // Signed-in transport auth only (no anonymous fallback).
+  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
+    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'1');
   }
 }
 ensureFirebaseConfigDefaults();
@@ -8178,7 +8184,7 @@ async function tryFirebaseAuthRecoveryNow(){
   try{
     await initFirebaseRealtime({silent:true,force:true});
     if(!_firebaseAuth) return false;
-    const u=await ensureFirebaseOnlineAuth({allowAnonymous:true,ignoreRetryGuards:true});
+    const u=await ensureFirebaseOnlineAuth();
     if(!u) return false;
     if(!_health.ordersRealtime || !_health.feedRealtime || !_health.dataRealtime){
       await initFirebaseRealtime({silent:true,force:true});
@@ -8323,7 +8329,7 @@ function getFirebaseConfig(){
 }
 function firebaseAuthHint(err){
   const code=String(err&&err.code||'');
-  if(code==='auth/operation-not-allowed') return 'enable Email/Password and Anonymous in Firebase Auth Sign-in method';
+  if(code==='auth/operation-not-allowed') return 'enable Email/Password in Firebase Auth Sign-in method';
   if(code==='auth/api-key-not-valid') return 'check Firebase apiKey in Settings';
   if(code==='auth/invalid-api-key') return 'check Firebase apiKey in Settings';
   if(code==='auth/invalid-email') return 'fix saved login email format and sign in again';
@@ -8335,7 +8341,7 @@ function firebaseAuthHint(err){
 }
 function firebaseAuthStateHint(state){
   const s=String(state||'');
-  if(s==='auth_provider_disabled') return 'Firebase Auth -> Sign-in method: enable Email/Password and Anonymous';
+  if(s==='auth_provider_disabled') return 'Firebase Auth -> Sign-in method: enable Email/Password';
   if(s==='auth_invalid_api_key') return 'Firebase config API key invalid';
   if(s==='auth_invalid_email') return 'Saved login email format is invalid; sign in again from login screen';
   if(s==='auth_unauthorized_domain') return 'Firebase Auth -> Authorized domains: add this domain';
@@ -8471,6 +8477,17 @@ function cacheFirebaseLoginCreds(email,password){
     localStorage.setItem(FIREBASE_AUTH_PASSWORD_KEY,encodeSavedPassword(pw));
   }catch(_e){}
 }
+function clearFirebaseLoginCreds(opts={}){
+  const includeRemember=opts.includeRemember!==false;
+  try{
+    localStorage.removeItem(FIREBASE_AUTH_EMAIL_KEY);
+    localStorage.removeItem(FIREBASE_AUTH_PASSWORD_KEY);
+    if(includeRemember){
+      localStorage.removeItem('jb_remember_email');
+      localStorage.removeItem('jb_remember_pw');
+    }
+  }catch(_e){}
+}
 function mapFirebaseAuthState(err,defaultState='auth_error'){
   const code=err&&err.code?String(err.code):'';
   if(!code) return defaultState;
@@ -8505,18 +8522,24 @@ function setFirebaseRateLimitRetry(ms){
   _firebaseRateLimitRetryAt=Math.max(_firebaseRateLimitRetryAt,Date.now()+delay);
   clampFirebaseAuthRetryGuards();
 }
+function resolveSignedInAuthState(base='waiting_login'){
+  if(getFirebaseAuthRetryRemainingMs()>0) return 'auth_rate_limited';
+  return String(base||'waiting_login');
+}
 function clearFirebaseAuthRetryGuards(){
   _firebasePasswordRetryAt=0;
   _firebaseRateLimitRetryAt=0;
 }
 
 function getFirebaseLoginCreds(){
+  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH || !me) return null;
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
+  if(!isValidAuthEmail(meEmail)) return null;
   const mePw=me&&me.password?String(me.password):'';
-  if(isValidAuthEmail(meEmail)&&mePw) return {email:meEmail,password:mePw};
+  if(mePw) return {email:meEmail,password:mePw};
   const remEmail=String(localStorage.getItem('jb_remember_email')||'').trim().toLowerCase();
   const remPw=String(localStorage.getItem('jb_remember_pw')||'');
-  if(isValidAuthEmail(remEmail)&&remPw) return {email:remEmail,password:remPw};
+  if(remEmail===meEmail && remPw) return {email:remEmail,password:remPw};
   if(remEmail && !isValidAuthEmail(remEmail)){
     try{
       localStorage.removeItem('jb_remember_email');
@@ -8525,7 +8548,7 @@ function getFirebaseLoginCreds(){
   }
   const savedEmail=String(localStorage.getItem(FIREBASE_AUTH_EMAIL_KEY)||'').trim().toLowerCase();
   const savedPw=decodeSavedPassword(localStorage.getItem(FIREBASE_AUTH_PASSWORD_KEY)||'');
-  if(isValidAuthEmail(savedEmail)&&savedPw) return {email:savedEmail,password:savedPw};
+  if(savedEmail===meEmail && savedPw) return {email:savedEmail,password:savedPw};
   if(savedEmail && !isValidAuthEmail(savedEmail)){
     try{
       localStorage.removeItem(FIREBASE_AUTH_EMAIL_KEY);
@@ -8536,7 +8559,7 @@ function getFirebaseLoginCreds(){
   const formPwEl=document.getElementById('l-pw');
   const formEmail=formEmailEl&&formEmailEl.value?String(formEmailEl.value).trim().toLowerCase():'';
   const formPw=formPwEl&&formPwEl.value?String(formPwEl.value):'';
-  if(isValidAuthEmail(formEmail)&&formPw) return {email:formEmail,password:formPw};
+  if(formEmail===meEmail && formPw) return {email:formEmail,password:formPw};
   return null;
 }
 
@@ -8546,13 +8569,18 @@ async function ensureFirebaseAuthSession(){
     const unsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
       saveAuthSession(authUser||null);
       if(authUser){
-        _health.authState=authUser.isAnonymous?'anonymous':'signed_in';
-        resolve(authUser);
+        if(authUser.isAnonymous){
+          try{await _firebaseAuth.signOut();}catch(_e){}
+          _health.authState=resolveSignedInAuthState('waiting_login');
+          resolve(null);
+        }else{
+          _health.authState='signed_in';
+          resolve(authUser);
+        }
         try{unsub();}catch(_e){}
         return;
       }
-      // Do not force anonymous auth; wait for explicit login credentials.
-      _health.authState='waiting_login';
+      _health.authState=resolveSignedInAuthState('waiting_login');
       resolve(null);
       try{unsub();}catch(_e){}
     });
@@ -8564,59 +8592,70 @@ function ensureFirebaseAuthWatcher(){
   _firebaseAuthWatcherUnsub=_firebaseAuth.onAuthStateChanged(async authUser=>{
     saveAuthSession(authUser||null);
     if(authUser){
-      _health.authState=authUser.isAnonymous?'anonymous':'signed_in';
+      if(authUser.isAnonymous){
+        try{await _firebaseAuth.signOut();}catch(_e){}
+        _health.authState=resolveSignedInAuthState('waiting_login');
+        return;
+      }
+      _health.authState='signed_in';
       return;
     }
-    _health.authState='waiting_login';
+    const resolveWaitingState=function(){
+      return resolveSignedInAuthState('waiting_login');
+    };
+    _health.authState=resolveWaitingState();
     if(_firebaseReauthTimer) clearTimeout(_firebaseReauthTimer);
-    const retryWaitMs=Math.max(700,Math.min(60000,getFirebaseAuthRetryRemainingMs()+500));
-    _firebaseReauthTimer=setTimeout(async()=>{
+    const retryWaitMs=Math.max(700,Math.min(12000,getFirebaseAuthRetryRemainingMs()+500));
+    const tryRecoverNow=async function(){
       try{
-        const u=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+        const u=await ensureFirebaseOnlineAuth();
         if(u && (!_firebaseReady || !_health.ordersRealtime || !_health.feedRealtime)){
           initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
+        }else if(!u){
+          _health.authState=resolveWaitingState();
         }
-      }catch(_e){}
-    },retryWaitMs);
+      }catch(_e){
+        _health.authState=resolveWaitingState();
+      }
+    };
+    // Try once immediately to reduce signed-out gaps.
+    tryRecoverNow().catch(()=>{});
+    _firebaseReauthTimer=setTimeout(tryRecoverNow,retryWaitMs);
   });
 }
 
 async function ensureFirebaseOnlineAuth(opts={}){
-  const allowAnonymous=opts.allowAnonymous!==false;
   const ignoreRetryGuards=!!opts.ignoreRetryGuards;
   if(!_firebaseAuth) return null;
+  if(!me || !isValidAuthEmail(me.email)){
+    _health.authState='waiting_login';
+    return null;
+  }
   if(_firebaseAuth.currentUser){
     const current=_firebaseAuth.currentUser;
-    _health.authState=current.isAnonymous?'anonymous':'signed_in';
-    if(!current.isAnonymous) clearFirebaseAuthRetryGuards();
-    return current;
+    if(!current.isAnonymous){
+      _health.authState='signed_in';
+      clearFirebaseAuthRetryGuards();
+      return current;
+    }
+    try{await _firebaseAuth.signOut();}catch(_e){}
   }
   clampFirebaseAuthRetryGuards();
   const now=Date.now();
   const rateRetryBlocked=!ignoreRetryGuards && now<_firebaseRateLimitRetryAt;
   const passwordRetryBlocked=!ignoreRetryGuards && now<_firebasePasswordRetryAt;
-  const creds=getFirebaseLoginCreds();
-  if(!rateRetryBlocked && !passwordRetryBlocked && creds&&creds.email&&creds.password){
-    const u=await firebaseSignInForSession(creds.email,creds.password);
-    if(u) return u;
-  }
-  if(rateRetryBlocked){
+  if(rateRetryBlocked || passwordRetryBlocked){
     _health.authState='auth_rate_limited';
-    if(!allowAnonymous) return null;
+    return null;
   }
-  if(allowAnonymous){
-    try{
-      const anon=await _firebaseAuth.signInAnonymously();
-      saveAuthSession(anon&&anon.user?anon.user:null);
-      _health.authState='anonymous';
-      return anon&&anon.user?anon.user:null;
-    }catch(err){
-      markError(err);
-      _health.authState=mapFirebaseAuthState(err,'waiting_login');
-      return null;
-    }
+  const creds=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseLoginCreds():null;
+  if(!creds||!creds.email||!creds.password){
+    _health.authState='waiting_login';
+    return null;
   }
-  _health.authState='waiting_login';
+  const u=await firebaseSignInForSession(creds.email,creds.password);
+  if(u && !u.isAnonymous) return u;
+  _health.authState=resolveSignedInAuthState('waiting_login');
   return null;
 }
 
@@ -8625,7 +8664,7 @@ async function firebaseSignInForSession(email,password){
   const em=String(email||'').trim().toLowerCase();
   const pw=String(password||'');
   if(!isValidAuthEmail(em)||!pw){
-    _health.authState='waiting_login';
+    _health.authState=resolveSignedInAuthState('waiting_login');
     return null;
   }
   try{
@@ -8655,14 +8694,17 @@ async function firebaseSignInForSession(email,password){
     if(authCode==='auth/too-many-requests'){
       markError(err);
       _health.authState='auth_rate_limited';
+      // Stop retrying cached email/password in a tight loop.
+      clearFirebaseLoginCreds({includeRemember:true});
       setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
       setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
       return null;
     }
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
       // Soft fail: app login may still be valid even when Firebase password differs.
+      clearFirebaseLoginCreds({includeRemember:true});
       setFirebasePasswordRetry(FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS);
-      _health.authState='waiting_login';
+      _health.authState=resolveSignedInAuthState('waiting_login');
       return null;
     }
     markError(err);
@@ -8849,7 +8891,7 @@ async function uploadImageWithFallback(data,type='image/jpeg',opts={}){
 async function writeAuditEvent(action,payload){
   try{
     if(!_firebaseDb) return;
-    const uid=(_firebaseAuth&&_firebaseAuth.currentUser&&_firebaseAuth.currentUser.uid)||'anonymous';
+    const uid=(_firebaseAuth&&_firebaseAuth.currentUser&&_firebaseAuth.currentUser.uid)||'signed_out';
     await _firebaseDb.collection(FIREBASE_COLLECTION_AUDIT).add({
       action:action||'unknown',
       actor:me&&me.email?me.email:'system',
@@ -8995,8 +9037,10 @@ function disconnectFirebaseRealtime(){
   _health.ordersRealtime=false;
   _health.feedRealtime=false;
   _health.dataRealtime=false;
-  // Do not force signed_out here: auth watcher/auth recovery should decide current state.
-  if(_health.authState!=='anonymous') _health.authState='waiting_login';
+  // Keep recoverable auth state; do not downgrade stable fallback states.
+  if(!['signed_in','auth_rate_limited'].includes(String(_health.authState||''))){
+    _health.authState='waiting_login';
+  }
 }
 function stopFirebaseRealtime(){
   disconnectFirebaseRealtime();
@@ -9205,7 +9249,7 @@ async function initFirebaseRealtime(opts={}){
       }catch(_e){}
       await ensureFirebaseAuthSession();
       ensureFirebaseAuthWatcher();
-      const authedUser=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+      const authedUser=await ensureFirebaseOnlineAuth();
       if(!authedUser){
         disconnectFirebaseRealtime();
         const authWait=getFirebaseAuthRetryRemainingMs();
@@ -9933,7 +9977,7 @@ async function migrateAllToFirebase(){
   try{
     const authUser=_firebaseAuth&&_firebaseAuth.currentUser;
     if(!authUser){
-      const ensured=await ensureFirebaseOnlineAuth({allowAnonymous:true});
+      const ensured=await ensureFirebaseOnlineAuth();
       if(!ensured){
         toast('❌ Firebase auth hazır değil. Çıkış/Giriş yapıp tekrar deneyin.','err');
         return;
@@ -9991,9 +10035,43 @@ async function connectFirebaseNow(){
   resetHealthCounters();
   if(waitMs>0){
     _health.authState='auth_rate_limited';
-    toast('⚠️ Firebase Email/Password geçici limitte. Güvenli realtime modu deneniyor...','info');
+    toast(`⚠️ Firebase Email/Password geçici limitte (${Math.max(1,Math.ceil(waitMs/1000))}s). Tekrar deneme bekleniyor.`,'info');
+    updateConnectNowCooldownUi(waitMs);
+    return;
   }
+  updateConnectNowCooldownUi(0);
   await initFirebaseRealtime({silent:false,force:true});
+}
+
+let _connectNowCooldownTimer=null;
+function updateConnectNowCooldownUi(waitMs){
+  const btn=document.getElementById('btn-connect-firebase-now');
+  if(!btn) return;
+  const remain=Math.max(0,Number(waitMs)||0);
+  const render=function(ms){
+    const left=Math.max(0,Math.ceil(ms/1000));
+    if(left>0){
+      btn.disabled=true;
+      btn.textContent=`⏳ Connect Now (${left}s)`;
+    }else{
+      btn.disabled=false;
+      btn.textContent='🔌 Connect Now';
+    }
+  };
+  if(_connectNowCooldownTimer){
+    clearInterval(_connectNowCooldownTimer);
+    _connectNowCooldownTimer=null;
+  }
+  render(remain);
+  if(remain<=0) return;
+  _connectNowCooldownTimer=setInterval(function(){
+    const live=getFirebaseAuthRetryRemainingMs();
+    render(live);
+    if(live<=0 && _connectNowCooldownTimer){
+      clearInterval(_connectNowCooldownTimer);
+      _connectNowCooldownTimer=null;
+    }
+  },1000);
 }
 
 // ── PWA ──
