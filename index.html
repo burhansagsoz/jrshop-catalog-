@@ -2407,28 +2407,9 @@ function mergeArrayByTs(localArr,remoteArr){
   return [...byId.values()];
 }
 function mergeChatMessages(localArr,remoteArr){
-  const local=Array.isArray(localArr)?localArr:[];
-  const remote=Array.isArray(remoteArr)?remoteArr:[];
-  const byId=new Map();
-  const putMessage=function(raw,chatKey){
-    const normalized=normalizeChatMessage(raw,chatKey);
-    const key=String(normalized.id||normalized.opId||`${normalized.from}|${normalized.to}|${normalized.ts}|${normalized.text||''}`);
-    const prev=byId.get(key);
-    if(!prev){
-      byId.set(key,normalized);
-      return;
-    }
-    const prevV=Number(prev.v)||0;
-    const nextV=Number(normalized.v)||0;
-    const prevTs=Number(prev.updatedAt||prev.ts)||0;
-    const nextTs=Number(normalized.updatedAt||normalized.ts)||0;
-    if(nextV>prevV || (nextV===prevV && nextTs>=prevTs)){
-      byId.set(key,{...prev,...normalized});
-    }
-  };
-  local.forEach(function(msg){putMessage(msg,'local');});
-  remote.forEach(function(msg){putMessage(msg,'remote');});
-  return [...byId.values()].sort((a,b)=>(Number(a&&a.ts)||0)-(Number(b&&b.ts)||0));
+  const merged=mergeArrayByTs(localArr,remoteArr);
+  // Keep chronological chat order for renderer consistency.
+  return merged.sort((a,b)=>(a&&a.ts||0)-(b&&b.ts||0));
 }
 function normalizeChatMessage(msg,chatKey){
   const key=String(chatKey||'');
@@ -2438,7 +2419,6 @@ function normalizeChatMessage(msg,chatKey){
   const from=msg&&msg.from!==undefined?String(msg.from):'';
   const to=msg&&msg.to!==undefined?String(msg.to):'';
   const read=!!(msg&&msg.read);
-  const readAt=read?Number(msg&&msg.readAt||baseTs):0;
   const serialized=(function(v){try{return JSON.stringify(v||{});}catch(_e){return String(v||'');}})(msg||{});
   const v=Math.max(1,Number(msg&&msg.v)||1);
   const opId=String(msg&&msg.opId||msg&&msg.lastOpId||('op_'+key+'_'+id+'_'+hashStringFast(serialized)));
@@ -2449,7 +2429,6 @@ function normalizeChatMessage(msg,chatKey){
     to,
     text,
     read,
-    readAt:readAt||undefined,
     ts:baseTs,
     updatedAt:Number(msg&&msg.updatedAt)||baseTs,
     v,
@@ -2459,123 +2438,7 @@ function normalizeChatMessage(msg,chatKey){
 }
 function normalizeChatMessages(list,chatKey){
   const arr=Array.isArray(list)?list:[];
-  return mergeChatMessages([],arr.map(function(m){return normalizeChatMessage(m,chatKey);}));
-}
-function getChatThreadMetaMap(){
-  try{
-    const raw=localStorage.getItem('jb_chat_index');
-    const parsed=raw?JSON.parse(raw):{};
-    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
-  }catch(_e){
-    return {};
-  }
-}
-function writeChatThreadMetaMap(map){
-  try{localStorage.setItem('jb_chat_index',JSON.stringify(map&&typeof map==='object'?map:{}));}catch(_e){}
-}
-function toChatPreviewText(msg){
-  const text=String(msg&&msg.text||'');
-  if(!text) return '';
-  if(text.startsWith('[img]')) return '📷 Photo';
-  if(text.startsWith('[voice]')) return '🎤 Voice';
-  return text.replace(/\s+/g,' ').trim().slice(0,60);
-}
-function getChatThreadMetaByMsgs(threadId,msgs){
-  const arr=Array.isArray(msgs)?msgs:[];
-  const rid=String(threadId||'');
-  const resellerUnread=arr.filter(function(m){return m&&String(m.from||'')==='admin'&&!m.read;}).length;
-  const adminUnread=arr.filter(function(m){return m&&String(m.from||'')===rid&&!m.read;}).length;
-  const last=arr[arr.length-1]||null;
-  const lastTs=Number(last&&last.ts)||0;
-  return {
-    threadId:rid,
-    unreadCountAdmin:adminUnread,
-    unreadCountReseller:resellerUnread,
-    unreadCount:adminUnread,
-    lastMessageAt:lastTs,
-    lastMessagePreview:toChatPreviewText(last),
-    updatedAt:Date.now(),
-    v:Math.max(1,...arr.map(function(m){return Number(m&&m.v)||1;}))
-  };
-}
-function updateChatThreadIndexByMessages(threadId,msgs,opts={}){
-  const rid=String(threadId||'');
-  if(!rid) return null;
-  const map=getChatThreadMetaMap();
-  const next=getChatThreadMetaByMsgs(rid,msgs);
-  const prev=map[rid]&&typeof map[rid]==='object'?map[rid]:{};
-  const merged={...prev,...next,lastOpId:String(opts.opId||prev.lastOpId||'')};
-  map[rid]=merged;
-  writeChatThreadMetaMap(map);
-  if(opts.sync){
-    syncGenericKeyToCloud('jb_chat_index',map,{
-      opId:String(opts.opId||createLocalMutationOpId('chatindex'))
-    }).catch(function(){});
-  }
-  return merged;
-}
-function markChatThreadReadIdempotent(threadId,msgs,viewer){
-  const rid=String(threadId||'');
-  const role=String(viewer||'admin').toLowerCase();
-  const source=role==='reseller'?'admin':rid;
-  const arr=Array.isArray(msgs)?msgs:[];
-  let changed=false;
-  const now=Date.now();
-  const out=arr.map(function(raw){
-    const m=normalizeChatMessage(raw,'jb_chat_'+rid);
-    if(String(m.from||'')!==String(source)) return m;
-    if(m.read && Number(m.readAt||0)>0) return m;
-    changed=true;
-    const v=Math.max(1,Number(m.v)||1)+1;
-    const opId=createLocalMutationOpId('chatread');
-    return {
-      ...m,
-      read:true,
-      readAt:now,
-      updatedAt:now,
-      v,
-      opId,
-      lastOpId:opId
-    };
-  });
-  return {msgs:out,changed};
-}
-function buildChatThreadMeta(threadId,msgs,viewer){
-  const rid=String(threadId||'');
-  const role=String(viewer||'admin').toLowerCase();
-  const row=getChatThreadMetaByMsgs(rid,msgs);
-  if(role==='reseller'){
-    return {
-      ...row,
-      unreadCount:Number(row.unreadCountReseller||0)
-    };
-  }
-  return {
-    ...row,
-    unreadCount:Number(row.unreadCountAdmin||0)
-  };
-}
-function sortChatThreadsByPriority(rows){
-  const list=Array.isArray(rows)?rows.slice():[];
-  list.sort(function(a,b){
-    const ua=(Number(a&&a.unread||0)>0)?1:0;
-    const ub=(Number(b&&b.unread||0)>0)?1:0;
-    if(ua!==ub) return ub-ua;
-    const ta=Number(a&&a.lastAt||0);
-    const tb=Number(b&&b.lastAt||0);
-    if(tb!==ta) return tb-ta;
-    return String(a&&a.uid||'').localeCompare(String(b&&b.uid||''));
-  });
-  return list;
-}
-function updateChatThreadIndex(){
-  const out={};
-  Object.keys(_messages||{}).forEach(function(rid){
-    const arr=Array.isArray(_messages[rid])?_messages[rid]:[];
-    out[String(rid)]=getChatThreadMetaByMsgs(String(rid),arr);
-  });
-  writeChatThreadMetaMap(out);
-  return out;
+  return arr.map(function(m){return normalizeChatMessage(m,chatKey);});
 }
 function mergeKeyWithLocalFirst(key,remoteValue){
   if(remoteValue===undefined) return;
@@ -7896,15 +7759,6 @@ const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
 const UPLOAD_TIMEOUT_MS=7000;
-const SW_UPDATE_POLL_MS=10*60*1000;
-const REALTIME_META_FIELDS=Object.freeze(['id','v','updatedAt','opId','lastOpId','deletedAt']);
-const REALTIME_ENTITY_CONTRACT=Object.freeze({
-  orders:{collection:'jb_orders',required:['id','v','updatedAt','opId','lastOpId'],optional:['deletedAt']},
-  chatThread:{collection:'jb_chat_*',required:['id','v','updatedAt','opId','lastOpId'],optional:['deletedAt','readAt']},
-  users:{collection:'jb_users',required:['id','v','updatedAt','opId','lastOpId'],optional:['deletedAt']},
-  settings:{collection:'jb_settings',required:['id','v','updatedAt','opId','lastOpId'],optional:['deletedAt']},
-  counters:{collection:'derived',required:['updatedAt'],optional:[]}
-});
 const _health={
   firebaseConnected:false,
   lastSyncAt:0,
@@ -7915,17 +7769,13 @@ const _health={
   authState:'signed_out',
   feedRealtime:false,
   ordersRealtime:false,
-  dataRealtime:false,
-  lastAckAt:0,
-  streamLagMs:0
+  dataRealtime:false
 };
 let _realtimeRenderTimer=null;
 let _realtimeMetricsTimer=null;
 let _recoveredImageSyncTimer=null;
 const _recoveredImageOrderIds=new Set();
 let _lastOrdersSaveAuditAt=0;
-let _lastFullCloudRefreshAt=0;
-let _swUpdateReady=false;
 const _nativeFetch=window.fetch.bind(window);
 
 function ensureFirebaseConfigDefaults(){
@@ -7989,7 +7839,6 @@ function clearLocalOrderMutation(orderId){
   if(!Object.prototype.hasOwnProperty.call(map,String(orderId))) return;
   delete map[String(orderId)];
   writeLocalOrderMutations(map);
-  _health.lastAckAt=Date.now();
 }
 function hasActiveLocalOrderMutation(orderId){
   if(!orderId) return false;
@@ -8044,7 +7893,6 @@ function clearKeyLocalMutation(key){
   if(!Object.prototype.hasOwnProperty.call(map,k)) return;
   delete map[k];
   writeLocalDataMutations(map);
-  _health.lastAckAt=Date.now();
 }
 function hasKeyLocalMutation(key){
   const k=String(key||'').trim();
@@ -8066,16 +7914,12 @@ function queueGenericEventFallback(eventDoc){
 async function syncChatThreadToCloud(chatKey,msgs,meta={}){
   const key=String(chatKey||'');
   if(!key) return false;
-  const rid=key.replace('jb_chat_','');
-  const opId=String(meta.opId||createLocalMutationOpId('chat'));
-  const list=normalizeChatMessages(Array.isArray(msgs)?msgs:[],key);
+  const list=Array.isArray(msgs)?msgs:[];
   try{localStorage.setItem(key,JSON.stringify(list));}catch(_e){}
-  const ok=await syncGenericKeyToCloud(key,list,{
+  return await syncGenericKeyToCloud(key,list,{
     v:normalizeGenericVersion(meta.v||1),
-    opId
+    opId:meta.opId||createLocalMutationOpId('chat')
   });
-  updateChatThreadIndexByMessages(rid,list,{sync:true,opId});
-  return ok;
 }
 function getOrderVersion(order){
   return Math.max(0,Number(order&&order.v)||0);
@@ -8185,7 +8029,7 @@ function mergeChatByVersion(localMsgs,remoteMsgs){
   });
   return merged.sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
 }
-function normalizeChatMessageVersioned(msg,prev){
+function normalizeChatMessage(msg,prev){
   const base=msg&&typeof msg==='object'?msg:{};
   const old=prev&&typeof prev==='object'?prev:{};
   const ts=Number(base.ts)||Number(old.ts)||Date.now();
@@ -8257,11 +8101,6 @@ function markSync(source){
   _health.lastSyncAt=Date.now();
   _health.lastSyncSource=source||'-';
 }
-function markRealtimeLagFromTs(ts){
-  const n=Number(ts)||0;
-  if(!n) return;
-  _health.streamLagMs=Math.max(0,Date.now()-n);
-}
 function markApiCall(){
   _health.apiCalls++;
 }
@@ -8294,8 +8133,6 @@ function renderHealthPanel(){
   const q=getLocalSyncFallbackMetrics();
   const nextRetryTxt=(q.nextRetryAt&&q.nextRetryAt>Date.now())?`${Math.max(1,Math.ceil((q.nextRetryAt-Date.now())/1000))}s`:'now';
   const oldestTxt=q.oldestTs?`${Math.max(0,Math.floor((Date.now()-q.oldestTs)/1000))}s`:'-';
-  const streamLagTxt=`${Math.max(0,Math.floor(Number(_health.streamLagMs)||0))}ms`;
-  const lastAckTxt=_health.lastAckAt?fmtDateTime(_health.lastAckAt):'-';
   el.innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
@@ -8318,11 +8155,6 @@ function renderHealthPanel(){
         <div style="font-size:11px;color:var(--muted);">Outbox</div>
         <div style="font-size:13px;font-weight:700;">${q.ops} ops / ${q.keys} keys</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px;">oldest:${oldestTxt} · retry:${nextRetryTxt}</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">Stream</div>
-        <div style="font-size:13px;font-weight:700;">lag:${streamLagTxt}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px;">last ack:${esc(lastAckTxt)}</div>
       </div>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted);">Last sync: ${fmtTs} (${_health.lastSyncSource})</div>
@@ -9209,7 +9041,6 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
   if(!k || k==='jb_orders') return;
   if(hasKeyLocalMutation(k)) return;
   const ts=Number(updatedAt)||Date.now();
-  markRealtimeLagFromTs(ts);
   const incomingV=normalizeGenericVersion(opts&&opts.v);
   const incomingOpId=String(opts&&opts.lastOpId||opts&&opts.opId||'');
   const localMeta=readGenericMetaForKey(k);
@@ -9266,16 +9097,14 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
   }else if(k.indexOf('jb_chat_')===0){
     const rid=k.replace('jb_chat_','');
-    const normalized=normalizeChatMessages(Array.isArray(value)?value:[],k);
-    _messages[String(rid||'')]=normalized;
-    updateChatThreadIndexByMessages(rid,normalized,{sync:false,opId:incomingOpId});
+    _messages[String(rid||'')]=Array.isArray(value)?value:[];
     if(_chatReseller && String(_chatReseller)===String(rid||'')) renderMessages();
-    if(me&&me.id&&String(me.id)===String(rid||'')) renderResellerMessages(normalized);
+    if(me&&me.id&&String(me.id)===String(rid||'')) renderResellerMessages(Array.isArray(value)?value:[]);
     updateChatBadge();
     checkResellerUnreadMessages().catch(()=>{});
     if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
   }else if(k==='jb_chat_index'){
-    writeChatThreadMetaMap(value&&typeof value==='object'&&!Array.isArray(value)?value:{});
+    // keep durable snapshot only
   }
   clearKeyLocalMutation(k);
   markSync('data_snapshot:'+k);
@@ -9285,11 +9114,12 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
 }
 
 function renderLiveCounters(){
-  const stats=getOrderStatsSnapshot();
-  const allCount=stats.all;
-  const completedCount=stats.completed;
-  const readyCount=stats.ready;
-  const pendingApprovalCount=stats.pendingApproval;
+  const allCount=Array.isArray(orders)?orders.length:0;
+  const completedCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.status==='Completed').length;
+  const readyCount=(Array.isArray(orders)?orders:[]).filter(function(o){
+    return o&&o.status==='At Depot'&&getShelfStatus(o).ready;
+  }).length;
+  const pendingApprovalCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.pendingApproval).length;
   const setText=function(id,val){
     const el=document.getElementById(id);
     if(el) el.textContent=String(val);
@@ -10214,27 +10044,23 @@ if('serviceWorker' in navigator){
   }
 
     navigator.serviceWorker.register('./sw.js').then(reg=>{
-      // Safe apply strategy: check less frequently to avoid noisy update loops.
+      // Check for updates immediately and every 60 seconds
       reg.update();
-      setInterval(()=>reg.update(), SW_UPDATE_POLL_MS);
-      // Mark update availability and let user continue safely.
+      setInterval(()=>reg.update(), 60000);
+      // When new SW is waiting, activate it immediately
       reg.addEventListener('updatefound',()=>{
         const newSW=reg.installing;
         newSW.addEventListener('statechange',()=>{
           if(newSW.state==='installed'&&navigator.serviceWorker.controller){
-            try{localStorage.setItem('jb-sw-update-available','1');}catch(_e){}
+            newSW.postMessage('skipWaiting');
           }
         });
       });
     }).catch(()=>{});
     // Avoid force-reload while a logged-in user is actively using the app.
     navigator.serviceWorker.addEventListener('controllerchange',()=>{
-      const hasShown=localStorage.getItem('jb-sw-update-available')==='1';
       if(me){
-        if(!hasShown){
-          localStorage.setItem('jb-sw-update-available','1');
-          toast('🔄 Update ready. It will apply next reopen.','info');
-        }
+        toast('🔄 Update ready. It will apply next reopen.','info');
         return;
       }
       window.location.reload();
@@ -10792,13 +10618,12 @@ async function startResellerChatRealtime(){
 // Start global poll when admin logs in - checks all reseller chats
 function startGlobalChatPoll(){
   if(_globalChatPoll) clearInterval(_globalChatPoll);
-  const pollMs=(getFirebaseEnabled()&&_health.dataRealtime)?12000:(getFirebaseEnabled()?4000:5000);
+  const pollMs=getFirebaseEnabled()?1200:5000;
   _globalChatPoll = setInterval(pollAllChats, pollMs);
   pollAllChats(); // immediate first check
 }
 
 async function pollAllChats(){
-  if(getFirebaseEnabled()&&_health.dataRealtime) return;
   if(!me || me.role !== 'Admin') return;
   try{
     const api=getApiBase();
@@ -10839,13 +10664,19 @@ async function pollAllChats(){
       }
     }
     
-    // If a chat is open, mark as read via idempotent event.
+    // If a chat is open, mark as read and sync to cloud
     if(_chatReseller){
       const msgs = _messages[_chatReseller] || [];
-      const readRes=markChatThreadReadIdempotent(_chatReseller,msgs,'admin');
-      if(readRes.changed){
-        _messages[_chatReseller]=readRes.msgs;
-        await syncChatThreadToCloud('jb_chat_'+_chatReseller,readRes.msgs,{
+      let hasNewUnread = false;
+      msgs.forEach(m => {
+        if(m.from !== 'admin' && !m.read){
+          m.read = true;
+          hasNewUnread = true;
+        }
+      });
+      
+      if(hasNewUnread){
+        await syncChatThreadToCloud('jb_chat_'+_chatReseller,msgs,{
           opId:createLocalMutationOpId('chatread')
         });
         renderMessages();
@@ -10874,11 +10705,12 @@ let _messages = {}; // {resellerId: [{id, from, text, ts}]}
 function renderChatList(filter=''){
   const el = document.getElementById('chat-list');
   if(!el) return;
-  const f=String(filter||'').toLowerCase();
-  const resellers = users.filter(u => u.role==='Reseller' && (!f || (u.dname||'').toLowerCase().includes(f) || String(u.email||'').toLowerCase().includes(f)));
-  const rows=resellers.map(function(u){
+  const resellers = users.filter(u => u.role==='Reseller' && (!filter || u.dname?.toLowerCase().includes(filter.toLowerCase()) || u.email.toLowerCase().includes(filter.toLowerCase())));
+  if(!resellers.length){el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No resellers found</div>';return;}
+  el.innerHTML = resellers.map(u => {
     const msgs = _messages[u.id] || [];
-    const meta=buildChatThreadMeta(String(u.id),msgs,'admin');
+    const last = msgs[msgs.length-1];
+    const unread = msgs.filter(m => m.from===u.id && !m.read).length;
     const isActive = _chatReseller === u.id;
     const initial = (u.dname||u.email)[0].toUpperCase();
     const colors = ['#f97316','#7c3aed','#16a34a','#0891b2','#dc2626','#ca8a04'];
@@ -10887,27 +10719,22 @@ function renderChatList(filter=''){
     const avatarHtml = photo 
       ? `<img src="${photo}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">` 
       : initial;
-    return {uid:String(u.id),unread:meta.unreadCount,lastAt:meta.lastMessageAt||0,html:`<div onclick="openChatWith('${u.id}')" style="padding:12px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);background:${isActive?'var(--accent-light)':'transparent'};transition:.15s;" onmouseover="this.style.background='${isActive?'var(--accent-light)':'var(--bg)'}'" onmouseout="this.style.background='${isActive?'var(--accent-light)':'transparent'}'">
+    return `<div onclick="openChatWith('${u.id}')" style="padding:12px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);background:${isActive?'var(--accent-light)':'transparent'};transition:.15s;" onmouseover="this.style.background='${isActive?'var(--accent-light)':'var(--bg)'}'" onmouseout="this.style.background='${isActive?'var(--accent-light)':'transparent'}'">
       <div style="width:42px;height:42px;border-radius:50%;background:${photo?'transparent':color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;flex-shrink:0;overflow:hidden;">${avatarHtml}</div>
       <div style="flex:1;min-width:0;">
-        <div style="font-size:13px;font-weight:${meta.unreadCount?'700':'600'};color:${isActive?'var(--accent)':'var(--text)'};">${esc(u.dname||u.email)}</div>
-        <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">${meta.lastMessagePreview||'No messages yet'}</div>
+        <div style="font-size:13px;font-weight:${unread?'700':'600'};color:${isActive?'var(--accent)':'var(--text)'};">${esc(u.dname||u.email)}</div>
+        <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">${last?(last.text.startsWith('[img]')?'📷 Photo':esc(last.text.slice(0,35))):'No messages yet'}</div>
       </div>
-      ${meta.unreadCount?`<div style="background:#f97316;color:#fff;border-radius:50%;min-width:20px;height:20px;padding:0 4px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;">${meta.unreadCount}</div>`:''}
-    </div>`};
-  });
-  const sorted=sortChatThreadsByPriority(rows);
-  if(!sorted.length){el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No resellers found</div>';return;}
-  el.innerHTML=sorted.map(function(r){return r.html;}).join('');
-  updateChatThreadIndex();
+      ${unread?`<div style="background:#f97316;color:#fff;border-radius:50%;min-width:20px;height:20px;padding:0 4px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;">${unread}</div>`:''}
+    </div>`;
+  }).join('');
 }
 
 
 
 // ── CHAT POLLING ──
 async function pollMessages(resellerId){
-  if(!me || !resellerId) return;
-  if(getFirebaseEnabled() && _health.dataRealtime) return;
+  if(!resellerId) return;
   try{
     const api=getApiBase();
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
@@ -10963,12 +10790,19 @@ async function openChatWith(resellerId){
     <div style="width:36px;height:36px;border-radius:50%;background:${photo?'transparent':color};color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;overflow:hidden;">${avatarHtml}</div>
     <div><div style="font-size:14px;font-weight:700;">${esc(u.dname||u.email)}</div><div style="font-size:11px;color:#22c55e;font-weight:600;">● Active</div></div>`;
   
-  // Mark as read with idempotent event semantics.
-  const readPatch=markChatThreadReadIdempotent(String(resellerId),_messages[resellerId]||[],'admin');
-  _messages[resellerId]=Array.isArray(readPatch.msgs)?readPatch.msgs:[];
-  if(readPatch.changed){
+  // Mark as read and sync to cloud
+  const msgs = _messages[resellerId] || [];
+  let hasUnread = false;
+  msgs.forEach(m => {
+    if(m.from !== 'admin' && !m.read){
+      m.read = true;
+      hasUnread = true;
+    }
+  });
+  
+  if(hasUnread){
     try{
-      await syncChatThreadToCloud('jb_chat_'+resellerId,_messages[resellerId],{
+      await syncChatThreadToCloud('jb_chat_'+resellerId,msgs,{
         opId:createLocalMutationOpId('chatread')
       });
     }catch(e){}
@@ -11076,44 +10910,12 @@ function updateChatBadge(){
   const total=Object.values(_messages).reduce((s,msgs)=>s+msgs.filter(m=>m.from!=='admin'&&!m.read).length,0);
   const badge=document.getElementById('chat-badge');
   if(badge){badge.textContent=total;badge.style.display=total?'flex':'none';}
-  updateChatThreadIndex();
 }
 function refreshDashboardCounters(){
   const pg=document.getElementById('pg-dash');
   if(pg&&pg.classList.contains('on')){
     renderDash();
   }
-}
-
-
-function applyResellerUnreadBadges(unreadCount){
-  const n=Math.max(0,Number(unreadCount)||0);
-  const badge = document.getElementById('res-chat-badge');
-  if(badge){
-    if(n > 0){
-      badge.style.display = 'flex';
-      badge.textContent = n;
-    } else {
-      badge.style.display = 'none';
-    }
-  }
-  const headerBadge = document.getElementById('res-header-chat-badge');
-  if(headerBadge){
-    if(n > 0){
-      headerBadge.style.display = 'flex';
-      headerBadge.textContent = n;
-    } else {
-      headerBadge.style.display = 'none';
-    }
-  }
-}
-function updateResellerUnreadFromLocal(){
-  if(!me||!me.id) return 0;
-  const localMsgs=_messages[String(me.id||'')]||[];
-  const unreadLocal=localMsgs.filter(function(m){return m&&m.from==='admin'&&!m.read;}).length;
-  _lastResUnreadCount=unreadLocal;
-  applyResellerUnreadBadges(unreadLocal);
-  return unreadLocal;
 }
 
 
@@ -11126,17 +10928,13 @@ let _lastResUnreadCount = 0;
 function startResellerMessagePoll(){
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
   // Keep unread badge updated even when Firebase mode is enabled.
-  const pollMs=(getFirebaseEnabled()&&_health.dataRealtime)?10000:(getFirebaseEnabled()?3000:5000);
+  const pollMs=getFirebaseEnabled()?3000:5000;
   _resMsgPollInterval = setInterval(checkResellerUnreadMessages, pollMs);
   checkResellerUnreadMessages(); // Initial check
 }
 
 async function checkResellerUnreadMessages(){
   if(!me) return;
-  if(getFirebaseEnabled() && _health.dataRealtime){
-    updateResellerUnreadFromLocal();
-    return;
-  }
   try{
     const api=getApiBase();
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
@@ -11157,7 +10955,27 @@ async function checkResellerUnreadMessages(){
       }
     }
     _lastResUnreadCount = unreadCount;
-    applyResellerUnreadBadges(unreadCount);
+    
+    // Alt navigasyon badge
+    const badge = document.getElementById('res-chat-badge');
+    if(badge){
+      if(unreadCount > 0){
+        badge.style.display = 'flex';
+        badge.textContent = unreadCount;
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+    // Header chat badge
+    const headerBadge = document.getElementById('res-header-chat-badge');
+    if(headerBadge){
+      if(unreadCount > 0){
+        headerBadge.style.display = 'flex';
+        headerBadge.textContent = unreadCount;
+      } else {
+        headerBadge.style.display = 'none';
+      }
+    }
   }catch(e){
     console.warn('[checkResellerUnreadMessages]', e);
   }
@@ -11172,7 +10990,7 @@ function openResellerChat(){
   loadResellerMessages();
   if(_resChatInterval) clearInterval(_resChatInterval);
   // Keep a lightweight fallback poll only.
-  _resChatInterval = setInterval(loadResellerMessages, (getFirebaseEnabled()&&_health.dataRealtime)?10000:(getFirebaseEnabled()?2500:2000));
+  _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?2500:2000);
   // Clear unread badges when chat opened
   const badge = document.getElementById('res-chat-badge');
   if(badge) badge.style.display = 'none';
@@ -11190,19 +11008,22 @@ function closeResellerChat(){
 
 async function loadResellerMessages(){
   if(!me) return;
-  if(getFirebaseEnabled() && _health.dataRealtime) return;
   try{
     const chatKey='jb_chat_'+me.id;
     let msgs=[];
     try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
-    msgs=normalizeChatMessages(msgs,chatKey);
     
     // Mark admin messages as read if chat is open
     const isChatOpen = document.getElementById('res-chat-overlay')?.style.display === 'flex';
     if(isChatOpen){
-      const marked=markChatThreadReadIdempotent(String(me.id||''),msgs,'reseller');
-      msgs=marked.msgs;
-      const hasUnread=!!marked.changed;
+      let hasUnread = false;
+      msgs = msgs.map(m => {
+        if(m.from === 'admin' && !m.read){
+          hasUnread = true;
+          return {...m, read: true};
+        }
+        return m;
+      });
       
       // Save read status to cloud
       if(hasUnread){
@@ -11210,14 +11031,13 @@ async function loadResellerMessages(){
         await syncChatThreadToCloud(chatKey,msgs,{
           opId:createLocalMutationOpId('reschatread')
         });
-        updateChatThreadIndexByMessages(String(me.id||''),msgs,{sync:true,opId:createLocalMutationOpId('reschatindex')});
       }
       
       // Clear badge
       const badge = document.getElementById('res-chat-badge');
       if(badge) badge.style.display = 'none';
     }
-    updateChatThreadIndexByMessages(String(me.id||''),msgs,{sync:false});
+    
     renderResellerMessages(msgs);
   }catch(e){
     console.error('[loadResellerMessages]', e);
@@ -11282,10 +11102,7 @@ async function sendChatMsg(){
   const chatKey='jb_chat_'+_chatReseller;
   if(!_messages[_chatReseller]) _messages[_chatReseller] = [];
   _messages[_chatReseller].push(msg);
-  try{
-    localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));
-    updateChatThreadIndexByMessages(String(_chatReseller),_messages[_chatReseller],{sync:false});
-  }catch(_e){}
+  try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
   renderMessages();
   try{
     const msgs = (_messages[_chatReseller]||[]).slice();
@@ -11315,10 +11132,7 @@ async function sendResellerChatMsg(){
     let msgs=[];
     try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
     msgs.push(msg);
-    try{
-      localStorage.setItem(chatKey,JSON.stringify(msgs));
-      updateChatThreadIndexByMessages(String(me.id||''),msgs,{sync:false});
-    }catch(_e){}
+    try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
     const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
       opId:createLocalMutationOpId('reschatmsg')
     });
