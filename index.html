@@ -10612,6 +10612,22 @@ window.addEventListener('load',()=>{
 
 // ── PUSH NOTIFICATIONS ──
 const VAPID_PUBLIC_KEY='BIXbltcWkYVH22URYn4Lpr-CQi9KbTD5KPXf9HGOy7452zNS4ES7hhmIgZfnI3S7O3HZj4BsgwtuDZX-EI2g3HY';
+const PUSH_BLOCK_HINT_KEY='jb_push_blocked_hint_ts';
+function shouldShowPushBlockedHint(cooldownMs=6*60*60*1000){
+  const now=Date.now();
+  const last=Number(localStorage.getItem(PUSH_BLOCK_HINT_KEY)||0);
+  if((now-last)<cooldownMs) return false;
+  localStorage.setItem(PUSH_BLOCK_HINT_KEY,String(now));
+  return true;
+}
+function showPushBlockedHelpToast(){
+  if(!shouldShowPushBlockedHint()) return;
+  const isMobile=/android|iphone|ipad|ipod/i.test(navigator.userAgent||'');
+  const steps=isMobile
+    ? 'Browser settings → Site settings → Notifications → Allow'
+    : 'Address bar lock icon → Site settings → Notifications → Allow';
+  toast('🔕 Browser push is blocked. '+steps+'. In-app alerts continue.','info');
+}
 
 function urlBase64ToUint8Array(base64String){
   const padding='='.repeat((4-base64String.length%4)%4);
@@ -10629,7 +10645,7 @@ async function requestPushPermission(){
   }
   // Check current permission first
   if(Notification.permission === 'denied'){
-    toast('⚠️ Notifications blocked. Enable in browser settings.','info');
+    showPushBlockedHelpToast();
     return false;
   }
   if(Notification.permission === 'granted'){
@@ -10646,7 +10662,7 @@ async function requestPushPermission(){
 async function subscribeToPush(){
   try{
     const granted=await requestPushPermission();
-    if(!granted)return;
+    if(!granted)return false;
     const reg=await navigator.serviceWorker.ready;
     let sub=await reg.pushManager.getSubscription();
     if(!sub){
@@ -10735,7 +10751,11 @@ function playNotificationSound(){
 // Auto-subscribe on login for resellers
 async function initPushForReseller(){
   if(!me||me.role!=='Reseller')return;
-  subscribeToPush().catch(()=>{});
+  if(Notification.permission!=='denied'){
+    subscribeToPush().catch(()=>{});
+  }else{
+    showPushBlockedHelpToast();
+  }
   // Ask for notification permission after 3 seconds
   setTimeout(async()=>{
     if(Notification.permission==='default'){
@@ -10751,7 +10771,11 @@ async function initPushForReseller(){
 // Auto-subscribe on login for admins
 async function initPushForAdmin(){
   if(!me||me.role!=='Admin')return;
-  subscribeToPush().catch(()=>{});
+  if(Notification.permission!=='denied'){
+    subscribeToPush().catch(()=>{});
+  }else{
+    showPushBlockedHelpToast();
+  }
   // Ask for notification permission after 3 seconds
   setTimeout(async()=>{
     if(Notification.permission==='default'){
