@@ -2832,11 +2832,16 @@ async function navOrders(status,el){
         if(ordRes.ok){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
-            const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
-            orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
-            localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
-            updateBadges();
-            loaded=true;
+            if(shouldAcceptRemoteOrders(od.orders)){
+              const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
+              orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
+              localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+              updateBadges();
+              loaded=true;
+            }else{
+              // Guard: ignore empty/partial remote snapshot when local has data.
+              console.warn('[Pending] Ignoring remote orders snapshot to protect local data');
+            }
           }
         }
         if(!loaded){
@@ -2844,10 +2849,14 @@ async function navOrders(status,el){
           if(res.ok){
             const {data}=await res.json();
             if(data&&Array.isArray(data.jb_orders)){
-              const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
-              orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
-              localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
-              updateBadges();
+              if(shouldAcceptRemoteOrders(data.jb_orders)){
+                const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
+                orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
+                localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+                updateBadges();
+              }else{
+                console.warn('[Pending] Ignoring fallback /api/data orders snapshot to protect local data');
+              }
             }
           }
         }
@@ -7556,6 +7565,10 @@ async function loadFromCloudSilent(){
     if(ordPayload&&ordPayload.localOnly){
       return false;
     }
+    if(!shouldAcceptRemoteOrders(cloudOrders)){
+      // Guard: do not let empty remote snapshots wipe existing local orders.
+      return false;
+    }
 
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
     const merged=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'silent',pruneMissing:true});
@@ -7618,6 +7631,11 @@ async function loadFromCloud(){
           if(isLocalOnly){
             // Never wipe local orders on local-only responses.
             console.warn('[Remote] Skipping merge from localOnly orders payload');
+            return false;
+          }
+          if(!shouldAcceptRemoteOrders(cloudOrders)){
+            // Guard: ignore empty/partial remote snapshot when local has data.
+            console.warn('[Remote] Ignoring remote orders snapshot to protect local data');
             return false;
           }
         } else {
@@ -10610,9 +10628,21 @@ async function startPendingPoll(){
       let newOrders=[];
       try{
         const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-        if(ordRes.ok){const od=await ordRes.json();newOrders=od.orders||[];}
-        else{newOrders=data.jb_orders||[];}
-      }catch{newOrders=data.jb_orders||[];}
+        if(ordRes.ok){
+          const od=await ordRes.json();
+          newOrders=Array.isArray(od&&od.orders)?od.orders:[];
+          if(od&&od.localOnly){
+            newOrders=[];
+          }
+        }else{
+          newOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+        }
+      }catch{
+        newOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+      }
+      if(!shouldAcceptRemoteOrders(newOrders)){
+        continue;
+      }
       if(Array.isArray(newOrders)){
         if(me.role==='Reseller'){
           // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
