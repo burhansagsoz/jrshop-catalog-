@@ -2144,6 +2144,14 @@ function userIdentityKey(u){
 function mergeUsersSafely(localRaw,remoteRaw){
   const local=normalizeUsersList(localRaw);
   const remote=normalizeUsersList(remoteRaw);
+  // Guard: ignore suspicious remote payloads that only include default admin.
+  if(
+    local.length>=2 &&
+    remote.length===1 &&
+    String(remote[0]&&remote[0].email||'').toLowerCase()==='joobuyadmin@gmail.com'
+  ){
+    return local;
+  }
   const byKey=new Map();
   for(const u of local){
     byKey.set(userIdentityKey(u),u);
@@ -2155,6 +2163,15 @@ function mergeUsersSafely(localRaw,remoteRaw){
   }
   const merged=[...byKey.values()];
   return normalizeUsersList(merged.length?merged:[...DEFAULT_BOOT_USERS]);
+}
+function applyRemoteKeyToLocal(key,value,source='remote'){
+  const k=String(key||'').trim();
+  if(!k || k==='jb_orders') return;
+  if(k==='jb_users'){
+    persistUsersLocalSafe(Array.isArray(value)?value:[],source);
+    return;
+  }
+  try{localStorage.setItem(k,JSON.stringify(value));}catch(_e){}
 }
 function persistUsersLocalSafe(remoteUsers,source=''){
   let localUsers=[];
@@ -2273,7 +2290,12 @@ let _ordersStorageWarnAt=0;
 function compactOrdersForStorage(list){
   const arr=Array.isArray(list)?list:[];
   const keepRemoteable=function(v){
-    return (typeof v==='string'&&/^(https?:|blob:)/i.test(v))?v:null;
+    if(typeof v!=='string') return null;
+    const s=v.trim();
+    if(!s) return null;
+    if(/^(https?:|blob:|data:)/i.test(s)) return s;
+    if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+    return null;
   };
   return arr.map(function(o){
     return {
@@ -2347,7 +2369,8 @@ function isUsableOrderImage(url){
   const v=String(url||'').trim();
   if(!v) return false;
   if(v==='null'||v==='undefined') return false;
-  return /^(https?:|data:|blob:)/i.test(v);
+  if(/^(https?:|data:|blob:)/i.test(v)) return true;
+  return /^\/?api\/image\/[a-z0-9_-]+$/i.test(v);
 }
 function buildCatalogImageLookup(){
   const byName=new Map();
@@ -7515,12 +7538,19 @@ async function syncToCloud(key,value){
     try{parsed=JSON.parse(value);}catch{parsed=value;}
     // For cloud: strip base64 (too large), keep only http URLs
     // Local storage keeps full base64 images
+    const keepCloudOrderImageRef=function(src){
+      const v=String(src||'').trim();
+      if(!v) return null;
+      if(/^(https?:|data:|blob:)/i.test(v)) return v;
+      if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(v)) return v.startsWith('/')?v:('/'+v);
+      return null;
+    };
     let cloudValue=parsed;
     if(key==='jb_orders'&&Array.isArray(parsed)){
       cloudValue=parsed.map(o=>({...o,
         products:(o.products||[]).map(p=>({...p,
-          img:p.img||null,
-          depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
+          img:keepCloudOrderImageRef(p&&p.img),
+          depotPhoto:keepCloudOrderImageRef(p&&p.depotPhoto)
         }))
       }));
     }
@@ -7636,8 +7666,20 @@ async function uploadToCloud(){
     let lastOrderErr='';
     for(const o of normalizedOrders){
       const clean={...o,products:(o.products||[]).map(p=>({...p,
-        img:p.img||null,
-        depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
+        img:(function(v){
+          const s=String(v||'').trim();
+          if(!s) return null;
+          if(/^(https?:|data:|blob:)/i.test(s)) return s;
+          if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+          return null;
+        })(p&&p.img),
+        depotPhoto:(function(v){
+          const s=String(v||'').trim();
+          if(!s) return null;
+          if(/^(https?:|data:|blob:)/i.test(s)) return s;
+          if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+          return null;
+        })(p&&p.depotPhoto)
       }))};
       try{
         const orderRes=await fetch(api+'/api/order',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})});
@@ -7693,7 +7735,7 @@ async function loadFromCloudSilent(){
         if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
         continue;
       }
-      localStorage.setItem(key,JSON.stringify(data[key]));
+      applyRemoteKeyToLocal(key,data[key],'load_silent');
     }
 
     // Otoriter sipariş snapshot'u: realtime kapalı olsa bile cihazlar tutarlı olsun.
@@ -7748,7 +7790,7 @@ async function loadFromCloud(){
             if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
             continue;
           }
-          localStorage.setItem(key,JSON.stringify(data[key]));
+          applyRemoteKeyToLocal(key,data[key],'load');
         }
         // Keep chat/feed local snapshots durable even when Firebase auth is unstable.
         ['jb_feed','jb_chat_index'].forEach(function(k){
@@ -7758,7 +7800,7 @@ async function loadFromCloud(){
             if(shouldAcceptRemoteFeed(data[k])) setFeedCache(data[k],Date.now());
             return;
           }
-          localStorage.setItem(k,JSON.stringify(data[k]));
+          applyRemoteKeyToLocal(k,data[k],'load_aux');
         });
         // Load orders from dedicated endpoint (individual rows — no size limit)
         const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
@@ -9072,13 +9114,20 @@ async function writeAuditEvent(action,payload){
 }
 
 function sanitizeOrderForRemote(order){
+  const normalizeImageRef=function(v){
+    const s=String(v||'').trim();
+    if(!s) return null;
+    if(/^(https?:|data:|blob:)/i.test(s)) return s;
+    if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+    return null;
+  };
   const clean={
     ...order,
     status:normalizeStatus(order.status),
     products:(order.products||[]).map(p=>({
       ...p,
-      img:p.img||null,
-      depotPhoto:(p.depotPhoto&&/^(https?:|data:|blob:)/.test(p.depotPhoto))?p.depotPhoto:null
+      img:normalizeImageRef(p&&p.img),
+      depotPhoto:normalizeImageRef(p&&p.depotPhoto)
     }))
   };
   if(!clean.pendingApproval) delete clean.pendingApproval;
@@ -9273,9 +9322,8 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     refreshRealtimeBadges();
     return;
   }
-  localStorage.setItem(k,JSON.stringify(value));
   if(k==='jb_users'){
-    users=normalizeUsersList(Array.isArray(value)?value:[]);
+    users=persistUsersLocalSafe(Array.isArray(value)?value:[],'realtime');
     if(me&&me.id){
       const mine=users.find(u=>u&&u.id===me.id) || users.find(u=>u&&String(u.email||'').toLowerCase()===String(me.email||'').toLowerCase());
       if(mine){
@@ -9289,26 +9337,28 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     }
     renderUsers();
     if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
-  }else if(k==='jb_suppliers'){
+  }else{
+    localStorage.setItem(k,JSON.stringify(value));
+    if(k==='jb_suppliers'){
     suppliers=Array.isArray(value)?value:[];
     renderSuppliers();
     if(typeof renderSupPerf==='function') renderSupPerf();
-  }else if(k==='jb_templates'){
+    }else if(k==='jb_templates'){
     templates=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
     loadTemplates();
-  }else if(k==='jb_notif'){
+    }else if(k==='jb_notif'){
     notifSettings=value&&typeof value==='object'&&!Array.isArray(value)?value:{shipped:true};
     loadNotifSettings();
-  }else if(k==='jb_settings'){
+    }else if(k==='jb_settings'){
     settings=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
     loadSettings();
     _sessionTimeout=(parseInt(settings.sessionTimeout)||30)*60*1000;
-  }else if(k==='jb_catalog'){
+    }else if(k==='jb_catalog'){
     catalog=Array.isArray(value)?value:[];
-  }else if(k==='jb_activity'){
+    }else if(k==='jb_activity'){
     activityLog=Array.isArray(value)?value:[];
     if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
-  }else if(k.indexOf('jb_chat_')===0){
+    }else if(k.indexOf('jb_chat_')===0){
     const rid=k.replace('jb_chat_','');
     _messages[String(rid||'')]=Array.isArray(value)?value:[];
     if(_chatReseller && String(_chatReseller)===String(rid||'')) renderMessages();
@@ -9316,8 +9366,9 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     updateChatBadge();
     checkResellerUnreadMessages().catch(()=>{});
     if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
-  }else if(k==='jb_chat_index'){
+    }else if(k==='jb_chat_index'){
     // keep durable snapshot only
+    }
   }
   clearKeyLocalMutation(k);
   markSync('data_snapshot:'+k);

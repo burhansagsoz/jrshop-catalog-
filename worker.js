@@ -19,6 +19,75 @@ function json(data, status = 200) {
   });
 }
 
+const DEFAULT_ADMIN_USER = {
+  id: 'u1',
+  email: 'joobuyadmin@gmail.com',
+  password: 'joobuy1212.',
+  role: 'Admin',
+  dname: 'Admin'
+};
+
+function normalizeUsersForStore(raw) {
+  let list = raw;
+  if (list === null || list === undefined) list = [];
+  if (!Array.isArray(list) && list && typeof list === 'object') {
+    list = Object.values(list).filter(v => v && typeof v === 'object');
+  }
+  if (!Array.isArray(list)) list = [];
+  const out = list
+    .filter(u => u && typeof u === 'object')
+    .map(u => ({
+      ...u,
+      id: String(u.id || ('u' + Date.now() + Math.random().toString(36).slice(2, 7))),
+      email: String(u.email || '').trim(),
+      password: String(u.password || u.pw || u.pass || u.userPassword || ''),
+      role: String(u.role || 'Reseller'),
+      dname: String(u.dname || '').trim(),
+    }))
+    .filter(u => u.email && u.password);
+  return out.length ? out : [{ ...DEFAULT_ADMIN_USER }];
+}
+
+function userIdentityKey(u) {
+  const email = String(u && u.email || '').trim().toLowerCase();
+  if (email) return 'em:' + email;
+  return 'id:' + String(u && u.id || '');
+}
+
+function mergeUsersConservative(existingRaw, incomingRaw) {
+  const existing = normalizeUsersForStore(existingRaw);
+  const incoming = normalizeUsersForStore(incomingRaw);
+  const byKey = new Map();
+  for (const u of existing) {
+    byKey.set(userIdentityKey(u), u);
+  }
+  for (const u of incoming) {
+    const key = userIdentityKey(u);
+    const prev = byKey.get(key) || {};
+    byKey.set(key, { ...prev, ...u });
+  }
+  const merged = normalizeUsersForStore([...byKey.values()]);
+  // Safety: ignore suspicious admin-only snapshots when we already have richer user data.
+  if (
+    existing.length >= 2 &&
+    incoming.length === 1 &&
+    String(incoming[0] && incoming[0].email || '').toLowerCase() === String(DEFAULT_ADMIN_USER.email).toLowerCase()
+  ) {
+    return existing;
+  }
+  return merged;
+}
+
+async function readUsersFromStore(db) {
+  const row = await db.prepare("SELECT value FROM kv_store WHERE key='jb_users'").first();
+  if (!row || !row.value) return [];
+  try {
+    return normalizeUsersForStore(JSON.parse(row.value));
+  } catch {
+    return [];
+  }
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -236,10 +305,30 @@ async function getData(db) {
   for (const row of rows.results) {
     try { data[row.key] = JSON.parse(row.value); } catch { data[row.key] = row.value; }
   }
+  // If jb_users was accidentally overwritten by a tiny snapshot, recover from backup key.
+  if (Array.isArray(data.jb_users_backup) && data.jb_users_backup.length > (Array.isArray(data.jb_users) ? data.jb_users.length : 0)) {
+    data.jb_users = data.jb_users_backup;
+  }
   return json({ data });
 }
 
 async function syncKey(db, key, value) {
+  if (key === 'jb_users') {
+    const existingUsers = await readUsersFromStore(db);
+    const nextUsers = mergeUsersConservative(existingUsers, value);
+    await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .bind('jb_users', JSON.stringify(nextUsers)).run();
+    const backupRow = await db.prepare("SELECT value FROM kv_store WHERE key='jb_users_backup'").first();
+    let backupUsers = [];
+    if (backupRow && backupRow.value) {
+      try { backupUsers = normalizeUsersForStore(JSON.parse(backupRow.value)); } catch { backupUsers = []; }
+    }
+    if (nextUsers.length >= backupUsers.length) {
+      await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .bind('jb_users_backup', JSON.stringify(nextUsers)).run();
+    }
+    return json({ ok: true, users: nextUsers.length });
+  }
   await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
     .bind(key, JSON.stringify(value)).run();
   return json({ ok: true });
@@ -266,6 +355,7 @@ async function saveOrder(db, order) {
   const keepImageRef = (src) => {
     const v = String(src || '').trim();
     if (!v) return null;
+    if (/^\/?api\/image\/[a-z0-9_-]+$/i.test(v)) return v.startsWith('/') ? v : '/' + v;
     return /^(https?:|data:|blob:)/i.test(v) ? v : null;
   };
   const clean = {
