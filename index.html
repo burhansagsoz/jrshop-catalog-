@@ -7694,13 +7694,9 @@ function saveFirebaseSettings(){
       return;
     }
   }
-  localStorage.setItem(FIREBASE_ENABLED_KEY,enabled?'1':'0');
-  if(enabled){
-    connectFirebaseNow();
-  }else{
-    stopFirebaseRealtime();
-    toast('ℹ️ Firebase realtime kapatıldı','info');
-  }
+  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
+  stopFirebaseRealtime();
+  toast('ℹ️ Firebase/Auth devre dışı (istek üzerine)','info');
 }
 async function syncSettingsToFirebase(){
   try{
@@ -8316,7 +8312,7 @@ function normalizeStatus(s){
 }
 
 function getFirebaseEnabled(){
-  return localStorage.getItem(FIREBASE_ENABLED_KEY)==='1';
+  return false;
 }
 function isFirebaseEnabled(){
   return getFirebaseEnabled();
