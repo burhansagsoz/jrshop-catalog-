@@ -11323,22 +11323,8 @@ async function loadResellerMessages(){
   if(!me) return;
   try{
     const chatKey='jb_chat_'+me.id;
-    let localMsgs=[];
-    try{localMsgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){localMsgs=[];}
-    let msgs=Array.isArray(localMsgs)?localMsgs:[];
-    // In Cloudflare mode, keep reseller chat fresh by pulling remote thread
-    // and merging it with local cache before render/read-state updates.
-    try{
-      const api=getApiBase();
-      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-      if(res.ok){
-        const payload=await res.json();
-        const data=(payload&&payload.data&&typeof payload.data==='object')?payload.data:{};
-        const remoteMsgs=Array.isArray(data[chatKey])?data[chatKey]:[];
-        msgs=mergeChatMessages(localMsgs,remoteMsgs);
-        try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-      }
-    }catch(_e){}
+    let msgs=[];
+    try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
     
     // Mark admin messages as read if chat is open
     const isChatOpen = document.getElementById('res-chat-overlay')?.style.display === 'flex';
