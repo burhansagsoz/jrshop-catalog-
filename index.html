@@ -8179,7 +8179,7 @@ async function tryFirebaseAuthRecoveryNow(){
   try{
     await initFirebaseRealtime({silent:true,force:true});
     if(!_firebaseAuth) return false;
-    const u=await ensureFirebaseOnlineAuth({allowAnonymous:true,ignoreRetryGuards:true});
+    const u=await ensureFirebaseOnlineAuth({allowAnonymous:true});
     if(!u) return false;
     if(!_health.ordersRealtime || !_health.feedRealtime || !_health.dataRealtime){
       await initFirebaseRealtime({silent:true,force:true});
@@ -8588,7 +8588,7 @@ function ensureFirebaseAuthWatcher(){
     const retryWaitMs=Math.max(700,Math.min(12000,getFirebaseAuthRetryRemainingMs()+500));
     const tryRecoverNow=async function(){
       try{
-        const u=await ensureFirebaseOnlineAuth({allowAnonymous:true,ignoreRetryGuards:true});
+        const u=await ensureFirebaseOnlineAuth({allowAnonymous:true});
         if(u && (!_firebaseReady || !_health.ordersRealtime || !_health.feedRealtime)){
           initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
         }else if(!u){
