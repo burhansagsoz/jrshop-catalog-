@@ -1564,6 +1564,8 @@ body.dark .modal-foot{background:#263548;}
             <div class="fg"><label class="fl">Alert after (days)</label><input type="number" class="fi" id="cfg-alert-days" value="3" min="1" max="30"></div>
             <div class="fg"><label class="fl">Session timeout (minutes)</label><input type="number" class="fi" id="cfg-session-timeout" value="30" min="5" max="120"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Auto-lock when inactive</div></div>
             <div class="fg"><label class="fl">Your Messenger / Facebook Link</label><input type="text" class="fi" id="cfg-messenger-link" placeholder="https://m.me/yourpage or facebook.com/yourpage"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Used in customer catalog — "Send Order" button opens this</div></div>
+            <div class="fg"><label class="fl">Cloudflare Worker API URL</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api.<subdomain>.workers.dev"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Leave empty to use current site origin.</div></div>
+            <div class="fg"><label class="fl">Cloudflare API Key (optional)</label><input type="text" class="fi" id="cfg-cloud-key" placeholder="Bearer token (if your Worker requires auth)"></div>
             <div class="fg"><label class="fl">Sound notifications</label><button class="btn btn-secondary btn-sm" onclick="toggleSound()" id="sound-toggle-btn">🔔 Sounds On</button></div>
           </div>
           <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
@@ -2182,7 +2184,12 @@ function getApiBaseEarly(){
   return location.origin;
 }
 (function(){
-  // Keep user-defined Cloudflare API endpoint (worker route or same-origin /api).
+  // Initialize API base once; allow operator override from Settings.
+  try{
+    if(!localStorage.getItem('jb_cloud_api')){
+      localStorage.setItem('jb_cloud_api',location.origin);
+    }
+  }catch(_e){}
   const savedUsers=localStorage.getItem('jb_users');
   const hasUsers=savedUsers&&JSON.parse(savedUsers||'[]').length>0;
   if(!hasUsers){
@@ -5084,6 +5091,13 @@ function saveSettings(){
   settings.alertDays=parseInt(g('cfg-alert-days')?.value)||3;
   settings.sessionTimeout=parseInt(g('cfg-session-timeout')?.value)||30;
   settings.messengerLink=g('cfg-messenger-link')?.value.trim()||'';
+  const cloudApi=(g('cfg-cloud-api')?.value||'').trim();
+  const cloudKey=(g('cfg-cloud-key')?.value||'').trim();
+  try{
+    localStorage.setItem('jb_cloud_api',cloudApi||location.origin);
+    if(cloudKey) localStorage.setItem('jb_cloud_key',cloudKey);
+    else localStorage.removeItem('jb_cloud_key');
+  }catch(_e){}
   localStorage.setItem('jb_settings',JSON.stringify(settings));
   syncGenericKeyToCloud('jb_settings',settings,{opId:createLocalMutationOpId('settings')}).catch(function(){});
   _sessionTimeout=(settings.sessionTimeout)*60*1000;
@@ -5095,6 +5109,8 @@ function loadSettings(){
   if(g('cfg-alert-days')) g('cfg-alert-days').value=settings.alertDays||3;
   if(g('cfg-session-timeout')) g('cfg-session-timeout').value=settings.sessionTimeout||30;
   if(g('cfg-messenger-link')) g('cfg-messenger-link').value=settings.messengerLink||'';
+  if(g('cfg-cloud-api')) g('cfg-cloud-api').value=localStorage.getItem('jb_cloud_api')||location.origin;
+  if(g('cfg-cloud-key')) g('cfg-cloud-key').value=localStorage.getItem('jb_cloud_key')||'';
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
 }
 function applyUsersRealtime(nextUsers){
@@ -7498,7 +7514,7 @@ async function uploadToCloud(){
     toast('Syncing to Cloudflare...','info');
     const testRes=await fetch(api+'/api/test',{headers:getAuthHeaders()});
     if(!testRes.ok){
-      throw new Error('Cloud API test failed (HTTP '+testRes.status+')');
+      throw new Error(`Cloud API test failed at ${api}/api/test (HTTP ${testRes.status})`);
     }
     // Upload non-order data
     const payload={};
@@ -7509,7 +7525,7 @@ async function uploadToCloud(){
     }
     const dataSyncRes=await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
     if(!dataSyncRes.ok){
-      throw new Error('/api/data sync failed (HTTP '+dataSyncRes.status+')');
+      throw new Error(`${api}/api/data sync failed (HTTP ${dataSyncRes.status})`);
     }
     // Upload all orders individually
     let saved=0;
