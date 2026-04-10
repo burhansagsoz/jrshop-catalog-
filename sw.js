@@ -1,5 +1,5 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260407-cloudflare-only-ui';
+const CACHE_VERSION = 'jrshop-v20260407-cloudflare-only-ui-r2';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
