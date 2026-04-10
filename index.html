@@ -7769,6 +7769,7 @@ let _lastHealthErrorAt=0;
 let _firebaseAuthNeedsFreshLogin=(function(){
   try{return localStorage.getItem(FIREBASE_AUTH_FRESH_LOGIN_KEY)==='1';}catch(_e){return false;}
 })();
+let _lastFirebasePermissionLockAt=0;
 const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
@@ -8128,6 +8129,27 @@ function resetHealthCounters(){
   _health.apiErrors=0;
   _health.lastError='';
 }
+function isFirebasePermissionError(err,msg){
+  const code=String(err&&err.code||'').toLowerCase();
+  if(code.includes('permission-denied')) return true;
+  const text=String(msg||err&&err.message||'').toLowerCase();
+  return text.includes('missing or insufficient permissions') || text.includes('insufficient permissions');
+}
+function enforceLocalModeOnFirebasePermission(msg){
+  const now=Date.now();
+  if((now-_lastFirebasePermissionLockAt)<15000) return;
+  _lastFirebasePermissionLockAt=now;
+  try{localStorage.setItem(FIREBASE_ENABLED_KEY,'0');}catch(_e){}
+  disconnectFirebaseRealtime();
+  _health.firebaseConnected=false;
+  _health.ordersRealtime=false;
+  _health.feedRealtime=false;
+  _health.dataRealtime=false;
+  _health.authState='local_api_mode';
+  if(!(me&&me.role==='Reseller')){
+    toast('⚠️ Firebase yetki hatası algılandı. Sistem API moduna alındı.','info');
+  }
+}
 function markError(err){
   const code=err&&err.code?` [${err.code}]`:'';
   const msg=(err&&err.message?err.message:String(err||'unknown'))+code;
@@ -8142,6 +8164,9 @@ function markError(err){
   _lastHealthErrorAt=now;
   _health.apiErrors++;
   _health.lastError=msg;
+  if(isFirebasePermissionError(err,msg)){
+    enforceLocalModeOnFirebasePermission(msg);
+  }
 }
 function renderHealthPanel(){
   const el=document.getElementById('firebase-health-panel');
