@@ -8484,7 +8484,8 @@ function refreshRealtimeBadges(){
   }
   if(me&&me.role==='Reseller'){
     checkResellerUnreadMessages().catch(()=>{});
-    if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+    // Reseller home counters/chart must refresh from current orders state.
+    renderResellerView();
   }
 }
 
@@ -9401,6 +9402,9 @@ function renderLiveCounters(){
 
 function refreshLiveCounters(){
   renderLiveCounters();
+  if(me&&me.role==='Reseller'){
+    renderResellerView();
+  }
   if(me&&me.role==='Admin'){
     const badge=document.getElementById('sync-state-dot');
     if(badge){
@@ -11475,6 +11479,95 @@ function resNavTo(page){
   if(page==='tips') renderResTips();
   if(page==='orders') renderResOrders();
   if(page==='finance') renderResFinance();
+  if(page==='home') renderResellerView();
+}
+
+let _pullRefreshBound=false;
+let _pullRefreshInFlight=false;
+let _pullStartY=0;
+let _pullTracking=false;
+let _pullTarget=null;
+
+async function runPullToRefresh(){
+  if(_pullRefreshInFlight||!me||!navigator.onLine) return;
+  _pullRefreshInFlight=true;
+  try{
+    toast('🔄 Refreshing...','info');
+    await loadFromCloudSilent().catch(()=>{});
+    await loadFromCloud().catch(()=>{});
+    if(me&&me.role==='Reseller'){
+      renderResellerView();
+      renderResOrders();
+    }else{
+      updateBadges();
+      render();
+      if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+    }
+    toast('✅ Updated','ok');
+  }finally{
+    _pullRefreshInFlight=false;
+  }
+}
+
+function bindPullToRefresh(){
+  if(_pullRefreshBound) return;
+  _pullRefreshBound=true;
+  const shouldAllowTarget=function(target){
+    if(!target||!target.closest) return false;
+    // Admin: active page scroll container; Reseller: reseller page container.
+    const activePage=document.querySelector('.page.on');
+    if(me&&me.role==='Reseller'){
+      const resPage=document.getElementById('pg-reseller');
+      return !!(resPage&&resPage.contains(target));
+    }
+    return !!(activePage&&activePage.contains(target));
+  };
+  document.addEventListener('touchstart',function(e){
+    if(_pullRefreshInFlight||!me||!navigator.onLine) return;
+    const t=e.touches&&e.touches[0];
+    if(!t) return;
+    if(!shouldAllowTarget(e.target)) return;
+    const scroller=(me&&me.role==='Reseller')
+      ? document.getElementById('pg-reseller')
+      : (function(){
+          const active=document.querySelector('.page.on');
+          if(!active) return null;
+          if(active.classList.contains('orders-page')){
+            return document.querySelector('.orders-page .list-panel')||active;
+          }
+          return active;
+        })();
+    if(!scroller) return;
+    if((scroller.scrollTop||0)>0) return;
+    _pullStartY=t.clientY;
+    _pullTracking=true;
+    _pullTarget=scroller;
+  },{passive:true});
+  document.addEventListener('touchmove',function(e){
+    if(!_pullTracking||!_pullTarget) return;
+    const t=e.touches&&e.touches[0];
+    if(!t) return;
+    if((_pullTarget.scrollTop||0)>0){
+      _pullTracking=false;
+      _pullTarget=null;
+      return;
+    }
+    const dy=t.clientY-_pullStartY;
+    if(dy<0){
+      _pullTracking=false;
+      _pullTarget=null;
+    }
+  },{passive:true});
+  document.addEventListener('touchend',function(e){
+    if(!_pullTracking||!_pullTarget) return;
+    const t=e.changedTouches&&e.changedTouches[0];
+    const dy=t?(t.clientY-_pullStartY):0;
+    _pullTracking=false;
+    _pullTarget=null;
+    if(dy>85){
+      runPullToRefresh().catch(()=>{});
+    }
+  },{passive:true});
 }
 
 // ── TOUCH GESTURES (Swipe Navigation) ──
