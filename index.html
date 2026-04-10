@@ -9592,8 +9592,7 @@ function isApiPath(pathname){
   return pathname.startsWith('/api/');
 }
 function shouldRouteApiToFirebase(url){
-  // Always route /api through the in-app bridge.
-  // This keeps login/data endpoints working even when Firebase runtime is disabled.
+  if(!getFirebaseEnabled()) return false;
   try{
     const u=new URL(url,location.origin);
     if(isApiPath(u.pathname)) return true;
