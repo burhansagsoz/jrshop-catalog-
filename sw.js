@@ -1,5 +1,5 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260407-firebase-sync';
+const CACHE_VERSION = 'jrshop-v20260407-firebase-sync-safe';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
@@ -18,7 +18,6 @@ self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => cache.addAll(STATIC_ASSETS))
-      .then(() => self.skipWaiting())
       .catch(err => console.warn('SW install error:', err))
   );
 });
@@ -31,6 +30,12 @@ self.addEventListener('activate', e => {
         keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))
       ))
       .then(() => self.clients.claim())
+      .then(async () => {
+        const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const client of clientsList) {
+          try { client.postMessage({ type: 'sw-activated', version: CACHE_VERSION }); } catch (_e) {}
+        }
+      })
   );
 });
 
@@ -91,6 +96,9 @@ self.addEventListener('fetch', e => {
 // Ana uygulamadan gelen mesaj: skipWaiting
 self.addEventListener('message', e => {
   if (e.data === 'skipWaiting') self.skipWaiting();
+  if (e.data === 'check-version') {
+    try { e.source && e.source.postMessage({ type: 'sw-version', version: CACHE_VERSION }); } catch (_e) {}
+  }
 });
 
 // ── PUSH NOTIFICATIONS ──
