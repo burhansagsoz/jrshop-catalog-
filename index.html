@@ -2275,7 +2275,22 @@ function persistOrdersLocalSafe(list){
 }
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
-  if(remoteOrders.length>0) return true;
+  const remoteCount=remoteOrders.length;
+  let localCount=0;
+  try{
+    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    localCount=Array.isArray(localOrders)?localOrders.length:0;
+  }catch(_e){
+    localCount=Array.isArray(orders)?orders.length:0;
+  }
+  if(remoteCount>0){
+    // Guard against partial remote snapshots wiping a much larger local dataset.
+    if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
+      console.warn('[Cloud] Remote orders snapshot rejected: suspicious drop', { localCount, remoteCount });
+      return false;
+    }
+    return true;
+  }
   try{
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
     return !Array.isArray(localOrders)||localOrders.length===0;
@@ -7543,10 +7558,33 @@ async function uploadToCloud(){
     if(!dataSyncRes.ok){
       throw new Error(`${api}/api/data sync failed (HTTP ${dataSyncRes.status})`);
     }
+    // Ensure every order has a unique id before row-level upload.
+    const seenOrderIds=new Set();
+    let fixedOrderIds=0;
+    const normalizedOrders=(Array.isArray(orders)?orders:[]).map(function(order,idx){
+      if(!order||typeof order!=='object') return null;
+      let id=String(order.id||'').trim();
+      if(!id || seenOrderIds.has(id)){
+        id='o'+Date.now().toString(36)+idx.toString(36)+Math.random().toString(36).slice(2,6);
+        fixedOrderIds++;
+      }
+      seenOrderIds.add(id);
+      if(id===String(order.id||'')) return order;
+      return {
+        ...order,
+        id,
+        updatedAt:Number(order.updatedAt||order.ts)||Date.now()
+      };
+    }).filter(Boolean);
+    if(fixedOrderIds>0){
+      orders=normalizedOrders;
+      persistOrdersLocalSafe(orders);
+      toast(`ℹ️ Fixed ${fixedOrderIds} duplicate/missing order IDs before sync`,'info');
+    }
     // Upload all orders individually
     let saved=0;
     let lastOrderErr='';
-    for(const o of orders){
+    for(const o of normalizedOrders){
       const clean={...o,products:(o.products||[]).map(p=>({...p,
         img:p.img||null,
         depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
@@ -7561,6 +7599,20 @@ async function uploadToCloud(){
       }catch(e){
         lastOrderErr=String((e&&e.message)||e||'order_sync_error');
       }
+    }
+    // Verify remote row count after upload; abort adopting smaller snapshots.
+    try{
+      const verifyRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
+      if(verifyRes.ok){
+        const verifyPayload=await verifyRes.json();
+        const remoteCount=Array.isArray(verifyPayload&&verifyPayload.orders)?verifyPayload.orders.length:0;
+        const localCount=normalizedOrders.length;
+        if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
+          throw new Error(`remote_count_mismatch ${remoteCount}/${localCount}`);
+        }
+      }
+    }catch(verifyErr){
+      lastOrderErr=String((verifyErr&&verifyErr.message)||verifyErr||'verify_failed');
     }
     if(lastOrderErr){
       toast(`⚠️ Synced ${saved}/${orders.length} orders (last error: ${lastOrderErr})`,'err');
