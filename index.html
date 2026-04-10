@@ -1577,30 +1577,10 @@ body.dark .modal-foot{background:#263548;}
               <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Cloudflare</button>
               <button class="btn btn-blue" onclick="recoverOrdersNow()">⬇️ Recover Orders</button>
             </div>
+            <div id="sync-health-panel" style="margin-top:10px;"></div>
           </div>
         </div>
-        <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">⚠️ Legacy Firebase Panel (disabled)</div>
-          <div style="padding:13px 16px;">
-            <div class="fg" style="margin-bottom:10px;">
-              <label class="fl">Enable Firebase (not used in Cloudflare mode)</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);">
-                <input type="checkbox" id="cfg-firebase-enabled">
-                Realtime updates
-              </label>
-            </div>
-            <div class="fg" style="margin-bottom:10px;">
-              <label class="fl">Firebase Web Config (JSON)</label>
-              <textarea class="fi" id="cfg-firebase-config" rows="6" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","appId":"...","storageBucket":"...","messagingSenderId":"..."}'></textarea>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-primary" onclick="saveFirebaseSettings()">☁️ Keep Cloudflare Mode</button>
-              <button class="btn btn-blue" id="btn-connect-firebase-now" onclick="connectFirebaseNow()">🔌 Connect Now</button>
-              <button class="btn btn-ghost" onclick="migrateAllToFirebase()">⬆️ Migrate Current Data</button>
-            </div>
-            <div id="firebase-health-panel" style="margin-top:10px;"></div>
-          </div>
-        </div>
+        
 <!-- AI Settings removed -->
         <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;max-width:560px;">
           <h3 style="font-size:14px;font-weight:700;margin-bottom:3px;">💾 Data Backup</h3>
@@ -5110,8 +5090,6 @@ function loadSettings(){
   if(g('cfg-alert-days')) g('cfg-alert-days').value=settings.alertDays||3;
   if(g('cfg-session-timeout')) g('cfg-session-timeout').value=settings.sessionTimeout||30;
   if(g('cfg-messenger-link')) g('cfg-messenger-link').value=settings.messengerLink||'';
-  if(g('cfg-firebase-enabled')) g('cfg-firebase-enabled').checked=getFirebaseEnabled();
-  if(g('cfg-firebase-config')) g('cfg-firebase-config').value=localStorage.getItem('jb_firebase_config')||'';
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
 }
 function applyUsersRealtime(nextUsers){
@@ -8149,7 +8127,7 @@ function markError(err){
   }
 }
 function renderHealthPanel(){
-  const el=document.getElementById('firebase-health-panel');
+  const el=document.getElementById('sync-health-panel');
   if(!el) return;
   const fmtTs=_health.lastSyncAt?new Date(_health.lastSyncAt).toLocaleString('tr-TR'):'-';
   const lastAct=Array.isArray(activityLog)&&activityLog[0]?activityLog[0]:null;
@@ -8160,8 +8138,8 @@ function renderHealthPanel(){
   el.innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">Firebase</div>
-        <div style="font-size:13px;font-weight:700;color:${_health.firebaseConnected?'#22c55e':'#ef4444'};">${_health.firebaseConnected?'Connected':'Disconnected'}</div>
+        <div style="font-size:11px;color:var(--muted);">Cloud Sync</div>
+        <div style="font-size:13px;font-weight:700;color:${_health.apiErrors===0?'#22c55e':'#ef4444'};">${_health.apiErrors===0?'Healthy':'Issues detected'}</div>
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">Auth</div>
@@ -10091,33 +10069,7 @@ async function connectFirebaseNow(){
 
 let _connectNowCooldownTimer=null;
 function updateConnectNowCooldownUi(waitMs){
-  const btn=document.getElementById('btn-connect-firebase-now');
-  if(!btn) return;
-  const remain=Math.max(0,Number(waitMs)||0);
-  const render=function(ms){
-    const left=Math.max(0,Math.ceil(ms/1000));
-    if(left>0){
-      btn.disabled=true;
-      btn.textContent=`⏳ Connect Now (${left}s)`;
-    }else{
-      btn.disabled=false;
-      btn.textContent='🔌 Connect Now';
-    }
-  };
-  if(_connectNowCooldownTimer){
-    clearInterval(_connectNowCooldownTimer);
-    _connectNowCooldownTimer=null;
-  }
-  render(remain);
-  if(remain<=0) return;
-  _connectNowCooldownTimer=setInterval(function(){
-    const live=getFirebaseAuthRetryRemainingMs();
-    render(live);
-    if(live<=0 && _connectNowCooldownTimer){
-      clearInterval(_connectNowCooldownTimer);
-      _connectNowCooldownTimer=null;
-    }
-  },1000);
+  return;
 }
 
 // ── PWA ──
