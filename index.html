@@ -7731,6 +7731,7 @@ const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
+const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
@@ -7757,7 +7758,9 @@ let _firebasePasswordRetryAt=0;
 let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
-let _firebaseAuthNeedsFreshLogin=false;
+let _firebaseAuthNeedsFreshLogin=(function(){
+  try{return localStorage.getItem(FIREBASE_AUTH_FRESH_LOGIN_KEY)==='1';}catch(_e){return false;}
+})();
 const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
@@ -8492,9 +8495,12 @@ function clearFirebaseLoginCreds(opts={}){
 }
 function markFirebaseAuthNeedsFreshLogin(){
   _firebaseAuthNeedsFreshLogin=true;
+  clearFirebaseAuthRetryGuards();
+  try{localStorage.setItem(FIREBASE_AUTH_FRESH_LOGIN_KEY,'1');}catch(_e){}
 }
 function clearFirebaseAuthNeedsFreshLogin(){
   _firebaseAuthNeedsFreshLogin=false;
+  try{localStorage.removeItem(FIREBASE_AUTH_FRESH_LOGIN_KEY);}catch(_e){}
 }
 function mapFirebaseAuthState(err,defaultState='auth_error'){
   const code=err&&err.code?String(err.code):'';
@@ -10045,8 +10051,14 @@ async function migrateAllToFirebase(){
 }
 
 async function connectFirebaseNow(){
-  const waitMs=getFirebaseAuthRetryRemainingMs();
   resetHealthCounters();
+  if(_firebaseAuthNeedsFreshLogin){
+    _health.authState='waiting_login';
+    updateConnectNowCooldownUi(0);
+    toast('⚠️ Firebase için yeniden giriş gerekli. Lütfen çıkış yapıp tekrar giriş yapın.','info');
+    return;
+  }
+  const waitMs=getFirebaseAuthRetryRemainingMs();
   if(waitMs>0){
     _health.authState='auth_rate_limited';
     toast(`⚠️ Firebase Email/Password geçici limitte (${Math.max(1,Math.ceil(waitMs/1000))}s). Tekrar deneme bekleniyor.`,'info');
