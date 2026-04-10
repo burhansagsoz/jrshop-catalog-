@@ -7729,6 +7729,7 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
+const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
@@ -7756,6 +7757,7 @@ let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
 let _lastAnonymousAuthAt=0;
+const FIREBASE_USE_EMAIL_PASSWORD_AUTH=false;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
@@ -7786,6 +7788,10 @@ function ensureFirebaseConfigDefaults(){
   }
   if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
     localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
+  }
+  // Keep Firebase transport on anonymous by default to avoid email/password rate-limit loops.
+  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
+    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'0');
   }
 }
 ensureFirebaseConfigDefaults();
@@ -8531,7 +8537,7 @@ function hasRecentAnonymousAuth(){
 }
 function resolveStableAuthState(base='waiting_login'){
   if(hasRecentAnonymousAuth() || String(_health.authState||'')==='anonymous') return 'anonymous';
-  if(getFirebaseAuthRetryRemainingMs()>0) return 'auth_rate_limited';
+  if(FIREBASE_USE_EMAIL_PASSWORD_AUTH && getFirebaseAuthRetryRemainingMs()>0) return 'auth_rate_limited';
   return String(base||'waiting_login');
 }
 function clearFirebaseAuthRetryGuards(){
@@ -8540,6 +8546,7 @@ function clearFirebaseAuthRetryGuards(){
 }
 
 function getFirebaseLoginCreds(){
+  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH) return null;
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   const mePw=me&&me.password?String(me.password):'';
   if(isValidAuthEmail(meEmail)&&mePw) return {email:meEmail,password:mePw};
@@ -8636,8 +8643,8 @@ async function ensureFirebaseOnlineAuth(opts={}){
   const now=Date.now();
   const rateRetryBlocked=!ignoreRetryGuards && now<_firebaseRateLimitRetryAt;
   const passwordRetryBlocked=!ignoreRetryGuards && now<_firebasePasswordRetryAt;
-  const creds=getFirebaseLoginCreds();
-  if(!rateRetryBlocked && !passwordRetryBlocked && creds&&creds.email&&creds.password){
+  const creds=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseLoginCreds():null;
+  if(FIREBASE_USE_EMAIL_PASSWORD_AUTH && !rateRetryBlocked && !passwordRetryBlocked && creds&&creds.email&&creds.password){
     const u=await firebaseSignInForSession(creds.email,creds.password);
     if(u) return u;
   }
@@ -10034,7 +10041,7 @@ async function migrateAllToFirebase(){
 }
 
 async function connectFirebaseNow(){
-  const waitMs=getFirebaseAuthRetryRemainingMs();
+  const waitMs=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseAuthRetryRemainingMs():0;
   resetHealthCounters();
   if(waitMs>0){
     _health.authState='auth_rate_limited';
