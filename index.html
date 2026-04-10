@@ -2125,7 +2125,8 @@ function normalizeUsersList(raw){
         ...u,
         id:String(u.id||('u'+Date.now()+Math.random().toString(36).slice(2,6))),
         email:String(u.email||'').trim(),
-        password:String(u.password||''),
+        // Backward compatibility for older backup/user formats.
+        password:String(u.password||u.pw||u.pass||u.userPassword||''),
         role:String(u.role||'Reseller'),
         dname:String(u.dname||'').trim()
       }))
@@ -8411,7 +8412,7 @@ function applyDataKeysFromRemote(remoteMap,opts={}){
         notifSettings=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
         if(!silent) loadNotifSettings();
       }else if(key==='jb_users'){
-        users=normalizeUsersList(Array.isArray(incomingValue)?incomingValue:[]);
+        users=persistUsersLocalSafe(Array.isArray(incomingValue)?incomingValue:[],'data_realtime');
       }else if(key==='jb_suppliers'){
         suppliers=Array.isArray(incomingValue)?incomingValue:[];
       }else if(key==='jb_catalog'){

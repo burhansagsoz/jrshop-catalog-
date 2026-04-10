@@ -263,7 +263,19 @@ async function getOrders(db) {
 }
 
 async function saveOrder(db, order) {
-  const clean = { ...order, products: (order.products||[]).map(p => ({ ...p, img: (p.img&&p.img.startsWith('http'))?p.img:null })) };
+  const keepImageRef = (src) => {
+    const v = String(src || '').trim();
+    if (!v) return null;
+    return /^(https?:|data:|blob:)/i.test(v) ? v : null;
+  };
+  const clean = {
+    ...order,
+    products: (order.products || []).map((p) => ({
+      ...p,
+      img: keepImageRef(p && p.img),
+      depotPhoto: keepImageRef(p && p.depotPhoto),
+    })),
+  };
   await db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts')
     .bind(order.id, order.ts || Date.now(), JSON.stringify(clean)).run();
   return json({ ok: true });
