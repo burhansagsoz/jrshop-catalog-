@@ -5283,7 +5283,12 @@ function importBackup(input){
       orders=(payload.orders||[]).map(function(o){
         return {...o,status:normStatus(o&&o.status),updatedAt:(o&&o.updatedAt)||(o&&o.ts)||Date.now()};
       });
-      if(Array.isArray(payload.users)&&payload.users.length) users=payload.users;
+      if(Array.isArray(payload.users)&&payload.users.length){
+        // Never let backup import wipe richer local reseller user list.
+        users=mergeUsersSafely(users,payload.users);
+      }else{
+        users=normalizeUsersList(users);
+      }
       if(Array.isArray(payload.suppliers)&&payload.suppliers.length) suppliers=payload.suppliers;
       if(Array.isArray(payload.catalog)&&payload.catalog.length) catalog=payload.catalog;
       templates=payload.templates||templates||{};
