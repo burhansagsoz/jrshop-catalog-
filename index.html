@@ -1049,6 +1049,26 @@ body.dark .modal-foot{background:#263548;}
           <div id="res-detail-content"></div>
         </div>
       </div>
+      <div id="res-img-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:210;align-items:flex-end;justify-content:center;" onclick="if(event.target===this)closeResOrderImageEdit()">
+        <div style="background:var(--card);border-radius:16px 16px 0 0;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;padding:18px 16px 24px;">
+          <div style="width:40px;height:4px;background:rgba(255,255,255,.15);border-radius:2px;margin:0 auto 14px;"></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+            <div>
+              <div style="font-size:16px;font-weight:800;">🖼️ Edit Product Images</div>
+              <div id="res-img-edit-order-meta" style="font-size:11px;color:var(--muted);margin-top:2px;"></div>
+            </div>
+            <button onclick="closeResOrderImageEdit()" style="background:rgba(255,255,255,.08);border:none;color:var(--text);border-radius:8px;padding:6px 10px;cursor:pointer;">✕</button>
+          </div>
+          <div style="background:var(--blue-bg);border:1px solid var(--blue-border);border-radius:10px;padding:10px 12px;font-size:12px;color:var(--blue);margin-bottom:12px;">
+            Only product images will be changed. Address, status and tracking stay untouched.
+          </div>
+          <div id="res-img-edit-list"></div>
+          <div style="display:flex;gap:8px;margin-top:14px;">
+            <button onclick="closeResOrderImageEdit()" style="flex:1;background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;">Cancel</button>
+            <button id="res-img-edit-save-btn" onclick="saveResOrderImageEdit()" style="flex:1;background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:800;cursor:pointer;">💾 Save Images</button>
+          </div>
+        </div>
+      </div>
 
       </div>
       <div class="page scrl" id="pg-track">
@@ -1682,6 +1702,9 @@ body.dark .modal-foot{background:#263548;}
         <div class="fg"><label class="fl">Factory</label><select class="fi" id="e-supplier2"><option value="">— Select —</option></select></div>
         <div class="fg span2"><label class="fl">Note</label><input type="text" class="fi" id="e-note"></div>
       </div>
+      <div class="fsec">🖼️ Product Images</div>
+      <div id="e-prod-imgs"></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;">You can add or replace product images while editing this order.</div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" onclick="closeEditModal()">Cancel</button>
@@ -2203,9 +2226,12 @@ let templates = JSON.parse(localStorage.getItem('jb_templates') || JSON.stringif
 let notifSettings = JSON.parse(localStorage.getItem('jb_notif') || '{"shipped":true}');
 let me=null, selId=null, fStatus='all', fSearch='';
 let prodCount=0, prodImages={};
+let _editOrderId=null, _editProdImages={};
+let _resImgEditOrderId=null, _resImgEditDraft={};
 let chartDaily=null, chartStatus=null;
 let _emailQueue=[], _scanMode='add', _cameraStream=null, _barcodeInterval=null;
 let _selectMode=false, _selected=new Set();
+let _singleScanGuard=null;
 
 const STATUSES=['New','Sent to Factory','At Depot','Sent to Logistics','Shipped','Completed'];
 const S_LABEL={'New':'New','Sent to Factory':'Sent to Factory','At Depot':'At Depot','Sent to Logistics':'Sent to Logistics','Shipped':'Shipped','Completed':'Completed'};
@@ -3756,8 +3782,73 @@ async function deleteOrder(){
 }
 
 // ── EDIT ORDER ──
+function renderEditProductImageList(order){
+  const el=document.getElementById('e-prod-imgs');
+  if(!el) return;
+  const prods=(order&&Array.isArray(order.products))?order.products:[];
+  if(!prods.length){
+    el.innerHTML='<div style="font-size:12px;color:var(--muted);padding:10px 0;">No products on this order.</div>';
+    return;
+  }
+  el.innerHTML=prods.map(function(p,idx){
+    const originalImg=String((p&&p.img)||'').trim();
+    const draftValue=Object.prototype.hasOwnProperty.call(_editProdImages,String(idx))?_editProdImages[String(idx)]:originalImg;
+    const imgRef=String(draftValue||'').trim();
+    const hasImg=!!imgRef;
+    const changed=imgRef!==originalImg;
+    return `<div style="display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
+      ${hasImg?`<img src="${imgRef}" style="width:58px;height:58px;border-radius:10px;object-fit:cover;border:1px solid var(--border);flex-shrink:0;">`:`<div style="width:58px;height:58px;border-radius:10px;border:1px dashed var(--border);background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">📦</div>`}
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p&&p.name||('Product '+(idx+1)))}</div>
+        <div style="font-size:11px;color:${changed?'var(--green)':'var(--muted)'};margin-top:2px;">${changed?'Updated image pending save':'Current image'}</div>
+        <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">
+          <label for="e-img-input-${idx}" class="btn btn-ghost btn-xs" style="cursor:pointer;">📷 ${hasImg?'Change':'Add'}</label>
+          <input type="file" accept="image/*" id="e-img-input-${idx}" style="display:none;" onchange="handleEditProdImg(${idx},this)">
+          ${hasImg?`<button type="button" class="btn btn-danger btn-xs" onclick="clearEditProdImg(${idx})">Remove</button>`:''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+async function handleEditProdImg(prodIdx,input){
+  if(!input||!input.files||!input.files[0]) return;
+  const order=orders.find(function(x){return x&&x.id===_editOrderId;});
+  if(!order) return;
+  try{
+    const compressed=await new Promise(function(resolve,reject){
+      const reader=new FileReader();
+      reader.onload=function(e){compressImage(e.target.result,1280,0.88).then(resolve).catch(reject);};
+      reader.onerror=reject;
+      reader.readAsDataURL(input.files[0]);
+    });
+    _editProdImages[String(prodIdx)]=compressed;
+    renderEditProductImageList(order);
+    // Upgrade to remote URL in background for cross-device reliability.
+    setTimeout(async function(){
+      try{
+        const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
+        if(!uploaded||uploaded===compressed) return;
+        _editProdImages[String(prodIdx)]=uploaded;
+        const live=orders.find(function(x){return x&&x.id===_editOrderId;});
+        if(live) renderEditProductImageList(live);
+      }catch(_e){}
+    },0);
+  }catch(err){
+    toast('Image prepare failed: '+(err&&err.message?err.message:'unknown'),'err');
+  }finally{
+    input.value='';
+  }
+}
+function clearEditProdImg(prodIdx){
+  const order=orders.find(function(x){return x&&x.id===_editOrderId;});
+  if(!order) return;
+  _editProdImages[String(prodIdx)]=null;
+  renderEditProductImageList(order);
+}
 function openEditModal(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
+  _editOrderId=o.id;
+  _editProdImages={};
   document.getElementById('e-name').value=o.name||'';document.getElementById('e-phone').value=o.phone||'';
   document.getElementById('e-addr').value=o.address||'';document.getElementById('e-city').value=o.city||'';
   document.getElementById('e-post').value=o.postcode||'';document.getElementById('e-state').value=o.state||'';
@@ -3766,9 +3857,16 @@ function openEditModal(){
   document.getElementById('e-status').value=o.status||'New';document.getElementById('e-note').value=o.note||'';
   const resSel=document.getElementById('e-reseller');resSel.innerHTML='<option value="">— None —</option>'+users.filter(u=>u.role==='Reseller').map(u=>`<option value="${u.id}" ${o.resellerId===u.id?'selected':''}>${esc(u.dname||u.email)}</option>`).join('');
   const supSel=document.getElementById('e-supplier2');supSel.innerHTML='<option value="">— Select —</option>'+suppliers.map(s=>`<option value="${s.id}" ${o.supplierId===s.id?'selected':''}>${esc(s.name)}</option>`).join('');
+  renderEditProductImageList(o);
   document.getElementById('edit-modal').classList.add('open');
 }
-function closeEditModal(){document.getElementById('edit-modal').classList.remove('open');}
+function closeEditModal(){
+  document.getElementById('edit-modal').classList.remove('open');
+  _editOrderId=null;
+  _editProdImages={};
+  const list=document.getElementById('e-prod-imgs');
+  if(list) list.innerHTML='';
+}
 function saveEdit(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();
@@ -3781,6 +3879,14 @@ function saveEdit(){
   o.fblink=document.getElementById('e-fblink').value.trim();o.status=document.getElementById('e-status').value;
   o.note=document.getElementById('e-note').value.trim();o.resellerId=document.getElementById('e-reseller').value;
   o.supplierId=document.getElementById('e-supplier2').value;
+  const prods=Array.isArray(o.products)?o.products:[];
+  Object.keys(_editProdImages).forEach(function(key){
+    const idx=Number(key);
+    if(!Number.isInteger(idx)||idx<0||!prods[idx]) return;
+    const nextImg=String(_editProdImages[key]||'').trim();
+    prods[idx].img=nextImg||null;
+  });
+  o.products=prods;
   if(oldStatus!=='Shipped'&&o.status==='Shipped'&&o.resellerId&&notifSettings.shipped){
     setTimeout(()=>{if(confirm('Send shipping notification to reseller?'))triggerResellerNotif(o,'shipped');},300);
   }
@@ -4008,9 +4114,83 @@ function stopBCNCamera(){
 
 // ── BARCODE ──
 let _depotPhotoOrderId=null, _depotPhotoProdIdx=null;
+let _barcodePendingConfirm=null;
 
+function normalizeTrackingInput(raw){
+  return String(raw||'').trim().toUpperCase().replace(/\s+/g,'');
+}
+function isLikelyTrackingCode(raw){
+  const v=normalizeTrackingInput(raw);
+  if(!v) return false;
+  if(v.length<8||v.length>40) return false;
+  if(!/^[A-Z0-9-]+$/.test(v)) return false;
+  if(/^(0+|1+|X+)$/.test(v)) return false;
+  return true;
+}
+function setBarcodePendingConfirm(orderId,prodIdx,scannedCode){
+  _barcodePendingConfirm={orderId:String(orderId||''),prodIdx:Math.max(0,Number(prodIdx)||0),code:normalizeTrackingInput(scannedCode),ts:Date.now()};
+}
+function clearBarcodePendingConfirm(){
+  _barcodePendingConfirm=null;
+}
+function confirmBarcodeArrival(){
+  if(!_barcodePendingConfirm) return;
+  confirmSingleBarcodeScan(_barcodePendingConfirm.orderId,_barcodePendingConfirm.prodIdx);
+}
+function cancelBarcodePendingConfirm(){
+  clearBarcodePendingConfirm();
+  const result=document.getElementById('barcode-result');
+  if(result){
+    result.innerHTML='<div style="background:var(--yellow-bg);border:1px solid var(--yellow-border);border-radius:9px;padding:11px;font-size:12px;color:#854d0e;">Scan cancelled. Please rescan the parcel barcode.</div>';
+  }
+  const inp=document.getElementById('barcode-input');
+  if(inp){inp.value='';inp.focus();}
+}
+function confirmSingleBarcodeScan(orderId,prodIdx){
+  const o=orders.find(x=>x&&x.id===orderId);
+  if(!o||!Array.isArray(o.products)||!o.products.length) return;
+  const idx=Math.max(0,Number(prodIdx)||0);
+  const prod=o.products[idx]||o.products[0];
+  if(!prod) return;
+  const code=normalizeTrackingInput(prod.cnTracking||o.cnTracking||'');
+  if(!isLikelyTrackingCode(code)){
+    toast('⚠️ Geçersiz barkod formatı. Kodu kontrol edin.','err');
+    return;
+  }
+  const duplicate=orders.find(function(row){
+    if(!row||row.id===o.id) return false;
+    return (row.products||[]).some(function(p){
+      return normalizeTrackingInput(p&&p.cnTracking)===code;
+    }) || normalizeTrackingInput(row.cnTracking)===code;
+  });
+  if(duplicate){
+    const ref=duplicate.ref||String(duplicate.id||'').slice(-6);
+    const okDup=confirm('⚠️ Bu CN başka siparişte mevcut: '+ref+'\nYine de devam edilsin mi?');
+    if(!okDup) return;
+  }
+  const wasArrived=!!prod.arrived;
+  prod.arrived=true;
+  if(idx===0||!o.cnTracking) o.cnTracking=code;
+  if(['New','Sent to Factory'].includes(o.status)) o.status='At Depot';
+  o.updatedAt=Date.now();
+  saveOrders([o.id]);updateBadges();
+  const shelf=getShelfStatus(o);
+  if(!wasArrived){
+    if(shelf.ready){
+      toast(`🎉 All items arrived! ${o.name} — Ready to Ship!`,'ok');
+      if(notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
+    } else {
+      toast(`📦 ${(prod.name||'Item')} arrived (${shelf.arrived}/${shelf.total})`,'ok');
+    }
+  }
+  clearBarcodePendingConfirm();
+  document.getElementById('barcode-input').value='';
+  document.getElementById('barcode-input').focus();
+  showBarcodeResult(o,idx);
+}
 function setScanMode(mode){
   _scanMode='find';stopCamera();
+  clearBarcodePendingConfirm();
   document.getElementById('barcode-result').innerHTML='';
   document.getElementById('depot-photo-section').style.display='none';
   document.getElementById('depot-photo-preview').innerHTML='';
@@ -4089,32 +4269,28 @@ function barcodeSearch(){
 
   // ✅ KEY: Auto-mark the found product as arrived
   if(foundProdIdx>=0&&found.products[foundProdIdx]){
-    const wasArrived=found.products[foundProdIdx].arrived;
-    found.products[foundProdIdx].arrived=true;
-    // Mark order At Depot if not already
-    if(['New','Sent to Factory'].includes(found.status)) found.status='At Depot';
-    saveOrders();updateBadges();
-
-    // Check if all arrived now
-    const shelf=getShelfStatus(found);
-    if(!wasArrived){
-      if(shelf.ready){
-        toast(`🎉 All items arrived! ${found.name} — Ready to Ship!`,'ok');
-        if(notifSettings.depot&&found.resellerId) triggerResellerNotif(found,'depot');
-      } else {
-        toast(`📦 ${found.products[foundProdIdx].name||'Item'} arrived (${shelf.arrived}/${shelf.total})`,'ok');
-      }
+    const scannedCode=normalizeTrackingInput(val);
+    if(scannedCode && !isLikelyTrackingCode(scannedCode)){
+      toast('⚠️ Barkod formatı şüpheli. Tekrar okutun.','err');
+      return;
     }
+    if(scannedCode && !normalizeTrackingInput(found.products[foundProdIdx].cnTracking)){
+      found.products[foundProdIdx].cnTracking=scannedCode;
+      if(foundProdIdx===0||!found.cnTracking) found.cnTracking=scannedCode;
+    }
+    setBarcodePendingConfirm(found.id,foundProdIdx,scannedCode||found.products[foundProdIdx].cnTracking||'');
   } else if(['New','Sent to Factory'].includes(found.status)){
-    // Single product — mark at depot
-    found.status='At Depot';
-    if(found.products[0]) found.products[0].arrived=true;
-    saveOrders();updateBadges();
-    toast(`🏭 ${found.name} — Marked At Depot`,'ok');
+    const scannedCode=normalizeTrackingInput(val);
+    if(scannedCode && !isLikelyTrackingCode(scannedCode)){
+      toast('⚠️ Barkod formatı şüpheli. Tekrar okutun.','err');
+      return;
+    }
+    if(found.products[0] && scannedCode){
+      found.products[0].cnTracking=found.products[0].cnTracking||scannedCode;
+      found.cnTracking=found.cnTracking||scannedCode;
+    }
+    setBarcodePendingConfirm(found.id,0,scannedCode||found.cnTracking||'');
   }
-
-  document.getElementById('barcode-input').value='';
-  document.getElementById('barcode-input').focus();
   showBarcodeResult(found, foundProdIdx);
 }
 
@@ -4149,6 +4325,15 @@ function showBarcodeResult(o, prodIdx){
 
   // Action buttons
   let actionBtns='';
+  const pendingConfirm=(window._barcodePendingConfirm&&window._barcodePendingConfirm.orderId===o.id)?window._barcodePendingConfirm:null;
+  const confirmBox=pendingConfirm?`<div style="background:var(--yellow-bg);border:1px solid var(--yellow-border);border-radius:8px;padding:10px;margin-bottom:10px;">
+    <div style="font-size:12px;font-weight:700;color:#854d0e;margin-bottom:6px;">⚠️ Confirm scan before saving</div>
+    <div style="font-size:12px;color:#854d0e;">Scanned: <span style="font-family:var(--mono);font-weight:800;">${esc(pendingConfirm.code||'')}</span></div>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button class="btn btn-green btn-xs" onclick="confirmBarcodeArrival()">✅ Confirm</button>
+      <button class="btn btn-ghost btn-xs" onclick="cancelBarcodePendingConfirm()">✕ Cancel</button>
+    </div>
+  </div>`:'';
   if(['New','Sent to Factory'].includes(o.status)){
     actionBtns=`<button class="btn btn-primary btn-sm" style="width:100%;justify-content:center;" onclick="quickMarkDepot('${o.id}')">🏭 Mark At Depot</button>`;
   } else if(o.status==='At Depot'&&!allArrived&&prods.length>1){
@@ -4171,6 +4356,7 @@ function showBarcodeResult(o, prodIdx){
       <div style="font-size:11px;color:var(--accent);font-family:var(--mono);margin-bottom:6px;">${esc(o.ref||o.id.slice(-6))}</div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:10px;white-space:pre-line;">${addr}</div>
       ${shelfHtml}
+      ${confirmBox}
       ${actionBtns}
     </div>`;
 
@@ -8234,13 +8420,21 @@ function normalizeFeedPost(post,prev){
   const old=prev&&typeof prev==='object'?prev:{};
   const ts=Number(base.ts)||Number(old.ts)||Date.now();
   const nextV=Math.max(1,Number(base.v)||nextDataVersion(base,old));
+  const legacyImg=String(base.img||old.img||'').trim();
+  const listImgs=(function(){
+    const arr=Array.isArray(base.imgs)?base.imgs:(Array.isArray(old.imgs)?old.imgs:[]);
+    return arr.filter(function(src){return !!String(src||'').trim();});
+  })();
+  if(!listImgs.length && legacyImg) listImgs.push(legacyImg);
   return {
     ...old,
     ...base,
     id:base.id||old.id||('post_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)),
     ts,
     updatedAt:Number(base.updatedAt)||ts,
-    v:nextV
+    v:nextV,
+    imgs:listImgs,
+    img:listImgs[0]||null
   };
 }
 function queueOrderOpFallback(op){
@@ -12139,10 +12333,17 @@ function formatVideoDuration(seconds){
 function getFeedPostsFromCache(){
   try{
     const raw=localStorage.getItem('jb_feed');
-    return raw?JSON.parse(raw):[];
+    const arr=raw?JSON.parse(raw):[];
+    if(!Array.isArray(arr)) return [];
+    return arr.map(function(post){return normalizeFeedPost(post,post);});
   }catch(_e){
     return [];
   }
+}
+function isFreshFeedPost(post){
+  const ts=Number(post&&post.ts)||0;
+  if(!ts) return false;
+  return (Date.now()-ts) <= (36*60*60*1000);
 }
 
 
@@ -12176,6 +12377,7 @@ function renderResFeed(searchQuery=''){
         const liked=myLikes[post.id];
         const tagClass={'NEW':'feed-tag-new','HOT':'feed-tag-hot','SALE':'feed-tag-sale','INFO':'feed-tag-info'}[post.tag]||'feed-tag-info';
         const tagEmoji={'NEW':'🆕','HOT':'🔥','SALE':'💰','INFO':'📢'}[post.tag]||'';
+        const isFresh=(Date.now()-Number(post.ts||0))<(6*60*60*1000);
         return `<div class="feed-post" style="animation-delay:${index*0.1}s;">
           <!-- Header -->
           <div style="padding:14px 16px;display:flex;align-items:center;gap:12px;">
@@ -12185,6 +12387,7 @@ function renderResFeed(searchQuery=''){
               <div style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px;">
                 <span>${fmtDate(post.ts)}</span>
                 ${post.tag?`<span class="feed-tag ${tagClass}">${tagEmoji} ${post.tag}</span>`:''}
+                ${isFresh?`<span class="feed-tag feed-tag-new">✨ Fresh</span>`:''}
               </div>
             </div>
           </div>
@@ -12414,7 +12617,8 @@ function openResDetail(orderId){
       }).join('')}
     </div>
     
-    <div style="display:flex;gap:8px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      ${(me&&me.role==='Reseller'&&o.resellerId===me.id)?`<button onclick="openResOrderImageEdit('${o.id}')" style="flex:1 1 100%;background:rgba(34,197,94,.12);color:#16a34a;border:1px solid rgba(34,197,94,.35);border-radius:10px;padding:10px;font-size:12px;font-weight:800;cursor:pointer;">🖼️ Edit Product Images</button>`:''}
       <button onclick="closeResDetail()" style="flex:1;background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:10px;padding:12px;font-size:13px;font-weight:700;cursor:pointer;">Close</button>
       <button onclick="openResellerChat()" style="flex:1;background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;border:none;border-radius:10px;padding:12px;font-size:13px;font-weight:700;cursor:pointer;">💬 Message Admin</button>
     </div>`;
@@ -12425,6 +12629,119 @@ function openResDetail(orderId){
 function closeResDetail(){
   const modal=document.getElementById('res-detail-modal');
   if(modal)modal.style.display='none';
+}
+
+function renderResOrderImageEditList(order){
+  const list=document.getElementById('res-img-edit-list');
+  if(!list) return;
+  const prods=(order&&Array.isArray(order.products))?order.products:[];
+  if(!prods.length){
+    list.innerHTML='<div style="font-size:12px;color:var(--muted);padding:8px 0;">No products on this order.</div>';
+    return;
+  }
+  list.innerHTML=prods.map(function(p,idx){
+    const original=String((p&&p.img)||'').trim();
+    const draft=Object.prototype.hasOwnProperty.call(_resImgEditDraft,String(idx))?_resImgEditDraft[String(idx)]:original;
+    const imgRef=String(draft||'').trim();
+    const changed=imgRef!==original;
+    return `<div style="display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
+      ${imgRef?`<img src="${imgRef}" style="width:56px;height:56px;border-radius:10px;object-fit:cover;border:1px solid var(--border);flex-shrink:0;">`:`<div style="width:56px;height:56px;border-radius:10px;border:1px dashed var(--border);background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">📦</div>`}
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p&&p.name||('Product '+(idx+1)))}</div>
+        <div style="font-size:11px;color:${changed?'var(--green)':'var(--muted)'};margin-top:2px;">${changed?'Will be updated on save':'Current image'}</div>
+        <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">
+          <label for="res-edit-img-${idx}" class="btn btn-ghost btn-xs" style="cursor:pointer;">📷 ${imgRef?'Change':'Add'}</label>
+          <input type="file" accept="image/*" id="res-edit-img-${idx}" style="display:none;" onchange="handleResOrderImageInput(${idx},this)">
+          ${imgRef?`<button type="button" class="btn btn-danger btn-xs" onclick="clearResOrderImageDraft(${idx})">Remove</button>`:''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function openResOrderImageEdit(orderId){
+  if(!me||me.role!=='Reseller') return;
+  const order=orders.find(function(x){return x&&x.id===orderId&&x.resellerId===me.id;});
+  if(!order){
+    toast('Order not found','err');
+    return;
+  }
+  _resImgEditOrderId=order.id;
+  _resImgEditDraft={};
+  const meta=document.getElementById('res-img-edit-order-meta');
+  if(meta) meta.textContent=(order.ref||order.id.slice(-6))+' · '+(order.name||'');
+  renderResOrderImageEditList(order);
+  const modal=document.getElementById('res-img-edit-modal');
+  if(modal) modal.style.display='flex';
+}
+function closeResOrderImageEdit(){
+  const modal=document.getElementById('res-img-edit-modal');
+  if(modal) modal.style.display='none';
+  _resImgEditOrderId=null;
+  _resImgEditDraft={};
+}
+async function handleResOrderImageInput(prodIdx,input){
+  if(!input||!input.files||!input.files[0]) return;
+  const order=orders.find(function(x){return x&&x.id===_resImgEditOrderId;});
+  if(!order) return;
+  try{
+    const compressed=await new Promise(function(resolve,reject){
+      const reader=new FileReader();
+      reader.onload=function(e){compressImage(e.target.result,1280,0.88).then(resolve).catch(reject);};
+      reader.onerror=reject;
+      reader.readAsDataURL(input.files[0]);
+    });
+    _resImgEditDraft[String(prodIdx)]=compressed;
+    renderResOrderImageEditList(order);
+    setTimeout(async function(){
+      try{
+        const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
+        if(!uploaded||uploaded===compressed) return;
+        _resImgEditDraft[String(prodIdx)]=uploaded;
+        const live=orders.find(function(x){return x&&x.id===_resImgEditOrderId;});
+        if(live) renderResOrderImageEditList(live);
+      }catch(_e){}
+    },0);
+  }catch(err){
+    toast('Image prepare failed: '+(err&&err.message?err.message:'unknown'),'err');
+  }finally{
+    input.value='';
+  }
+}
+function clearResOrderImageDraft(prodIdx){
+  const order=orders.find(function(x){return x&&x.id===_resImgEditOrderId;});
+  if(!order) return;
+  _resImgEditDraft[String(prodIdx)]=null;
+  renderResOrderImageEditList(order);
+}
+async function saveResOrderImageEdit(){
+  if(!me||me.role!=='Reseller'||!_resImgEditOrderId) return;
+  const order=orders.find(function(x){return x&&x.id===_resImgEditOrderId&&x.resellerId===me.id;});
+  if(!order){
+    toast('Order not found','err');
+    return;
+  }
+  const btn=document.getElementById('res-img-edit-save-btn');
+  if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    const prods=Array.isArray(order.products)?order.products:[];
+    Object.keys(_resImgEditDraft).forEach(function(key){
+      const idx=Number(key);
+      if(!Number.isInteger(idx)||idx<0||!prods[idx]) return;
+      const nextImg=String(_resImgEditDraft[key]||'').trim();
+      prods[idx].img=nextImg||null;
+    });
+    order.products=prods;
+    order.updatedAt=Date.now();
+    await saveOrders([order.id]);
+    logActivity('edited',`Reseller updated product images: ${esc(order.ref||order.id.slice(-6))} (${esc(order.name)})`,order.id);
+    closeResOrderImageEdit();
+    openResDetail(order.id);
+    renderResellerView();
+    updateBadges();
+    toast('✅ Product images updated','ok');
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='💾 Save Images';}
+  }
 }
 
 // ── TIPS ──
@@ -14340,7 +14657,7 @@ function fillFromCatalog(idx,sel){
   set('pcn-'+idx,opt.getAttribute('data-namecn'));
 }
 
-['order-modal','edit-modal','sup-modal','user-modal','catalog-modal','reseller-order-modal','img-editor-modal','cn-product-modal','product-detail-modal'].forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener('click',function(e){if(e.target===this)this.classList.remove('open');});});
+['order-modal','edit-modal','sup-modal','user-modal','catalog-modal','reseller-order-modal','img-editor-modal','cn-product-modal','product-detail-modal','res-img-edit-modal'].forEach(id=>{const el=document.getElementById(id);if(!el) return;el.addEventListener('click',function(e){if(e.target!==this) return;if(id==='res-img-edit-modal'){closeResOrderImageEdit();return;}this.classList.remove('open');});});
 
 document.addEventListener('DOMContentLoaded',()=>{
   const dz=document.getElementById('drop-zone');if(!dz)return;
