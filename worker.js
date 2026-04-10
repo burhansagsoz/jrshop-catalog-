@@ -74,6 +74,10 @@ export default {
         const { order } = await request.json();
         return await saveOrder(db, order);
       }
+      if (path === '/api/order-event' && method === 'POST') {
+        const event = await request.json();
+        return await saveOrderEvent(db, event);
+      }
       if (path.startsWith('/api/order/') && method === 'DELETE') {
         const id = path.split('/').pop();
         await db.prepare('DELETE FROM orders WHERE id=?').bind(id).run();
@@ -92,6 +96,14 @@ export default {
         await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
           .bind('catalog_html', JSON.stringify(html)).run();
         return json({ ok: true });
+      }
+      if (path === '/api/catalog-order' && method === 'POST') {
+        const order = await request.json();
+        return await saveCatalogOrder(db, order);
+      }
+      if (path.startsWith('/api/catalog-order/') && method === 'GET') {
+        const code = decodeURIComponent(path.replace('/api/catalog-order/', ''));
+        return await getCatalogOrder(db, code);
       }
 
       // Backup
@@ -223,6 +235,40 @@ async function saveOrder(db, order) {
   await db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts')
     .bind(order.id, order.ts || Date.now(), JSON.stringify(clean)).run();
   return json({ ok: true });
+}
+
+async function saveOrderEvent(db, event) {
+  const ev = event && typeof event === 'object' ? event : {};
+  const ts = Number(ev.ts) || Date.now();
+  const id = String(ev.id || ev.opId || ('evt_' + ts.toString(36) + '_' + Math.random().toString(36).slice(2, 8)));
+  await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .bind('order_event_' + id, JSON.stringify({ ...ev, id, ts })).run();
+  return json({ ok: true, id });
+}
+
+async function saveCatalogOrder(db, order) {
+  const code = String(order && order.code ? order.code : '').trim().toUpperCase();
+  if (!code) return json({ error: 'code missing' }, 400);
+  const clean = {
+    ...(order && typeof order === 'object' ? order : {}),
+    code,
+    ts: Number(order && order.ts) || Date.now(),
+  };
+  await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .bind('catalog_order_' + code, JSON.stringify(clean)).run();
+  return json({ ok: true, code });
+}
+
+async function getCatalogOrder(db, code) {
+  const normalized = String(code || '').trim().toUpperCase();
+  if (!normalized) return json({ error: 'code missing' }, 400);
+  const row = await db.prepare('SELECT value FROM kv_store WHERE key=?').bind('catalog_order_' + normalized).first();
+  if (!row) return json({ error: 'not_found' }, 404);
+  try {
+    return json(JSON.parse(row.value));
+  } catch {
+    return json({ error: 'invalid_data' }, 500);
+  }
 }
 
 async function saveImage(db, data, type) {

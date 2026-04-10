@@ -7495,7 +7495,11 @@ async function syncGenericKeyToCloud(key,value,meta={}){
 async function uploadToCloud(){
   const api=getApiBase();
   try{
-    toast('Syncing to Firebase...','info');
+    toast('Syncing to Cloudflare...','info');
+    const testRes=await fetch(api+'/api/test',{headers:getAuthHeaders()});
+    if(!testRes.ok){
+      throw new Error('Cloud API test failed (HTTP '+testRes.status+')');
+    }
     // Upload non-order data
     const payload={};
     for(const key of SYNC_KEYS){
@@ -7503,21 +7507,38 @@ async function uploadToCloud(){
       const val=localStorage.getItem(key);
       if(val){try{payload[key]=JSON.parse(val);}catch{payload[key]=val;}}
     }
-    await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
+    const dataSyncRes=await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
+    if(!dataSyncRes.ok){
+      throw new Error('/api/data sync failed (HTTP '+dataSyncRes.status+')');
+    }
     // Upload all orders individually
     let saved=0;
+    let lastOrderErr='';
     for(const o of orders){
       const clean={...o,products:(o.products||[]).map(p=>({...p,
         img:p.img||null,
         depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
       }))};
       try{
-        await fetch(api+'/api/order',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})});
+        const orderRes=await fetch(api+'/api/order',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})});
+        if(!orderRes.ok){
+          lastOrderErr='HTTP '+orderRes.status;
+          continue;
+        }
         saved++;
-      }catch(e){}
+      }catch(e){
+        lastOrderErr=String((e&&e.message)||e||'order_sync_error');
+      }
     }
-    toast(`✅ Synced ${saved} orders`,'ok');
-  }catch(e){toast('Sync failed','err');}
+    if(lastOrderErr){
+      toast(`⚠️ Synced ${saved}/${orders.length} orders (last error: ${lastOrderErr})`,'err');
+    }else{
+      toast(`✅ Synced ${saved} orders to Cloudflare`,'ok');
+    }
+  }catch(e){
+    markError(e);
+    toast('❌ Cloud sync failed: '+((e&&e.message)||String(e)),'err');
+  }
 }
 
 
@@ -7662,7 +7683,7 @@ async function recoverOrdersNow(){
     if(ok && Array.isArray(orders) && orders.length){
       toast(`✅ Recovered ${orders.length} orders`,'ok');
     }else{
-      toast('⚠️ No remote orders found. Check Firebase Auth/Rules.','err');
+      toast('⚠️ No remote orders found. Check Cloudflare API/Worker.','err');
     }
   }catch(err){
     toast('❌ Recover failed: '+(err&&err.message?err.message:String(err)),'err');
@@ -7746,7 +7767,7 @@ const _health={
   apiCalls:0,
   apiErrors:0,
   lastError:'',
-  authState:'signed_out',
+  authState:'cloudflare_mode',
   feedRealtime:false,
   ordersRealtime:false,
   dataRealtime:false
@@ -8103,14 +8124,14 @@ function enforceLocalModeOnFirebasePermission(msg){
   const now=Date.now();
   if((now-_lastFirebasePermissionLockAt)<15000) return;
   _lastFirebasePermissionLockAt=now;
-  disconnectFirebaseRealtime();
+  if(getFirebaseEnabled()) disconnectFirebaseRealtime();
   _health.firebaseConnected=false;
   _health.ordersRealtime=false;
   _health.feedRealtime=false;
   _health.dataRealtime=false;
-  _health.authState='permission_denied';
+  _health.authState='cloud_api_mode';
   if(!(me&&me.role==='Reseller')){
-    toast('⚠️ Firebase yetki hatası: user_roles/{uid} ve rules kontrol edin.','info');
+    toast('⚠️ Cloudflare sync issue detected. API route/method kontrol edin.','info');
   }
 }
 function markError(err){
