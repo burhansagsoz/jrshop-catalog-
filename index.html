@@ -8337,6 +8337,11 @@ function renderHealthPanel(){
   const el=document.getElementById('sync-health-panel');
   if(!el) return;
   const fmtTs=_health.lastSyncAt?new Date(_health.lastSyncAt).toLocaleString('tr-TR'):'-';
+  const cloudMode=!getFirebaseEnabled();
+  const cloudFresh=!!(_health.lastSyncAt && (Date.now()-_health.lastSyncAt)<120000);
+  const shownOrders=cloudMode?cloudFresh:!!_health.ordersRealtime;
+  const shownFeed=cloudMode?cloudFresh:!!_health.feedRealtime;
+  const shownData=cloudMode?cloudFresh:!!_health.dataRealtime;
   const lastAct=Array.isArray(activityLog)&&activityLog[0]?activityLog[0]:null;
   const lastActTxt=lastAct?`${lastAct.type||'activity'} · ${fmtDateTime(lastAct.ts)}`:'-';
   const q=getLocalSyncFallbackMetrics();
@@ -8354,7 +8359,7 @@ function renderHealthPanel(){
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">Realtime</div>
-        <div style="font-size:13px;font-weight:700;">orders:${_health.ordersRealtime?'on':'off'} · feed:${_health.feedRealtime?'on':'off'} · data:${_health.dataRealtime?'on':'off'}</div>
+        <div style="font-size:13px;font-weight:700;">orders:${shownOrders?'on':'off'} · feed:${shownFeed?'on':'off'} · data:${shownData?'on':'off'}${cloudMode?' · cloud_live':''}</div>
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">API</div>
@@ -12540,7 +12545,8 @@ function previewFeedImgs(input){
     const reader=new FileReader();
     reader.onload=async function(e){
       try{
-        const compressed=await compressImage(e.target.result,520,0.55);
+        // Feed cards should keep detail: use larger target + higher JPEG quality.
+        const compressed=await compressImage(e.target.result,1280,0.88);
         _feedImgs.push({data:compressed,url:null});
         const idx=_feedImgs.length-1;
         const wrap=document.createElement('div');
@@ -12882,7 +12888,8 @@ async function sendChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,360,0.5);
+      // Chat image quality tuned up to avoid visibly blurry media.
+      const compressed=await compressImage(e.target.result,1280,0.88);
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+_chatReseller;
       if(!_messages[_chatReseller])_messages[_chatReseller]=[];
@@ -12896,7 +12903,7 @@ async function sendChatImage(input){
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
         try{
-          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
           if(!uploaded || uploaded===compressed) return;
           const msgs=_messages[_chatReseller]||[];
           const found=msgs.find(m=>m&&m.id===msg.id);
@@ -13159,7 +13166,8 @@ async function sendResChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,360,0.5);
+      // Chat image quality tuned up to avoid visibly blurry media.
+      const compressed=await compressImage(e.target.result,1280,0.88);
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+me.id;
       let msgs=[];
@@ -13174,7 +13182,7 @@ async function sendResChatImage(input){
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
         try{
-          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
           if(!uploaded || uploaded===compressed) return;
           let live=[];
           try{live=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){live=[];}
