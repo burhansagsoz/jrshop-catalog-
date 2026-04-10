@@ -7706,9 +7706,16 @@ function saveFirebaseSettings(){
       return;
     }
   }
-  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
-  stopFirebaseRealtime();
-  toast('ℹ️ Firebase/Auth devre dışı (istek üzerine)','info');
+  localStorage.setItem(FIREBASE_ENABLED_KEY,enabled?'1':'0');
+  if(enabled){
+    clearFirebaseAuthNeedsFreshLogin();
+    clearFirebaseAuthRetryGuards();
+    toast('✅ Firebase ayarları kaydedildi','ok');
+    initFirebaseRealtime({silent:true,force:true}).catch(()=>{});
+  }else{
+    stopFirebaseRealtime();
+    toast('ℹ️ Firebase devre dışı bırakıldı','info');
+  }
 }
 async function syncSettingsToFirebase(){
   try{
@@ -7770,6 +7777,7 @@ let _firebaseAuthNeedsFreshLogin=(function(){
   try{return localStorage.getItem(FIREBASE_AUTH_FRESH_LOGIN_KEY)==='1';}catch(_e){return false;}
 })();
 let _lastFirebasePermissionLockAt=0;
+let _ordersBulkPushInFlight=false;
 const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
@@ -8139,15 +8147,14 @@ function enforceLocalModeOnFirebasePermission(msg){
   const now=Date.now();
   if((now-_lastFirebasePermissionLockAt)<15000) return;
   _lastFirebasePermissionLockAt=now;
-  try{localStorage.setItem(FIREBASE_ENABLED_KEY,'0');}catch(_e){}
   disconnectFirebaseRealtime();
   _health.firebaseConnected=false;
   _health.ordersRealtime=false;
   _health.feedRealtime=false;
   _health.dataRealtime=false;
-  _health.authState='local_api_mode';
+  _health.authState='permission_denied';
   if(!(me&&me.role==='Reseller')){
-    toast('⚠️ Firebase yetki hatası algılandı. Sistem API moduna alındı.','info');
+    toast('⚠️ Firebase yetki hatası: user_roles/{uid} ve rules kontrol edin.','info');
   }
 }
 function markError(err){
@@ -8349,7 +8356,13 @@ function normalizeStatus(s){
 }
 
 function getFirebaseEnabled(){
-  return false;
+  try{
+    const raw=localStorage.getItem(FIREBASE_ENABLED_KEY);
+    if(raw===null||raw===undefined||raw==='') return true;
+    return raw==='1';
+  }catch(_e){
+    return true;
+  }
 }
 function isFirebaseEnabled(){
   return getFirebaseEnabled();
@@ -8745,11 +8758,9 @@ async function firebaseSignInForSession(email,password){
     if(authCode==='auth/too-many-requests'){
       markError(err);
       _health.authState='auth_rate_limited';
-      // Stop retrying cached email/password in a tight loop.
-      clearFirebaseLoginCreds({includeRemember:true});
-      markFirebaseAuthNeedsFreshLogin();
-      setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
-      setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
+      // Keep credentials; apply only cooldown to avoid re-login loops.
+      setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS*3);
+      setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS*2);
       return null;
     }
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
@@ -9091,7 +9102,7 @@ function disconnectFirebaseRealtime(){
   _health.feedRealtime=false;
   _health.dataRealtime=false;
   // Keep recoverable auth state; do not downgrade stable fallback states.
-  if(!['signed_in','auth_rate_limited'].includes(String(_health.authState||''))){
+  if(!['signed_in','auth_rate_limited','permission_denied'].includes(String(_health.authState||''))){
     _health.authState='waiting_login';
   }
 }
@@ -10086,10 +10097,11 @@ async function migrateAllToFirebase(){
 async function connectFirebaseNow(){
   resetHealthCounters();
   if(_firebaseAuthNeedsFreshLogin){
+    clearFirebaseAuthNeedsFreshLogin();
+    clearFirebaseAuthRetryGuards();
     _health.authState='waiting_login';
     updateConnectNowCooldownUi(0);
-    toast('⚠️ Firebase için yeniden giriş gerekli. Lütfen çıkış yapıp tekrar giriş yapın.','info');
-    return;
+    toast('ℹ️ Eski auth kilidi temizlendi, yeniden bağlanılıyor...','info');
   }
   const waitMs=getFirebaseAuthRetryRemainingMs();
   if(waitMs>0){
