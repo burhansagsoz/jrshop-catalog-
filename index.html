@@ -2758,13 +2758,17 @@ async function logout(){
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
   try{
     if(me && navigator.onLine){
-      await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
-      await flushLocalSyncFallback().catch(()=>{});
-      const hasOrders=Array.isArray(orders) && orders.length>0;
-      if(hasOrders){
-        await saveAllToCloud().catch(()=>{});
-        await flushLocalSyncFallback().catch(()=>{});
-      }
+      await withTimeoutPromise(
+        ensureWorkingApiBase({silent:true,force:true}).catch(()=>{}),
+        3000,
+        'logout api base check'
+      ).catch(()=>{});
+      // Keep logout fast: only a short outbox flush attempt, no full backup push.
+      await withTimeoutPromise(
+        flushLocalSyncFallback().catch(()=>{}),
+        3000,
+        'logout sync flush'
+      ).catch(()=>{});
     }
   }catch(_e){}
   stopFirebaseRealtime();
