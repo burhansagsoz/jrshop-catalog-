@@ -2395,6 +2395,14 @@ function shouldAcceptRemoteOrders(remoteOrders){
     return true;
   }
 }
+function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
+  const remoteCount=Array.isArray(fallbackOrders)?fallbackOrders.length:0;
+  const localCount=Array.isArray(localOrders)?localOrders.length:0;
+  if(remoteCount<=0) return false;
+  if(localCount===0) return true;
+  if(localCount<30 && remoteCount>=localCount) return true;
+  return false;
+}
 function persistOrdersState(nextOrders){
   const arr=Array.isArray(nextOrders)?nextOrders:[];
   orders=arr;
@@ -4858,7 +4866,7 @@ async function sendBulkMessage(resellerIdsStr, btn){
   
   if(btn){btn.disabled=true;btn.textContent='Sending...';}
   
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   
   let sent = 0;
   for(const resId of resellerIds){
@@ -7392,7 +7400,7 @@ async function trackOrder(){
   // Load from cloud if orders empty
   if(!orders.length){
     try{
-      const api=getApiBase();
+      const api=await ensureWorkingApiBase({silent:true});
       // Önce /api/orders dene
       try{
         const r1=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
@@ -7543,12 +7551,12 @@ async function ensureWorkingApiBase(opts={}){
 function renderCloudApiSummary(){
   const el=document.getElementById('cfg-cloud-active');
   if(!el) return;
-  const api=getApiBase();
+  const api=(localStorage.getItem('jb_cloud_api')||'').trim()||location.origin;
   const hasKey=!!(localStorage.getItem('jb_cloud_key')||'').trim();
   el.textContent=`Active API base: ${api} · API key: ${hasKey?'set':'not set'}`;
 }
 function apiUrl(path){
-  return getApiBase()+String(path||'');
+  return ((localStorage.getItem('jb_cloud_api')||'').trim()||location.origin)+String(path||'');
 }
 function getAuthHeaders(extra){
   const headers={...(extra||{})};
@@ -8216,8 +8224,9 @@ async function loadFromCloud(){
             return false;
           }
         } else {
-          cloudOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-          if(!cloudOrders.length) return false;
+          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          if(!shouldUseOrdersDataFallback(fallbackOrders,orders)) return false;
+          cloudOrders=fallbackOrders;
         }
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         // Server-authoritative merge: prune missing remote IDs except recent local mutations.
@@ -8315,7 +8324,8 @@ const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
-const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
+const LOCAL_ORDER_MUTATION_KEEP_MS=90*1000;
+const LOCAL_ORDER_CONVERGENCE_GRACE_MS=90*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
 const LOCAL_DATA_META_KEY='jb_data_meta';
 const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
@@ -8323,6 +8333,7 @@ const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
 const FIREBASE_MIGRATE_MAX_BYTES=850000;
+const CLOUD_FAST_SYNC_MS=8000;
 let _firebaseApp=null;
 let _firebaseDb=null;
 let _firebaseStorage=null;
@@ -8441,7 +8452,13 @@ function hasActiveLocalOrderMutation(orderId){
   const row=map[String(orderId)];
   if(!row) return false;
   const ts=Number(row.ts)||0;
-  return (Date.now()-ts) < LOCAL_ORDER_MUTATION_KEEP_MS;
+  const age=Date.now()-ts;
+  if(age<Math.min(LOCAL_ORDER_MUTATION_KEEP_MS,LOCAL_ORDER_CONVERGENCE_GRACE_MS)) return true;
+  const fallback=readLocalSyncFallback();
+  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+    ? fallback.jb_order_ops.value
+    : [];
+  return pendingOps.some(function(op){return String(op&&op.orderId||'')===String(orderId);});
 }
 function readLocalDataMutations(){
   try{
@@ -9052,7 +9069,7 @@ async function deleteOrderWithTombstone(orderId,meta={}){
   const event=buildOrderEvent('delete',id,{opId,v,ts,source:'client'});
   markLocalOrderMutation(id,'delete',{opId,v});
   applyOrderDeleteLocally(id,ts);
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   let acked=false;
   let staleIgnored=false;
   try{
@@ -11387,6 +11404,7 @@ async function startPendingPoll(){
     return;
   }
   if(_pendingPollInterval)clearInterval(_pendingPollInterval);
+  const pendingMs=(getFirebaseEnabled()&&_health.ordersRealtime)?30000:CLOUD_FAST_SYNC_MS;
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
     try{
@@ -11394,6 +11412,7 @@ async function startPendingPoll(){
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(!res.ok)return;
       const {data}=await res.json();
+      const localOrdersNow=Array.isArray(orders)?orders:[];
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
@@ -11405,10 +11424,12 @@ async function startPendingPoll(){
             newOrders=[];
           }
         }else{
-          newOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
         }
       }catch{
-        newOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+        const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+        newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
       }
       if(!shouldAcceptRemoteOrders(newOrders)){
         return;
@@ -11499,7 +11520,7 @@ async function startPendingPoll(){
         }
       }
     }catch(e){}
-  },30000);
+  },pendingMs);
 }
 
 
@@ -11563,7 +11584,7 @@ function startGlobalChatPoll(){
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
@@ -11677,7 +11698,7 @@ function renderChatList(filter=''){
 async function pollMessages(resellerId){
   if(!resellerId) return;
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
@@ -11877,7 +11898,7 @@ function startResellerMessagePoll(){
 async function checkResellerUnreadMessages(){
   if(!me) return;
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
@@ -12315,7 +12336,7 @@ function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
   warmFirebaseConnect();
   
-  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:30000;
+  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:CLOUD_FAST_SYNC_MS;
   // Sync interval adapts when realtime is active.
   _autoSyncInterval = setInterval(async() => {
     if(me && navigator.onLine){
