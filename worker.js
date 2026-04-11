@@ -180,9 +180,44 @@ export default {
         return await saveOrderEvent(db, event);
       }
       if (path.startsWith('/api/order/') && method === 'DELETE') {
-        const id = path.split('/').pop();
-        await db.prepare('DELETE FROM orders WHERE id=?').bind(id).run();
-        return json({ ok: true });
+        const id = decodeURIComponent(path.split('/').pop() || '').trim();
+        if (!id) return json({ error: 'id missing' }, 400);
+        let req = {};
+        try { req = await request.json(); } catch { req = {}; }
+        const nowTs = Date.now();
+        const requestedDeletedAt = Number(req && req.deletedAt) || nowTs;
+        const requestedV = Number(req && req.v) || 0;
+        const requestedOpId = String(req && req.opId || ('srv_del_' + nowTs.toString(36)));
+
+        const prevTableOrder = await readOrderFromTable(db, id);
+        const prevKvOrder = await readOrderFromKvSnapshot(db, id);
+        const prevOrder = pickFresherOrder(prevTableOrder, prevKvOrder);
+        const prevV = Number(prevOrder && prevOrder.v) || 0;
+        const prevTs = Number(prevOrder && (prevOrder.updatedAt || prevOrder.ts)) || 0;
+        const prevDeleted = !!(prevOrder && prevOrder.deletedAt);
+
+        const nextV = Math.max(1, requestedV, prevV + 1);
+        const deletedAt = Math.max(requestedDeletedAt, prevTs, nowTs);
+
+        // Idempotency/stale protection: keep the freshest tombstone.
+        if (prevDeleted && (prevV > nextV || (prevV === nextV && prevTs >= deletedAt))) {
+          return json({ ok: true, staleIgnored: true, ackV: prevV, deletedAt: prevTs });
+        }
+
+        const tombstone = {
+          id,
+          status: 'Deleted',
+          deletedAt,
+          updatedAt: deletedAt,
+          ts: deletedAt,
+          v: nextV,
+          opId: requestedOpId,
+          lastOpId: requestedOpId,
+          products: []
+        };
+        await db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts')
+          .bind(id, deletedAt, JSON.stringify(tombstone)).run();
+        return json({ ok: true, deletedAt, ackV: nextV });
       }
 
       // Images
@@ -334,6 +369,35 @@ async function syncKey(db, key, value) {
   return json({ ok: true });
 }
 
+async function readOrderFromTable(db, id) {
+  const row = await db.prepare('SELECT data FROM orders WHERE id=?').bind(id).first();
+  if (!row || !row.data) return null;
+  try { return JSON.parse(row.data); } catch { return null; }
+}
+
+async function readOrderFromKvSnapshot(db, id) {
+  const kv = await db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first();
+  if (!kv || !kv.value) return null;
+  try {
+    const list = JSON.parse(kv.value);
+    if (!Array.isArray(list)) return null;
+    return list.find(o => o && String(o.id) === String(id)) || null;
+  } catch {
+    return null;
+  }
+}
+
+function pickFresherOrder(a, b) {
+  if (!a) return b || null;
+  if (!b) return a || null;
+  const av = Number(a.v) || 0;
+  const bv = Number(b.v) || 0;
+  const ats = Number(a.updatedAt || a.ts) || 0;
+  const bts = Number(b.updatedAt || b.ts) || 0;
+  if (bv > av || (bv === av && bts > ats)) return b;
+  return a;
+}
+
 async function getOrders(db) {
   try {
     // orders tablosundan dene
@@ -353,7 +417,7 @@ async function getOrders(db) {
 
     const byId = new Map();
     const mergeOne = (order) => {
-      if (!order || !order.id || order.deletedAt) return;
+      if (!order || !order.id) return;
       const id = String(order.id);
       const prev = byId.get(id);
       if (!prev) {
@@ -372,7 +436,9 @@ async function getOrders(db) {
     (Array.isArray(kvOrders) ? kvOrders : []).forEach(mergeOne);
     (Array.isArray(tableOrders) ? tableOrders : []).forEach(mergeOne);
 
-    const orders = [...byId.values()].sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+    const orders = [...byId.values()]
+      .filter(order => !(order && order.deletedAt))
+      .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
     return json({ orders });
   } catch(e) {
     return json({ orders: [], error: e.message });
@@ -394,9 +460,31 @@ async function saveOrder(db, order) {
       depotPhoto: keepImageRef(p && p.depotPhoto),
     })),
   };
+  const id = String(clean && clean.id || '').trim();
+  if (!id) return json({ error: 'order id missing' }, 400);
+  const incomingV = Math.max(0, Number(clean && clean.v) || 0);
+  const incomingTs = Number(clean && (clean.updatedAt || clean.ts)) || Date.now();
+  const incomingDeleted = !!(clean && clean.deletedAt);
+
+  const prevTable = await readOrderFromTable(db, id);
+  const prevKv = await readOrderFromKvSnapshot(db, id);
+  const prev = pickFresherOrder(prevTable, prevKv);
+  const prevV = Math.max(0, Number(prev && prev.v) || 0);
+  const prevTs = Number(prev && (prev.updatedAt || prev.ts)) || 0;
+  const prevDeleted = !!(prev && prev.deletedAt);
+
+  const stale = (
+    incomingV < prevV ||
+    (incomingV === prevV && incomingTs < prevTs) ||
+    (prevDeleted && !incomingDeleted && incomingV <= prevV)
+  );
+  if (stale) {
+    return json({ ok: true, staleIgnored: true, ackV: prevV || 1 });
+  }
+
   await db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts')
-    .bind(order.id, order.ts || Date.now(), JSON.stringify(clean)).run();
-  return json({ ok: true });
+    .bind(id, Number(clean.ts) || incomingTs, JSON.stringify(clean)).run();
+  return json({ ok: true, ackV: Math.max(incomingV, prevV, 1) });
 }
 
 async function saveOrderEvent(db, event) {

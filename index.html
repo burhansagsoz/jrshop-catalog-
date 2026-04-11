@@ -8789,7 +8789,27 @@ function applyOrderDeleteLocally(orderId,deletedAt){
   const id=String(orderId||'').trim();
   if(!id) return null;
   const ts=Number(deletedAt)||Date.now();
-  orders=(orders||[]).filter(function(o){return o&&o.id!==id;});
+  const list=Array.isArray(orders)?orders:[];
+  const existing=list.find(function(o){return o&&String(o.id)===id;})||null;
+  if(existing){
+    const baseV=Math.max(0,Number(existing&&existing.v)||0);
+    const nextV=baseV+1;
+    const tombstone={
+      ...existing,
+      id,
+      deletedAt:ts,
+      updatedAt:ts,
+      status:'Deleted',
+      v:nextV,
+      products:[]
+    };
+    orders=list
+      .filter(function(o){return o&&String(o.id)!==id;})
+      .concat([tombstone]);
+  }else{
+    const tombstone={id,deletedAt:ts,updatedAt:ts,status:'Deleted',v:1,products:[]};
+    orders=list.concat([tombstone]);
+  }
   persistOrdersLocalSafe(orders);
   return {id,status:'Deleted',deletedAt:ts,updatedAt:ts};
 }
