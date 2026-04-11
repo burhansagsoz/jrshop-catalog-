@@ -2904,7 +2904,7 @@ async function approveOrder(id){
   }catch(_e){}
   if(!persisted){
     try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const k=localStorage.getItem('jb_cloud_key')||'';
     const headers={'Content-Type':'application/json'};
     if(k) headers['Authorization']='Bearer '+k;
@@ -2943,7 +2943,7 @@ async function navOrders(status,el){
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
-        const api=getApiBase();
+        const api=await ensureWorkingApiBase({silent:true});
         const k=localStorage.getItem('jb_cloud_key')||'';
         const headers={};
         if(k) headers['Authorization']='Bearer '+k;
@@ -4595,7 +4595,7 @@ async function downloadImage(src, name){
   const m=String(src||'').match(/\/api\/image\/([^?#]+)/);
   if(!m){toast('⚠️ Image URL invalid','err');return;}
   const id=decodeURIComponent(m[1]);
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   const headers=getAuthHeaders();
   try{
     const res=await fetch(api+'/api/image/'+id,{headers});
@@ -5467,7 +5467,7 @@ function extractBackupPayload(raw){
 function importBackup(input){
   if(!input.files||!input.files[0]) return;
   const reader=new FileReader();
-  reader.onload=e=>{
+  reader.onload=async e=>{
     try{
       const raw=JSON.parse(e.target.result);
       const payload=extractBackupPayload(raw);
@@ -5509,6 +5509,15 @@ function importBackup(input){
       updateBadges();render();
       markSync('backup_import');
       toast(`✅ Backup imported: ${orders.length} orders`,'ok');
+      try{
+        await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
+        await saveAllToCloud();
+        await flushLocalSyncFallback().catch(()=>{});
+        await loadFromCloudSilent().catch(()=>{});
+      }catch(syncErr){
+        console.error('[backup import cloud sync]', syncErr);
+        toast('⚠️ Backup imported locally but cloud save failed. Check API/DB status.','err');
+      }
     }catch(err){
       toast('❌ Invalid backup file','err');
     }finally{
@@ -6072,7 +6081,7 @@ async function shareCatalog(){
   try{
     // Load fresh from cloud first
     try{
-      const api=getApiBase();
+      const api=await ensureWorkingApiBase({silent:true});
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(res.ok){
         const {data}=await res.json();
@@ -6083,7 +6092,7 @@ async function shareCatalog(){
     catalog=catalog||JSON.parse(localStorage.getItem('jb_catalog')||'[]');
     if(!catalog||!catalog.length){toast('Add products first!','err');return;}
     
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     
     // Upload images to cloud first (convert base64 to URLs)
     const hasInlineCatalogImages=(catalog||[]).some(function(item){
@@ -7389,11 +7398,59 @@ async function trackOrder(){
 const CLOUD_API_DEFAULT=location.origin;
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
+let _apiBaseCheckInFlight=null;
+let _apiBaseCheckedAt=0;
+const API_BASE_CHECK_COOLDOWN_MS=60*1000;
 function getApiBase(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
   if(getFirebaseEnabled()) return location.origin;
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
   return CLOUD_API_DEFAULT;
+}
+function isApiEndpointReachableResponse(res){
+  if(!res) return false;
+  return ![404,405].includes(Number(res.status)||0);
+}
+async function ensureWorkingApiBase(opts={}){
+  const force=!!opts.force;
+  const now=Date.now();
+  if(!force && (now-_apiBaseCheckedAt)<API_BASE_CHECK_COOLDOWN_MS){
+    return getApiBase();
+  }
+  if(_apiBaseCheckInFlight) return _apiBaseCheckInFlight;
+  _apiBaseCheckInFlight=(async function(){
+    const configured=getApiBase();
+    const origin=location.origin.replace(/\/$/,'');
+    try{
+      if(configured===origin){
+        return configured;
+      }
+      let configuredReachable=false;
+      try{
+        const r=await fetchWithTimeout(configured+'/api/test',{headers:getAuthHeaders()},4000);
+        configuredReachable=isApiEndpointReachableResponse(r);
+      }catch(_e){}
+      if(configuredReachable){
+        return configured;
+      }
+      let originReachable=false;
+      try{
+        const r2=await fetchWithTimeout(origin+'/api/test',{headers:getAuthHeaders()},4000);
+        originReachable=isApiEndpointReachableResponse(r2);
+      }catch(_e){}
+      if(originReachable){
+        try{localStorage.setItem('jb_cloud_api',origin);}catch(_e){}
+        renderCloudApiSummary();
+        if(!opts.silent) toast('ℹ️ API URL auto-corrected to current domain','info');
+        return origin;
+      }
+      return configured;
+    }finally{
+      _apiBaseCheckedAt=Date.now();
+      _apiBaseCheckInFlight=null;
+    }
+  })();
+  return _apiBaseCheckInFlight;
 }
 function renderCloudApiSummary(){
   const el=document.getElementById('cfg-cloud-active');
@@ -7738,7 +7795,7 @@ function buildGenericEventDoc(key,value,meta={}){
   };
 }
 async function syncToCloud(key,value){
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   let parsed=value;
   let eventDoc=null;
   try{
@@ -7784,7 +7841,7 @@ async function syncToCloud(key,value){
 }
 async function syncGenericKeyToCloud(key,value,meta={}){
   if(!key) return false;
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   let parsed=value;
   try{
     parsed=typeof value==='string'?JSON.parse(value):value;
@@ -7821,7 +7878,7 @@ async function syncGenericKeyToCloud(key,value,meta={}){
 }
 
 async function uploadToCloud(){
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true,force:true});
   try{
     toast('Syncing to Cloudflare...','info');
     const testRes=await fetch(api+'/api/test',{headers:getAuthHeaders()});
@@ -7871,6 +7928,7 @@ async function uploadToCloud(){
     // Upload all orders individually
     let saved=0;
     let lastOrderErr='';
+    const failedOrderIds=[];
     for(const o of normalizedOrders){
       const clean={...o,products:(o.products||[]).map(p=>({...p,
         img:(function(v){
@@ -7892,11 +7950,13 @@ async function uploadToCloud(){
         const orderRes=await fetch(api+'/api/order',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})});
         if(!orderRes.ok){
           lastOrderErr='HTTP '+orderRes.status;
+          failedOrderIds.push(String(o&&o.id||''));
           continue;
         }
         saved++;
       }catch(e){
         lastOrderErr=String((e&&e.message)||e||'order_sync_error');
+        failedOrderIds.push(String(o&&o.id||''));
       }
     }
     // Verify remote row count after upload; abort adopting smaller snapshots.
@@ -7915,12 +7975,15 @@ async function uploadToCloud(){
     }
     if(lastOrderErr){
       toast(`⚠️ Synced ${saved}/${orders.length} orders (last error: ${lastOrderErr})`,'err');
+      return {ok:false,saved,total:orders.length,lastOrderErr,failedOrderIds};
     }else{
       toast(`✅ Synced ${saved} orders to Cloudflare`,'ok');
+      return {ok:true,saved,total:orders.length,lastOrderErr:'',failedOrderIds:[]};
     }
   }catch(e){
     markError(e);
     toast('❌ Cloud sync failed: '+((e&&e.message)||String(e)),'err');
+    return {ok:false,saved:0,total:Array.isArray(orders)?orders.length:0,lastOrderErr:String((e&&e.message)||e||'sync_failed'),failedOrderIds:[]};
   }
 }
 
@@ -7928,7 +7991,7 @@ async function uploadToCloud(){
 // Sessiz cloud sync - autoSync için, toast göstermez
 async function loadFromCloudSilent(){
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
 
     // Diğer verileri güncelle (kullanıcılar, katalog vs)
     const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
@@ -7976,7 +8039,7 @@ async function loadFromCloudSilent(){
 
 async function loadFromCloud(){
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
       try{
         console.log('[Remote] Loading data...');
         // Load settings & other data
@@ -8057,7 +8120,17 @@ async function loadFromCloud(){
 async function saveAllToCloud(){
   // Keep this action as full backup (metadata + all order rows),
   // otherwise /api/orders can lag behind and appear as "missing orders" on reload.
-  return uploadToCloud();
+  const uploadResult=await uploadToCloud();
+  const allIds=(Array.isArray(orders)?orders:[]).map(function(o){return o&&o.id;}).filter(Boolean);
+  const failedIds=uploadResult&&Array.isArray(uploadResult.failedOrderIds)?uploadResult.failedOrderIds.filter(Boolean):[];
+  const shouldQueueFallback=(!uploadResult||!uploadResult.ok) && allIds.length>0;
+  const targetIds=failedIds.length?failedIds:(shouldQueueFallback?allIds:[]);
+  if(targetIds.length){
+    // Queue failed row writes through saveOrders so fallback retry can replay them.
+    await saveOrders(targetIds);
+    await flushLocalSyncFallback().catch(()=>{});
+  }
+  return !!(uploadResult&&uploadResult.ok);
 }
 async function recoverOrdersNow(){
   toast('Recovering orders...','info');
@@ -10693,7 +10766,7 @@ async function subscribeToPush(){
       });
     }
     // Save to server
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const subData=sub.toJSON();
     await fetch(api+'/api/push/subscribe',{
       method:'POST',
@@ -10717,7 +10790,7 @@ async function subscribeToPush(){
 
 async function sendPushToReseller(resellerId, title, body){
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const res=await fetch(api+'/api/push/send',{
       method:'POST',
       headers:getAuthHeaders({'Content-Type':'application/json'}),
@@ -10731,7 +10804,7 @@ async function sendPushToReseller(resellerId, title, body){
 // Send push notification to all admins
 async function sendPushToAdmin(title, body){
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     // Send to all admin users
     const admins = users.filter(u => u.role === 'Admin');
     let allOk=true;
@@ -11162,7 +11235,7 @@ async function startPendingPoll(){
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
     try{
-      const api=getApiBase();
+      const api=await ensureWorkingApiBase({silent:true});
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(!res.ok)return;
       const {data}=await res.json();
@@ -11820,7 +11893,7 @@ async function sendChatMsg(){
   const text = inp?.value.trim();
   if(!text) return;
   inp.value = '';
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   const msg = {id:'m'+Date.now(), from:'admin', to:_chatReseller, text, ts:Date.now()};
   const chatKey='jb_chat_'+_chatReseller;
   if(!_messages[_chatReseller]) _messages[_chatReseller] = [];
@@ -12056,9 +12129,10 @@ function initOfflineIndicator(){
     if(!me || reconnectInFlight) return;
     reconnectInFlight=true;
     try{
+      await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
+      await flushLocalSyncFallback().catch(()=>{});
       if(getFirebaseEnabled()){
         await initFirebaseRealtime({silent:true,force:true});
-        await flushLocalSyncFallback().catch(()=>{});
       }
       await loadFromCloudSilent().catch(()=>{});
       await loadFromCloud().catch(()=>{});
@@ -12088,12 +12162,13 @@ function startAutoSync(){
   
   const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:30000;
   // Sync interval adapts when realtime is active.
-  _autoSyncInterval = setInterval(() => {
+  _autoSyncInterval = setInterval(async() => {
     if(me && navigator.onLine){
+      await ensureWorkingApiBase({silent:true}).catch(()=>{});
+      await flushLocalSyncFallback().catch(()=>{});
       loadFromCloudSilent().catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
-        flushLocalSyncFallback().catch(()=>{});
       }
     }
   }, syncMs);
@@ -14653,7 +14728,7 @@ async function saveOrders(changedOrderIds){
     }).filter(o=>o&&o.id&&!isOrderDeleted(o));
     localStorage.setItem('jb_orders',JSON.stringify(orders));
 
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     let queuedFallback=false;
 
     for(const o of targetOrders){
