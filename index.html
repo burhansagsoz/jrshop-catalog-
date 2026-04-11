@@ -597,8 +597,7 @@ body.dark .modal-foot{background:#263548;}
       <div class="topbar-title" id="pg-title">Dashboard</div>
       <span class="topbar-pill" id="pg-badge" style="display:none;"></span>
       <div class="topbar-right" id="topbar-right" style="display:none;">
-        <button class="btn btn-secondary" id="force-refresh-btn" onclick="forceRefreshNow()">⚡ Sync Now</button>
-        <button class="btn btn-primary" id="new-order-btn" onclick="openOrderModal()">＋ New Order</button>
+        <button class="btn btn-primary" onclick="openOrderModal()">＋ New Order</button>
       </div>
       <div class="dark-toggle" onclick="toggleDark()" id="dark-btn">🌙</div>
     </div>
@@ -2874,12 +2873,10 @@ function showOrderTop(){
   if(tr){
     tr.style.display='flex';
     // Show New Order button for Admin and Staff, hide for Reseller
-    const newOrderBtn=document.getElementById('new-order-btn');
+    const newOrderBtn=tr.querySelector('button');
     if(newOrderBtn && me){
       newOrderBtn.style.display=(me.role==='Reseller')?'none':'flex';
     }
-    const syncBtn=document.getElementById('force-refresh-btn');
-    if(syncBtn) syncBtn.style.display='flex';
   }
 }
 
@@ -2946,7 +2943,7 @@ async function navOrders(status,el){
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
-        const api=await ensureWorkingApiBase({silent:true});
+        const api=getApiBase();
         const k=localStorage.getItem('jb_cloud_key')||'';
         const headers={};
         if(k) headers['Authorization']='Bearer '+k;
@@ -7265,8 +7262,6 @@ async function submitResellerOrder(){
   orders.unshift(o);
   markSync('reseller_order_local_submit');
   await saveOrders([o.id]);
-  await flushLocalSyncFallback().catch(()=>{});
-  await loadFromCloudSilent().catch(()=>{});
   updateBadges();
   logActivity('order_request',`Order request submitted by ${me.dname||me.email}: ${esc(o.ref)} for ${esc(name)}`,o.id);
   _resFilter='pending';
@@ -7394,60 +7389,11 @@ async function trackOrder(){
 const CLOUD_API_DEFAULT=location.origin;
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
-let _apiBaseCheckInFlight=null;
-let _apiBaseCheckedAt=0;
-const API_BASE_CHECK_COOLDOWN_MS=60*1000;
 function getApiBase(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
   if(getFirebaseEnabled()) return location.origin;
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
   return CLOUD_API_DEFAULT;
-}
-function isApiEndpointReachableResponse(res){
-  if(!res) return false;
-  // 404/405 mostly indicates wrong target or missing API route.
-  return ![404,405].includes(Number(res.status)||0);
-}
-async function ensureWorkingApiBase(opts={}){
-  const force=!!opts.force;
-  const now=Date.now();
-  if(!force && (now-_apiBaseCheckedAt)<API_BASE_CHECK_COOLDOWN_MS){
-    return getApiBase();
-  }
-  if(_apiBaseCheckInFlight) return _apiBaseCheckInFlight;
-  _apiBaseCheckInFlight=(async function(){
-    const configured=getApiBase();
-    const origin=location.origin.replace(/\/$/,'');
-    try{
-      if(configured===origin){
-        return configured;
-      }
-      let configuredReachable=false;
-      try{
-        const r=await fetchWithTimeout(configured+'/api/test',{headers:getAuthHeaders()},4000);
-        configuredReachable=isApiEndpointReachableResponse(r);
-      }catch(_e){}
-      if(configuredReachable){
-        return configured;
-      }
-      let originReachable=false;
-      try{
-        const r2=await fetchWithTimeout(origin+'/api/test',{headers:getAuthHeaders()},4000);
-        originReachable=isApiEndpointReachableResponse(r2);
-      }catch(_e){}
-      if(originReachable){
-        try{localStorage.setItem('jb_cloud_api',origin);}catch(_e){}
-        renderCloudApiSummary();
-        if(!opts.silent) toast('ℹ️ API URL auto-corrected to current domain','info');
-        return origin;
-      }
-      return configured;
-    }finally{
-      _apiBaseCheckedAt=Date.now();
-      _apiBaseCheckInFlight=null;
-    }
-  })();
-  return _apiBaseCheckInFlight;
 }
 function renderCloudApiSummary(){
   const el=document.getElementById('cfg-cloud-active');
@@ -7982,7 +7928,7 @@ async function uploadToCloud(){
 // Sessiz cloud sync - autoSync için, toast göstermez
 async function loadFromCloudSilent(){
   try{
-    const api=await ensureWorkingApiBase({silent:true});
+    const api=getApiBase();
 
     // Diğer verileri güncelle (kullanıcılar, katalog vs)
     const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
@@ -8030,7 +7976,7 @@ async function loadFromCloudSilent(){
 
 async function loadFromCloud(){
   try{
-    const api=await ensureWorkingApiBase({silent:true});
+    const api=getApiBase();
       try{
         console.log('[Remote] Loading data...');
         // Load settings & other data
@@ -11213,12 +11159,10 @@ async function startPendingPoll(){
     return;
   }
   if(_pendingPollInterval)clearInterval(_pendingPollInterval);
-  const pollMs=(getFirebaseEnabled()&&_health.ordersRealtime)?12000:8000;
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
     try{
-      const api=await ensureWorkingApiBase({silent:true});
-      await flushLocalSyncFallback().catch(()=>{});
+      const api=getApiBase();
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(!res.ok)return;
       const {data}=await res.json();
@@ -11327,7 +11271,7 @@ async function startPendingPoll(){
         }
       }
     }catch(e){}
-  },pollMs);
+  },30000);
 }
 
 
@@ -11979,6 +11923,7 @@ async function runPullToRefresh(){
     _pullRefreshInFlight=false;
   }
 }
+
 function bindPullToRefresh(){
   if(_pullRefreshBound) return;
   _pullRefreshBound=true;
@@ -12111,10 +12056,9 @@ function initOfflineIndicator(){
     if(!me || reconnectInFlight) return;
     reconnectInFlight=true;
     try{
-      await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
-      await flushLocalSyncFallback().catch(()=>{});
       if(getFirebaseEnabled()){
         await initFirebaseRealtime({silent:true,force:true});
+        await flushLocalSyncFallback().catch(()=>{});
       }
       await loadFromCloudSilent().catch(()=>{});
       await loadFromCloud().catch(()=>{});
@@ -12142,15 +12086,14 @@ function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
   warmFirebaseConnect();
   
-  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?30000:8000;
+  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:30000;
   // Sync interval adapts when realtime is active.
-  _autoSyncInterval = setInterval(async() => {
+  _autoSyncInterval = setInterval(() => {
     if(me && navigator.onLine){
-      await ensureWorkingApiBase({silent:true}).catch(()=>{});
-      await flushLocalSyncFallback().catch(()=>{});
       loadFromCloudSilent().catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
+        flushLocalSyncFallback().catch(()=>{});
       }
     }
   }, syncMs);
@@ -12163,38 +12106,6 @@ function startAutoSync(){
       }
     });
     _autoSyncVisibilityBound=true;
-  }
-}
-
-async function forceRefreshNow(){
-  if(!me){
-    toast('⚠️ Please sign in first','err');
-    return;
-  }
-  const btn=document.getElementById('force-refresh-btn');
-  if(btn){
-    btn.disabled=true;
-    btn.textContent='🔄 Syncing...';
-  }
-  try{
-    await ensureWorkingApiBase({silent:false,force:true}).catch(()=>{});
-    await flushLocalSyncFallback().catch(()=>{});
-    await loadFromCloudSilent().catch(()=>{});
-    await loadFromCloud().catch(()=>{});
-    if(me&&me.role==='Admin'){
-      updateBadges();
-      render();
-      if(fStatus==='pending') renderPendingInTable();
-    }else if(me&&me.role==='Reseller'){
-      renderResellerView();
-      renderResOrders();
-    }
-    toast('✅ Force refresh completed','ok');
-  }finally{
-    if(btn){
-      btn.disabled=false;
-      btn.textContent='⚡ Sync Now';
-    }
   }
 }
 
