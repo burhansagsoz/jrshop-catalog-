@@ -7883,7 +7883,7 @@ async function uploadToCloud(){
   const api=await ensureWorkingApiBase({silent:true,force:true});
   try{
     toast('Syncing to Cloudflare...','info');
-    const testRes=await fetch(api+'/api/test',{headers:getAuthHeaders()});
+    const testRes=await fetchWithTimeout(api+'/api/test',{headers:getAuthHeaders()},8000);
     if(!testRes.ok){
       throw new Error(`Cloud API test failed at ${api}/api/test (HTTP ${testRes.status})`);
     }
@@ -7900,7 +7900,11 @@ async function uploadToCloud(){
       const val=localStorage.getItem(key);
       if(val){try{payload[key]=JSON.parse(val);}catch{payload[key]=val;}}
     }
-    const dataSyncRes=await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
+    const dataSyncRes=await fetchWithTimeout(
+      api+'/api/data',
+      {method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)},
+      15000
+    );
     if(!dataSyncRes.ok){
       throw new Error(`${api}/api/data sync failed (HTTP ${dataSyncRes.status})`);
     }
@@ -7949,7 +7953,11 @@ async function uploadToCloud(){
         })(p&&p.depotPhoto)
       }))};
       try{
-        const orderRes=await fetch(api+'/api/order',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})});
+        const orderRes=await fetchWithTimeout(
+          api+'/api/order',
+          {method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})},
+          12000
+        );
         if(!orderRes.ok){
           lastOrderErr='HTTP '+orderRes.status;
           failedOrderIds.push(String(o&&o.id||''));
@@ -7963,7 +7971,7 @@ async function uploadToCloud(){
     }
     // Verify remote row count after upload; abort adopting smaller snapshots.
     try{
-      const verifyRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
+      const verifyRes=await fetchWithTimeout(api+'/api/orders',{headers:getAuthHeaders()},10000);
       if(verifyRes.ok){
         const verifyPayload=await verifyRes.json();
         const remoteCount=Array.isArray(verifyPayload&&verifyPayload.orders)?verifyPayload.orders.length:0;
@@ -8132,7 +8140,15 @@ async function saveAllToCloud(){
     await saveOrders(targetIds);
     await flushLocalSyncFallback().catch(()=>{});
   }
-  return !!(uploadResult&&uploadResult.ok);
+  const ok=!!(uploadResult&&uploadResult.ok);
+  if(ok){
+    toast('✅ Cloud backup completed','ok');
+  }else{
+    const saved=Number(uploadResult&&uploadResult.saved)||0;
+    const total=Number(uploadResult&&uploadResult.total)||0;
+    toast(`⚠️ Cloud backup finished with issues (${saved}/${total})`,'err');
+  }
+  return ok;
 }
 async function recoverOrdersNow(){
   toast('Recovering orders...','info');
