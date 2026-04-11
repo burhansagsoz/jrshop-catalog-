@@ -7409,7 +7409,9 @@ function getApiBase(){
 }
 function isApiEndpointReachableResponse(res){
   if(!res) return false;
-  return ![404,405].includes(Number(res.status)||0);
+  // Treat only successful responses as healthy API endpoints.
+  // 5xx (especially 503) must trigger origin fallback.
+  return !!res.ok;
 }
 async function ensureWorkingApiBase(opts={}){
   const force=!!opts.force;
