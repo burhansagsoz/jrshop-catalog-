@@ -5510,8 +5510,15 @@ function importBackup(input){
   if(!input.files||!input.files[0]) return;
   const reader=new FileReader();
   reader.onload=async e=>{
+    let raw=null;
     try{
-      const raw=JSON.parse(e.target.result);
+      raw=JSON.parse(e.target.result);
+    }catch(_parseErr){
+      toast('❌ Invalid backup file','err');
+      input.value='';
+      return;
+    }
+    try{
       const payload=extractBackupPayload(raw);
       const importedCount=Array.isArray(payload.orders)?payload.orders.length:0;
       if(!importedCount){
@@ -5539,13 +5546,22 @@ function importBackup(input){
       notifSettings={...(notifSettings||{}),...(payload.notifSettings||{})};
 
       // Persist locally first so restore is instant even if cloud/auth is degraded.
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
-      localStorage.setItem('jb_users',JSON.stringify(users));
-      localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));
-      localStorage.setItem('jb_catalog',JSON.stringify(catalog));
-      localStorage.setItem('jb_templates',JSON.stringify(templates));
-      localStorage.setItem('jb_settings',JSON.stringify(settings));
-      localStorage.setItem('jb_notif',JSON.stringify(notifSettings));
+      const safeSet=function(key,val){
+        try{
+          localStorage.setItem(key,JSON.stringify(val));
+          return true;
+        }catch(err){
+          console.warn('[backup import setItem]',key,err&&err.message?err.message:err);
+          return false;
+        }
+      };
+      safeSet('jb_orders',orders);
+      safeSet('jb_users',users);
+      safeSet('jb_suppliers',suppliers);
+      safeSet('jb_catalog',catalog);
+      safeSet('jb_templates',templates);
+      safeSet('jb_settings',settings);
+      safeSet('jb_notif',notifSettings);
 
       loadSettings();loadTemplates();loadNotifSettings();
       updateBadges();render();
@@ -5584,7 +5600,8 @@ function importBackup(input){
         toast('⚠️ Used fallback cloud sync for backup import','info');
       }
     }catch(err){
-      toast('❌ Invalid backup file','err');
+      console.error('[importBackup]',err);
+      toast('❌ Backup import failed: '+((err&&err.message)||String(err)),'err');
     }finally{
       input.value='';
     }
