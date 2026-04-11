@@ -2143,10 +2143,8 @@ console.error = function(...args){
 // ── STATE ──
 let orders    = (()=>{
   const raw = JSON.parse(localStorage.getItem('jb_orders') || '[]');
-  // Migrate old "At Depott" typo to "At Depot" and drop stale tombstones from local UI cache.
-  return raw
-    .map(o=>({...o, status: o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status}))
-    .filter(o=>!(o&&o.deletedAt));
+  // Migrate old "At Depott" typo to "At Depot"
+  return raw.map(o=>({...o, status: o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status}));
 })();
 let settings  = JSON.parse(localStorage.getItem('jb_settings')  || '{}');
 const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
@@ -2403,31 +2401,6 @@ function persistOrdersState(nextOrders){
   orders=arr;
   persistOrdersLocalSafe(arr);
   return arr;
-}
-function cleanupExpiredLocalTombstones(list){
-  const arr=Array.isArray(list)?list:[];
-  const keepMs=Math.max(2*60*1000,Number(LOCAL_ORDER_MUTATION_KEEP_MS)||10*60*1000);
-  const now=Date.now();
-  return arr.filter(function(o){
-    if(!o||!o.id) return false;
-    if(!o.deletedAt) return true;
-    const age=now-(Number(o.deletedAt)||0);
-    // Keep tombstones only for the local-mutation protection window.
-    return age<=keepMs;
-  });
-}
-function purgeDeletedOrderTombstones(opts={}){
-  const keepLocalMutations=opts&&opts.keepLocalMutations!==false;
-  const source=Array.isArray(orders)?orders:[];
-  const next=source.filter(function(o){
-    if(!o||!o.id) return false;
-    if(!o.deletedAt) return true;
-    if(keepLocalMutations && hasActiveLocalOrderMutation(o.id)) return true;
-    return false;
-  });
-  orders=next;
-  persistOrdersLocalSafe(orders);
-  return orders.length;
 }
 function normalizeOrderProductNameKey(name){
   return String(name||'').toLowerCase().replace(/\s*—.*$/,'').trim();
@@ -2768,7 +2741,6 @@ async function login(){
           orders=Array.isArray(localOrders)?localOrders:[];
         }
         localStorage.setItem('jb_orders',JSON.stringify(orders));
-        purgeDeletedOrderTombstones({keepLocalMutations:true});
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
         users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
@@ -8568,12 +8540,11 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
   const local=Array.isArray(localOrders)?localOrders:[];
   const remote=Array.isArray(remoteOrders)?remoteOrders:[];
   const remoteIds=new Set(remote.filter(o=>o&&o.id).map(o=>String(o.id)));
-  const pruned=local.filter(function(o){
+  return local.filter(function(o){
     if(!o||!o.id) return false;
     if(remoteIds.has(String(o.id))) return true;
     return hasActiveLocalOrderMutation(o.id);
   });
-  return cleanupExpiredLocalTombstones(pruned);
 }
 
 function markSync(source){
