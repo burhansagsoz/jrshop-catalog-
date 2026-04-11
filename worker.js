@@ -189,8 +189,9 @@ export default {
         const requestedV = Number(req && req.v) || 0;
         const requestedOpId = String(req && req.opId || ('srv_del_' + nowTs.toString(36)));
 
-        // Keep delete path lightweight: table row is authoritative for mutation arbitration.
-        const prevOrder = await readOrderFromTable(db, id);
+        const prevTableOrder = await readOrderFromTable(db, id);
+        const prevKvOrder = await readOrderFromKvSnapshot(db, id);
+        const prevOrder = pickFresherOrder(prevTableOrder, prevKvOrder);
         const prevV = Number(prevOrder && prevOrder.v) || 0;
         const prevTs = Number(prevOrder && (prevOrder.updatedAt || prevOrder.ts)) || 0;
         const prevDeleted = !!(prevOrder && prevOrder.deletedAt);
@@ -374,6 +375,29 @@ async function readOrderFromTable(db, id) {
   try { return JSON.parse(row.data); } catch { return null; }
 }
 
+async function readOrderFromKvSnapshot(db, id) {
+  const kv = await db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first();
+  if (!kv || !kv.value) return null;
+  try {
+    const list = JSON.parse(kv.value);
+    if (!Array.isArray(list)) return null;
+    return list.find(o => o && String(o.id) === String(id)) || null;
+  } catch {
+    return null;
+  }
+}
+
+function pickFresherOrder(a, b) {
+  if (!a) return b || null;
+  if (!b) return a || null;
+  const av = Number(a.v) || 0;
+  const bv = Number(b.v) || 0;
+  const ats = Number(a.updatedAt || a.ts) || 0;
+  const bts = Number(b.updatedAt || b.ts) || 0;
+  if (bv > av || (bv === av && bts > ats)) return b;
+  return a;
+}
+
 async function getOrders(db) {
   try {
     // orders tablosundan dene
@@ -442,8 +466,9 @@ async function saveOrder(db, order) {
   const incomingTs = Number(clean && (clean.updatedAt || clean.ts)) || Date.now();
   const incomingDeleted = !!(clean && clean.deletedAt);
 
-  // Keep hot upsert path fast: avoid scanning/parsing jb_orders snapshot for every order write.
-  const prev = await readOrderFromTable(db, id);
+  const prevTable = await readOrderFromTable(db, id);
+  const prevKv = await readOrderFromKvSnapshot(db, id);
+  const prev = pickFresherOrder(prevTable, prevKv);
   const prevV = Math.max(0, Number(prev && prev.v) || 0);
   const prevTs = Number(prev && (prev.updatedAt || prev.ts)) || 0;
   const prevDeleted = !!(prev && prev.deletedAt);
