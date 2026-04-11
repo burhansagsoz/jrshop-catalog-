@@ -8890,9 +8890,19 @@ function withTimeoutPromise(promise,ms,label){
 
 async function fetchWithTimeout(url,options={},timeoutMs=UPLOAD_TIMEOUT_MS){
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),Math.max(1000,Number(timeoutMs)||UPLOAD_TIMEOUT_MS));
+  const waitMs=Math.max(1000,Number(timeoutMs)||UPLOAD_TIMEOUT_MS);
+  let didTimeout=false;
+  const timer=setTimeout(()=>{
+    didTimeout=true;
+    controller.abort();
+  },waitMs);
   try{
     return await fetch(url,{...(options||{}),signal:controller.signal});
+  }catch(err){
+    if(didTimeout){
+      throw new Error(`request timeout (${waitMs}ms)`);
+    }
+    throw err;
   }finally{
     clearTimeout(timer);
   }
