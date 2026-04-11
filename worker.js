@@ -171,6 +171,10 @@ export default {
 
       // Orders
       if (path === '/api/orders' && method === 'GET') return await getOrders(db);
+      if ((path === '/api/backup/import' || path === '/api/orders/bulk') && method === 'POST') {
+        const body = await request.json();
+        return await saveOrdersBulk(db, body);
+      }
       if (path === '/api/order' && method === 'POST') {
         const { order } = await request.json();
         return await saveOrder(db, order);
@@ -373,6 +377,72 @@ async function readOrderFromTable(db, id) {
   const row = await db.prepare('SELECT data FROM orders WHERE id=?').bind(id).first();
   if (!row || !row.data) return null;
   try { return JSON.parse(row.data); } catch { return null; }
+}
+
+function sanitizeOrderForStorage(order) {
+  if (!order || typeof order !== 'object') return null;
+  const keepImageRef = (src) => {
+    const v = String(src || '').trim();
+    if (!v) return null;
+    if (/^\/?api\/image\/[a-z0-9_-]+$/i.test(v)) return v.startsWith('/') ? v : '/' + v;
+    return /^(https?:|data:|blob:)/i.test(v) ? v : null;
+  };
+  const id = String(order.id || '').trim();
+  if (!id) return null;
+  const ts = Number(order.updatedAt || order.ts) || Date.now();
+  return {
+    ...order,
+    id,
+    updatedAt: ts,
+    ts: Number(order.ts) || ts,
+    v: Math.max(1, Number(order.v) || 1),
+    products: (order.products || []).map((p) => ({
+      ...p,
+      img: keepImageRef(p && p.img),
+      depotPhoto: keepImageRef(p && p.depotPhoto),
+    })),
+  };
+}
+
+async function saveOrdersBulk(db, body) {
+  const list = Array.isArray(body && body.orders) ? body.orders : [];
+  if (!list.length) return json({ error: 'orders missing' }, 400);
+  await db.prepare("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)").run();
+  const byId = new Map();
+  for (const raw of list) {
+    const clean = sanitizeOrderForStorage(raw);
+    if (!clean) continue;
+    byId.set(clean.id, clean);
+  }
+  const rows = [...byId.values()];
+  if (!rows.length) return json({ error: 'no_valid_orders' }, 400);
+
+  // Persist non-order backup keys in the same request so reload has complete app state.
+  const keyMap = {
+    jb_users: body && body.users,
+    jb_suppliers: body && body.suppliers,
+    jb_catalog: body && body.catalog,
+    jb_templates: body && body.templates,
+    jb_settings: body && body.settings,
+    jb_notif: body && body.notifSettings,
+  };
+  for (const [key, value] of Object.entries(keyMap)) {
+    if (value === undefined) continue;
+    await syncKey(db, key, value);
+  }
+
+  const upsert = db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts');
+  let saved = 0;
+  for (const order of rows) {
+    await upsert.bind(order.id, Number(order.ts) || Number(order.updatedAt) || Date.now(), JSON.stringify(order)).run();
+    saved++;
+  }
+  // Keep kv snapshot aligned for older read paths / safety-net merges.
+  try {
+    await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .bind('jb_orders', JSON.stringify(rows)).run();
+  } catch (_e) {}
+  return json({ ok: true, saved, total: rows.length, orders: rows.length });
 }
 
 async function readOrderFromKvSnapshot(db, id) {

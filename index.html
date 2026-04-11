@@ -5552,13 +5552,36 @@ function importBackup(input){
       markSync('backup_import');
       toast(`✅ Backup imported: ${orders.length} orders`,'ok');
       try{
-        await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
-        await saveAllToCloud();
+        const api=await ensureWorkingApiBase({silent:true,force:true});
+        const backupPayload={orders,users,suppliers,catalog,templates,settings,notifSettings,ts:Date.now()};
+        const bulkRes=await fetchWithTimeout(
+          api+'/api/orders/bulk',
+          {
+            method:'POST',
+            headers:getAuthHeaders({'Content-Type':'application/json'}),
+            body:JSON.stringify(backupPayload)
+          },
+          25000
+        );
+        if(!bulkRes.ok){
+          throw new Error('backup_import_http_'+bulkRes.status);
+        }
+        let bulkPayload={};
+        try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
+        if(!(bulkPayload&&bulkPayload.ok)){
+          throw new Error(String((bulkPayload&&bulkPayload.error)||'backup_import_failed'));
+        }
         await flushLocalSyncFallback().catch(()=>{});
         await loadFromCloudSilent().catch(()=>{});
+        const syncedOrders=Number(bulkPayload.orders)||orders.length;
+        toast(`✅ Backup saved to Cloudflare (${syncedOrders} orders)`,'ok');
       }catch(syncErr){
         console.error('[backup import cloud sync]', syncErr);
-        toast('⚠️ Backup imported locally but cloud save failed. Check API/DB status.','err');
+        // Fallback to legacy row-by-row push if bulk endpoint is temporarily unavailable.
+        await saveAllToCloud().catch(()=>{});
+        await flushLocalSyncFallback().catch(()=>{});
+        await loadFromCloudSilent().catch(()=>{});
+        toast('⚠️ Used fallback cloud sync for backup import','info');
       }
     }catch(err){
       toast('❌ Invalid backup file','err');
