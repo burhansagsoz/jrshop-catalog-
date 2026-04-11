@@ -7260,6 +7260,7 @@ async function submitResellerOrder(){
     pendingApproval:true
   };
   orders.unshift(o);
+  markSync('reseller_order_local_submit');
   await saveOrders([o.id]);
   updateBadges();
   logActivity('order_request',`Order request submitted by ${me.dname||me.email}: ${esc(o.ref)} for ${esc(name)}`,o.id);

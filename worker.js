@@ -339,12 +339,40 @@ async function getOrders(db) {
     // orders tablosundan dene
     await db.prepare("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)").run();
     const rows = await db.prepare('SELECT * FROM orders ORDER BY ts DESC').all();
-    let orders = rows.results.map(r => { try { return JSON.parse(r.data); } catch { return null; } }).filter(Boolean);
-    // orders tablosu boşsa kv_store'dan dene
-    if(!orders.length){
-      const kv = await db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first();
-      if(kv) { try { orders = JSON.parse(kv.value) || []; } catch {} }
+    const tableOrders = rows.results
+      .map(r => { try { return JSON.parse(r.data); } catch { return null; } })
+      .filter(Boolean);
+
+    // Always merge with kv_store snapshot as a safety net. In some legacy/import
+    // scenarios orders table can be partial while kv has the full historical set.
+    let kvOrders = [];
+    const kv = await db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first();
+    if (kv && kv.value) {
+      try { kvOrders = JSON.parse(kv.value) || []; } catch { kvOrders = []; }
     }
+
+    const byId = new Map();
+    const mergeOne = (order) => {
+      if (!order || !order.id || order.deletedAt) return;
+      const id = String(order.id);
+      const prev = byId.get(id);
+      if (!prev) {
+        byId.set(id, order);
+        return;
+      }
+      const ov = Number(order.v) || 0;
+      const pv = Number(prev.v) || 0;
+      const ots = Number(order.updatedAt || order.ts) || 0;
+      const pts = Number(prev.updatedAt || prev.ts) || 0;
+      if (ov > pv || (ov === pv && ots >= pts)) {
+        byId.set(id, order);
+      }
+    };
+
+    (Array.isArray(kvOrders) ? kvOrders : []).forEach(mergeOne);
+    (Array.isArray(tableOrders) ? tableOrders : []).forEach(mergeOne);
+
+    const orders = [...byId.values()].sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
     return json({ orders });
   } catch(e) {
     return json({ orders: [], error: e.message });
