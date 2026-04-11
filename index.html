@@ -2887,17 +2887,9 @@ function goDash(el){setNav(el);showPage('pg-dash');document.getElementById('pg-t
 function goAlerts(el){setNav(el);showPage('pg-alerts');document.getElementById('pg-title').textContent='Alerts';hideTop();renderAlerts();}
 
 // ── APPROVE / REJECT RESELLER ORDERS ──
-let _pendingActionInFlight=new Set();
 async function approveOrder(id){
-  const oid=String(id||'');
-  if(_pendingActionInFlight.has(oid)) return;
-  _pendingActionInFlight.add(oid);
   const o=orders.find(x=>x.id===id);
-  if(!o){
-    _pendingActionInFlight.delete(oid);
-    toast('⚠️ Order not found — try refreshing','err');
-    return;
-  }
+  if(!o){toast('⚠️ Order not found — try refreshing','err');return;}
   delete o.pendingApproval;
   delete o.rejected;
   delete o.rejectNote;
@@ -2929,32 +2921,17 @@ async function approveOrder(id){
   logActivity('status',`Order approved: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   toast('✅ Approved!','ok');
   try{await syncToCloud('jb_orders',orders);}catch(e){}
-  finally{_pendingActionInFlight.delete(oid);}
 }
 async function rejectOrder(id){
-  const oid=String(id||'');
-  if(_pendingActionInFlight.has(oid)) return;
-  _pendingActionInFlight.add(oid);
   const note=prompt('Reason for rejection (reseller will see this):');
-  if(note===null){
-    _pendingActionInFlight.delete(oid);
-    return;
-  }
+  if(note===null)return;
   const o=orders.find(x=>x.id===id);
-  if(!o){
-    _pendingActionInFlight.delete(oid);
-    toast('⚠️ Order not found','err');
-    return;
-  }
-  try{
-    const opId=createLocalMutationOpId('reject');
-    await deleteOrderWithTombstone(id,{opId,previousOrder:o});
-    updateBadges();renderPendingInTable();render();
-    logActivity('status',`Order rejected: ${esc(o.ref||o.id.slice(-6))} — ${note}`,o.id);
-    toast('❌ Rejected & deleted','info');
-  }finally{
-    _pendingActionInFlight.delete(oid);
-  }
+  if(!o){toast('⚠️ Order not found','err');return;}
+  const opId=createLocalMutationOpId('reject');
+  await deleteOrderWithTombstone(id,{opId,previousOrder:o});
+  updateBadges();renderPendingInTable();render();
+  logActivity('status',`Order rejected: ${esc(o.ref||o.id.slice(-6))} — ${note}`,o.id);
+  toast('❌ Rejected & deleted','info');
 }
 
 async function navOrders(status,el){
@@ -3046,8 +3023,8 @@ function renderPendingInTable(){
       <td><div class="cell"><span class="pill" style="background:var(--yellow-bg);color:#854d0e;border:1px solid var(--yellow-border);">⏳ Pending</span></div></td>
       <td><div class="cell">${fmtDate(o.ts)}</div></td>
       <td colspan="2"><div class="cell" style="gap:6px;">
-        <button class="btn btn-green btn-sm" id="pending-approve-${esc(o.id)}" onclick="approveOrder('${o.id}',this)">✅ Approve</button>
-        <button class="btn btn-danger btn-sm" id="pending-reject-${esc(o.id)}" onclick="rejectOrder('${o.id}',this)">❌ Reject</button>
+        <button class="btn btn-green btn-sm" onclick="approveOrder('${o.id}')">✅ Approve</button>
+        <button class="btn btn-danger btn-sm" onclick="rejectOrder('${o.id}')">❌ Reject</button>
         <button class="btn btn-ghost btn-sm" onclick="selectOrder('${o.id}')">View</button>
       </div></td>
     </tr>`;
