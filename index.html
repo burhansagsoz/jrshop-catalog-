@@ -8017,42 +8017,72 @@ async function uploadToCloud(){
       persistOrdersLocalSafe(orders);
       toast(`ℹ️ Fixed ${fixedOrderIds} duplicate/missing order IDs before sync`,'info');
     }
-    // Upload all orders individually
+    // Prefer bulk endpoint for large snapshots (much faster than row-by-row upload).
     let saved=0;
     let lastOrderErr='';
-    const failedOrderIds=[];
-    for(const o of normalizedOrders){
-      const clean={...o,products:(o.products||[]).map(p=>({...p,
-        img:(function(v){
-          const s=String(v||'').trim();
-          if(!s) return null;
-          if(/^(https?:|data:|blob:)/i.test(s)) return s;
-          if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
-          return null;
-        })(p&&p.img),
-        depotPhoto:(function(v){
-          const s=String(v||'').trim();
-          if(!s) return null;
-          if(/^(https?:|data:|blob:)/i.test(s)) return s;
-          if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
-          return null;
-        })(p&&p.depotPhoto)
-      }))};
+    let failedOrderIds=[];
+    let usedBulk=false;
+    if(normalizedOrders.length){
       try{
-        const orderRes=await fetchWithTimeout(
-          api+'/api/order',
-          {method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})},
-          12000
+        const bulkRes=await fetchWithTimeout(
+          api+'/api/orders/bulk',
+          {
+            method:'POST',
+            headers:getAuthHeaders({'Content-Type':'application/json'}),
+            body:JSON.stringify({orders:normalizedOrders})
+          },
+          45000
         );
-        if(!orderRes.ok){
-          lastOrderErr='HTTP '+orderRes.status;
-          failedOrderIds.push(String(o&&o.id||''));
-          continue;
+        let bulkPayload={};
+        try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
+        if(bulkRes.ok && bulkPayload && bulkPayload.ok){
+          usedBulk=true;
+          saved=Math.max(
+            0,
+            Number(bulkPayload.saved)||Number(bulkPayload.orders)||normalizedOrders.length
+          );
+        }else{
+          lastOrderErr=String((bulkPayload&&bulkPayload.error)||('HTTP '+bulkRes.status)||'bulk_sync_failed');
         }
-        saved++;
       }catch(e){
-        lastOrderErr=String((e&&e.message)||e||'order_sync_error');
-        failedOrderIds.push(String(o&&o.id||''));
+        lastOrderErr=String((e&&e.message)||e||'bulk_sync_error');
+      }
+    }
+    if(!usedBulk){
+      failedOrderIds=[];
+      for(const o of normalizedOrders){
+        const clean={...o,products:(o.products||[]).map(p=>({...p,
+          img:(function(v){
+            const s=String(v||'').trim();
+            if(!s) return null;
+            if(/^(https?:|data:|blob:)/i.test(s)) return s;
+            if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+            return null;
+          })(p&&p.img),
+          depotPhoto:(function(v){
+            const s=String(v||'').trim();
+            if(!s) return null;
+            if(/^(https?:|data:|blob:)/i.test(s)) return s;
+            if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+            return null;
+          })(p&&p.depotPhoto)
+        }))};
+        try{
+          const orderRes=await fetchWithTimeout(
+            api+'/api/order',
+            {method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})},
+            12000
+          );
+          if(!orderRes.ok){
+            lastOrderErr='HTTP '+orderRes.status;
+            failedOrderIds.push(String(o&&o.id||''));
+            continue;
+          }
+          saved++;
+        }catch(e){
+          lastOrderErr=String((e&&e.message)||e||'order_sync_error');
+          failedOrderIds.push(String(o&&o.id||''));
+        }
       }
     }
     // Verify remote row count after upload; abort adopting smaller snapshots.
