@@ -2384,6 +2384,8 @@ function shouldAcceptRemoteOrders(remoteOrders){
     localCount=Array.isArray(orders)?orders.length:0;
   }
   if(remoteCount>0){
+    // If local cache is tiny/empty but remote has data, always trust remote.
+    if(localCount<30 && remoteCount>=30) return true;
     // Guard against partial remote snapshots wiping a much larger local dataset.
     if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
       console.warn('[Cloud] Remote orders snapshot rejected: suspicious drop', { localCount, remoteCount });
