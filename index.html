@@ -8669,6 +8669,9 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
 function markSync(source){
   _health.lastSyncAt=Date.now();
   _health.lastSyncSource=source||'-';
+  // Successful sync should clear stale health error noise.
+  _health.apiErrors=0;
+  _health.lastError='';
 }
 function markApiCall(){
   _health.apiCalls++;
@@ -8698,9 +8701,17 @@ function enforceLocalModeOnFirebasePermission(msg){
     toast('⚠️ Cloudflare sync issue detected. API route/method kontrol edin.','info');
   }
 }
+function normalizeHealthErrorMessage(err){
+  const raw=String(err&&err.message?err.message:err||'unknown');
+  const low=raw.toLowerCase();
+  if(low.includes('signal is aborted without reason') || low.includes('aborterror')){
+    return 'request timeout or connection aborted';
+  }
+  return raw;
+}
 function markError(err){
   const code=err&&err.code?` [${err.code}]`:'';
-  const msg=(err&&err.message?err.message:String(err||'unknown'))+code;
+  const msg=normalizeHealthErrorMessage(err)+code;
   const key=String(msg||'unknown');
   const now=Date.now();
   // Avoid inflating error counter with the same repeating offline/auth error.
