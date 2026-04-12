@@ -2416,6 +2416,10 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }
 }
 function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
+  // In Cloudflare mode, /api/orders is the only authoritative source for orders.
+  // /api/data may contain stale jb_orders snapshots and can reintroduce old states
+  // such as pendingApproval after approve/reject actions.
+  if(!getFirebaseEnabled()) return false;
   const remoteCount=Array.isArray(fallbackOrders)?fallbackOrders.length:0;
   const localCount=Array.isArray(localOrders)?localOrders.length:0;
   if(remoteCount<=0) return false;
@@ -2653,7 +2657,7 @@ async function login(){
     // Cloudflare API login retry
     const loginBtn=document.querySelector('.login-btn');
     if(loginBtn)loginBtn.textContent='Checking...';
-    fetch(getApiBase()+'/api/data')
+    fetch(getApiBase()+'/api/data',{headers:getAuthHeaders()})
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
@@ -2753,9 +2757,7 @@ async function login(){
         }catch(_e){
           cloudOrders=[];
         }
-        if(!cloudOrders.length){
-          cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
-        }
+        // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         if(cloudOrders.length){
           const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
@@ -3009,10 +3011,7 @@ async function navOrders(status,el){
     (async()=>{
       try{
         const api=await ensureWorkingApiBase({silent:true});
-        const k=localStorage.getItem('jb_cloud_key')||'';
-        const headers={};
-        if(k) headers['Authorization']='Bearer '+k;
-        let loaded=false;
+        const headers=getAuthHeaders();
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         const ordRes=await fetch(api+'/api/orders',{headers});
         if(ordRes.ok){
@@ -3029,22 +3028,8 @@ async function navOrders(status,el){
               console.warn('[Pending] Ignoring remote orders snapshot to protect local data');
             }
           }
-        }
-        if(!loaded){
-          const res=await fetch(api+'/api/data',{headers});
-          if(res.ok){
-            const {data}=await res.json();
-            if(data&&Array.isArray(data.jb_orders)){
-              if(shouldAcceptRemoteOrders(data.jb_orders)){
-                const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
-                orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
-                persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
-                updateBadges();
-              }else{
-                console.warn('[Pending] Ignoring fallback /api/data orders snapshot to protect local data');
-              }
-            }
-          }
+        }else{
+          console.warn('[Pending] Failed to load /api/orders, keeping local snapshot');
         }
       }catch(e){}
       renderPendingInTable();
@@ -7466,15 +7451,7 @@ async function trackOrder(){
           if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
         }
       }catch(e){}
-      // Yoksa /api/data dene
-      if(!orders.length){
-        const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-        if(res.ok){
-          const d=await res.json();
-          const incoming=(d&&d.data&&Array.isArray(d.data.jb_orders))?d.data.jb_orders:(Array.isArray(d&&d.jb_orders)?d.jb_orders:[]);
-          if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
-        }
-      }
+      // Deterministic behavior: do not fallback to /api/data.jb_orders snapshots.
     }catch(e){}
   }
   if(btn){btn.textContent='Track';btn.disabled=false;}
@@ -8391,9 +8368,8 @@ async function loadFromCloud(){
             return false;
           }
         } else {
-          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-          if(!shouldUseOrdersDataFallback(fallbackOrders,orders)) return false;
-          cloudOrders=fallbackOrders;
+          // Deterministic behavior: never ingest jb_orders from /api/data fallback.
+          return false;
         }
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         // Server-authoritative merge: prune missing remote IDs except recent local mutations.
@@ -10704,7 +10680,7 @@ async function handleFirebaseApiRequest(url,method,body){
           ? allOrders.filter(function(order){
               const ov=Number(order&&order.v)||0;
               const ots=Number(order&&order.updatedAt||order&&order.ts)||0;
-              return ov>=sinceV && ots>=sinceTs;
+              return (sinceV>0 && ov>sinceV) || (sinceTs>0 && ots>sinceTs);
             })
           : allOrders;
         writeLocalJson('jb_orders',remoteOrders);
@@ -11751,10 +11727,6 @@ async function startPendingPoll(){
     if(!me)return;
     try{
       const api=await ensureWorkingApiBase({silent:true});
-      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-      if(!res.ok)return;
-      const {data}=await res.json();
-      const localOrdersNow=Array.isArray(orders)?orders:[];
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
@@ -11766,12 +11738,10 @@ async function startPendingPoll(){
             newOrders=[];
           }
         }else{
-          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-          newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
+          return;
         }
       }catch{
-        const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-        newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
+        return;
       }
       if(!shouldAcceptRemoteOrders(newOrders)){
         return;
@@ -14978,11 +14948,25 @@ async function processBulkImages(input){
     document.getElementById('bulk-progress-text').textContent=`${i+1} / ${files.length} processing: ${files[i].name}`;
     document.getElementById('bulk-progress-fill').style.width=Math.round((i/files.length)*100)+'%';
     try{
-      const base64=await fileToBase64(files[i]);
-      const result=await aiReadShippingLabel(base64,files[i].name);
-      results.push({...result,imgSrc:base64,fileName:files[i].name});
+      const imagePayload=await promiseWithTimeout(
+        buildAiImagePayload(files[i]),
+        20000,
+        'image_prepare_timeout'
+      );
+      const result=await promiseWithTimeout(
+        aiReadShippingLabel(imagePayload,files[i].name),
+        65000,
+        'ai_read_timeout'
+      );
+      results.push({...result,imgSrc:imagePayload.base64,fileName:files[i].name});
     } catch(e){
-      results.push({error:true,fileName:files[i].name,tracking:'',orderCode:''});
+      results.push({
+        error:true,
+        fileName:files[i].name,
+        tracking:'',
+        orderCode:'',
+        errorMessage:String((e&&e.message)||e||'ai_read_failed')
+      });
     }
   }
   document.getElementById('bulk-progress-fill').style.width='100%';
@@ -14992,41 +14976,323 @@ async function processBulkImages(input){
   showBulkResults(results);
 }
 
+function promiseWithTimeout(promise,timeoutMs,errorCode){
+  let timer=null;
+  const ms=Math.max(1000,Number(timeoutMs)||1000);
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise(function(_res,rej){
+      timer=setTimeout(function(){
+        rej(new Error(String(errorCode||'timeout')));
+      },ms);
+    })
+  ]).finally(function(){
+    if(timer) clearTimeout(timer);
+  });
+}
+
+function dataUrlToBase64Payload(dataUrl){
+  const raw=String(dataUrl||'');
+  const mediaTypeMatch=raw.match(/^data:([^;]+);base64,/i);
+  return {
+    base64:raw.split(',')[1]||'',
+    mediaType:(mediaTypeMatch&&mediaTypeMatch[1])?String(mediaTypeMatch[1]).toLowerCase():'image/jpeg'
+  };
+}
+
+async function buildAiImagePayload(file){
+  if(!file) throw new Error('image_missing');
+  // Large phone photos can stall upload or model response.
+  // Downscale before sending so one file cannot block the whole batch.
+  if(Number(file.size)||0 > (2*1024*1024)){
+    const dataUrl=await new Promise(function(res,rej){
+      const r=new FileReader();
+      r.onload=function(){res(String(r.result||''));};
+      r.onerror=rej;
+      r.readAsDataURL(file);
+    });
+    const optimized=await compressImage(dataUrl,1600,0.82);
+    return dataUrlToBase64Payload(optimized);
+  }
+  return fileToBase64(file);
+}
+
 function fileToBase64(file){
   return new Promise((res,rej)=>{
     const r=new FileReader();
-    r.onload=()=>res(r.result.split(',')[1]);
+    r.onload=()=>{
+      res(dataUrlToBase64Payload(String(r.result||'')));
+    };
     r.onerror=rej;
     r.readAsDataURL(file);
   });
 }
 
-async function aiReadShippingLabel(base64,fileName){
+function normalizeAiOrderCode(raw){
+  const src=String(raw||'').toUpperCase();
+  if(!src) return '';
+  const ykJr=src.match(/\bYKJR[0-9]{6,8}-?[0-9]{2,4}\b/);
+  if(ykJr&&ykJr[0]) return ykJr[0].replace(/[^A-Z0-9]/g,'');
+  const jr=src.match(/\bJR[0-9]{6,8}-?[0-9]{2,4}\b/);
+  if(jr&&jr[0]) return jr[0].replace(/[^A-Z0-9]/g,'');
+  const compact=src.replace(/[^A-Z0-9]/g,'');
+  if(/^YKJR[0-9]{8,12}$/.test(compact)) return compact;
+  if(/^JR[0-9]{8,12}$/.test(compact)) return compact;
+  return '';
+}
+
+function extractReferenceCandidatesFromText(raw){
+  const src=String(raw||'').toUpperCase();
+  const out=new Set();
+  const add=function(v){
+    const key=normalizeOrderLookupText(v);
+    if(key.length>=6) out.add(key);
+  };
+
+  const ykMatches=src.match(/\bYKJR[0-9]{6,8}-?[0-9]{2,4}\b/g)||[];
+  ykMatches.forEach(function(v){
+    const n=normalizeOrderLookupText(v);
+    add(n);
+    if(n.startsWith('YKJR')&&n.length>10){
+      add(n.slice(2)); // JR...
+      add(n.slice(4)); // numeric/date segment
+    }
+  });
+
+  const jrMatches=src.match(/\bJR[0-9]{6,8}-?[0-9]{2,4}\b/g)||[];
+  jrMatches.forEach(function(v){
+    const n=normalizeOrderLookupText(v);
+    add(n);
+    if(n.startsWith('JR')&&n.length>8){
+      add(n.slice(2));
+    }
+  });
+
+  const plainMatches=src.match(/\b[0-9]{6,8}-[0-9]{2,4}\b/g)||[];
+  plainMatches.forEach(function(v){
+    const n=normalizeOrderLookupText(v);
+    add(n);
+    add('JR'+n);
+  });
+
+  const logisticMatches=src.match(/\b[0-9]{2,4}-[A-Z0-9]{2,4}-[A-Z0-9]{2,4}-[A-Z0-9]{2,4}\b/g)||[];
+  logisticMatches.forEach(add);
+
+  return [...out];
+}
+
+function buildAiOrderLookupKeys(rawOrderCode,extraCandidates,rawText){
+  const src=String(rawOrderCode||'').toUpperCase();
+  const out=new Set();
+  const add=function(v){
+    const key=normalizeOrderLookupText(v);
+    if(key.length>=6) out.add(key);
+  };
+  const normalized=normalizeAiOrderCode(src);
+  if(normalized){
+    add(normalized);
+    if(normalized.startsWith('YKJR')&&normalized.length>10){
+      add(normalized.slice(2));
+      add(normalized.slice(4));
+    }
+  }
+  extractReferenceCandidatesFromText(src).forEach(add);
+  if(Array.isArray(extraCandidates)){
+    extraCandidates.forEach(function(v){
+      add(v);
+      extractReferenceCandidatesFromText(v).forEach(add);
+    });
+  }
+  extractReferenceCandidatesFromText(rawText).forEach(add);
+  return [...out];
+}
+
+function normalizeRefDigits(raw){
+  return normalizeOrderLookupText(raw).replace(/[^0-9]/g,'');
+}
+
+function fixOcrDigitConfusions(raw){
+  return String(raw||'')
+    .toUpperCase()
+    .replace(/[OQD]/g,'0')
+    .replace(/[IL]/g,'1')
+    .replace(/Z/g,'2')
+    .replace(/S/g,'5')
+    .replace(/G/g,'6')
+    .replace(/B/g,'8');
+}
+
+function lookupTextMatchesKey(rawValue,key){
+  const v=normalizeOrderLookupText(rawValue);
+  const k=normalizeOrderLookupText(key);
+  if(!v||!k) return false;
+  if(v.includes(k)) return true;
+  if(v.length>=8&&k.length>=10&&k.includes(v)) return true;
+  if(k.startsWith('YKJR')&&v.includes(k.slice(2))) return true;
+  if(v.startsWith('YKJR')&&v.slice(2).includes(k)) return true;
+  const vDigits=normalizeRefDigits(v);
+  const kDigits=normalizeRefDigits(fixOcrDigitConfusions(k));
+  if(vDigits.length>=8&&kDigits.length>=8){
+    if(vDigits===kDigits) return true;
+    if(vDigits.includes(kDigits)) return true;
+    if(kDigits.includes(vDigits)) return true;
+  }
+  return false;
+}
+
+function pickBestOrderMatch(candidates){
+  const list=(Array.isArray(candidates)?candidates:[]).filter(Boolean);
+  if(!list.length) return null;
+  const active=list.filter(function(o){
+    return ['New','Sent to Factory','At Depot'].includes(String(o&&o.status||''));
+  });
+  const pool=active.length?active:list;
+  return [...pool].sort(function(a,b){
+    return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);
+  })[0]||null;
+}
+
+function resolveOrderFromLookupKeys(lookupKeys){
+  const keys=(Array.isArray(lookupKeys)?lookupKeys:[]).map(function(v){
+    return normalizeOrderLookupText(v);
+  }).filter(Boolean);
+  if(!keys.length) return null;
+
+  const refMatches=(Array.isArray(orders)?orders:[]).filter(function(o){
+    return o&&o.ref&&keys.some(function(key){return lookupTextMatchesKey(o.ref,key);});
+  });
+  if(refMatches.length) return pickBestOrderMatch(refMatches);
+
+  const otherMatches=(Array.isArray(orders)?orders:[]).filter(function(o){
+    if(!o) return false;
+    return keys.some(function(key){
+      return (o.id&&lookupTextMatchesKey(o.id,key))||
+        (o.note&&lookupTextMatchesKey(o.note,key))||
+        (o.fblink&&lookupTextMatchesKey(o.fblink,key))||
+        (o.products&&o.products.some(function(p){
+          return p&&p.note&&lookupTextMatchesKey(p.note,key);
+        }));
+    });
+  });
+  return pickBestOrderMatch(otherMatches);
+}
+
+function normalizeAiTrackingCode(raw){
+  const src=String(raw||'')
+    .toUpperCase()
+    .replace(/[，。；：、]/g,'')
+    .replace(/\s+/g,'');
+  const compact=src.replace(/[^A-Z0-9-]/g,'');
+  if(!compact) return '';
+  return isLikelyTrackingCode(compact)?compact:'';
+}
+
+function normalizeOrderLookupText(raw){
+  return String(raw||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+}
+
+function safeJsonParse(raw){
+  try{return JSON.parse(raw);}catch(_e){return null;}
+}
+
+function parseAiShippingLabelText(rawText){
+  const text=String(rawText||'').replace(/```json|```/gi,'').trim();
+  let payload=safeJsonParse(text);
+  if(!payload){
+    const start=text.indexOf('{');
+    const end=text.lastIndexOf('}');
+    if(start>=0&&end>start){
+      payload=safeJsonParse(text.slice(start,end+1));
+    }
+  }
+
+  let tracking='';
+  let orderCode='';
+  let orderCandidates=[];
+  let rawSnippet='';
+  if(payload&&typeof payload==='object'){
+    tracking=payload.tracking||payload.trackingNo||payload.cnTracking||payload.waybill||'';
+    orderCode=payload.orderCode||payload.order_code||payload.order||payload.ref||'';
+    rawSnippet=String(payload.rawText||payload.labelText||payload.ocrText||'');
+    if(Array.isArray(payload.orderCandidates)) orderCandidates=payload.orderCandidates.slice(0,8);
+    else if(payload.candidates&&Array.isArray(payload.candidates)) orderCandidates=payload.candidates.slice(0,8);
+    else if(payload.orderCandidate) orderCandidates=[payload.orderCandidate];
+  }
+
+  if(!orderCode){
+    const ykMatch=text.match(/\bYKJR[0-9]{6,8}-?[0-9]{2,4}\b/i);
+    if(ykMatch&&ykMatch[0]){
+      orderCode=ykMatch[0];
+    }else{
+      const jrMatch=text.match(/\bJR[0-9]{6,8}-?[0-9]{2,4}\b/i);
+      if(jrMatch&&jrMatch[0]) orderCode=jrMatch[0];
+    }
+  }
+  if(!tracking){
+    const labeled=text.match(/(?:tracking|cn|waybill|运单|单号)\s*[:：#\-]?\s*([A-Z0-9\- ]{8,48})/i);
+    if(labeled&&labeled[1]){
+      tracking=labeled[1];
+    }else{
+      const generic=text.match(/\b[A-Z]{1,4}[A-Z0-9\-]{7,40}\b/g);
+      if(generic&&generic.length){
+        tracking=generic.sort((a,b)=>b.length-a.length)[0];
+      }
+    }
+  }
+
+  if(!orderCode){
+    const extracted=extractReferenceCandidatesFromText(rawSnippet||text);
+    if(extracted.length) orderCode=extracted[0];
+  }
+
+  return {
+    tracking:normalizeAiTrackingCode(tracking),
+    orderCode:normalizeAiOrderCode(orderCode),
+    orderCandidates:(Array.isArray(orderCandidates)?orderCandidates:[]).map(function(v){return String(v||'').trim();}).filter(Boolean).slice(0,8),
+    rawText:String(rawSnippet||'').slice(0,600)
+  };
+}
+
+async function aiReadShippingLabel(imagePayload,fileName){
   // Routes through Cloudflare Worker proxy — Anthropic key is a CF Secret, never exposed
+  const payload=(imagePayload&&typeof imagePayload==='object')?imagePayload:{base64:String(imagePayload||''),mediaType:'image/jpeg'};
+  const mediaType=/^image\/(jpeg|jpg|png|webp|gif)$/i.test(String(payload.mediaType||''))?String(payload.mediaType).toLowerCase():'image/jpeg';
+  const base64=String(payload.base64||'').trim();
+  if(!base64) throw new Error('image_payload_empty');
   const api=getApiBase();
-  const k=localStorage.getItem('jb_cloud_key')||'';
-  const response=await fetch(api+'/api/anthropic',{
+  const response=await fetchWithTimeout(api+'/api/anthropic',{
     method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'Authorization':'Bearer '+k
-    },
+    headers:getAuthHeaders({'Content-Type':'application/json'}),
     body:JSON.stringify({
       model:'claude-sonnet-4-20250514',
       max_tokens:300,
       messages:[{
         role:'user',
         content:[
-          {type:'image',source:{type:'base64',media_type:'image/jpeg',data:base64}},
-          {type:'text',text:`This is a Chinese shipping label. Find these two values and return ONLY as JSON:\n1. "tracking": Tracking number (usually starts with YT, SF, ZT, ST, YD, JD — long number)\n2. "orderCode": Order code (usually starts with YK, e.g. YK729, YK631)\n\nReturn ONLY JSON, nothing else:\n{"tracking":"...","orderCode":"..."}`}
+          {type:'image',source:{type:'base64',media_type:mediaType,data:base64}},
+          {type:'text',text:`This is a Chinese shipping label image (${fileName||'unknown'}). Extract:\n1. "tracking": CN tracking number (letters+digits, usually long)\n2. "orderCode": best internal order code candidate (we use JR refs, sometimes label prefixes with YKJR)\n3. "orderCandidates": array of all possible internal order code candidates you can find on label\n4. "rawText": short OCR snippet around order code/candidate line\n\nReturn ONLY JSON:\n{"tracking":"...","orderCode":"...","orderCandidates":["..."],"rawText":"..."}`}
         ]
       }]
     })
-  });
-  const data=await response.json();
-  const text=data.content?.[0]?.text||'{}';
-  const clean=text.replace(/```json|```/g,'').trim();
-  return JSON.parse(clean);
+  },45000);
+  let data={};
+  try{
+    data=await response.json();
+  }catch(_e){
+    throw new Error('ai_non_json_response');
+  }
+  if(!response.ok){
+    const reason=String((data&&data.error&&data.error.message)||data&&data.error||data&&data.type||('http_'+response.status));
+    throw new Error(`ai_http_${response.status}:${reason}`);
+  }
+  const text=Array.isArray(data&&data.content)
+    ? data.content.map(function(block){return block&&typeof block.text==='string'?block.text:'';}).join('\n')
+    : '';
+  const parsed=parseAiShippingLabelText(text);
+  if(!parsed.tracking&&!parsed.orderCode){
+    throw new Error('ai_parse_failed');
+  }
+  return parsed;
 }
 
 function showBulkResults(results){
@@ -15036,22 +15302,10 @@ function showBulkResults(results){
   // Match each result with orders
   const matched=results.map(r=>{
     if(r.error) return{...r,order:null,matchType:'error'};
-    // Find order by YK code
-    const yk=(r.orderCode||'').toUpperCase().trim();
-    let order=null;
-    if(yk){
-      // Search in ref, note, fblink, id, and all text fields
-      order=orders.find(o=>
-        (o.ref&&o.ref.toUpperCase().includes(yk))||
-        (o.id&&o.id.toUpperCase().includes(yk))||
-        (o.note&&o.note.toUpperCase().includes(yk))||
-        (o.fblink&&o.fblink.toUpperCase().includes(yk))||
-        (o.name&&o.name.toUpperCase().includes(yk))||
-        (o.address&&o.address.toUpperCase().includes(yk))||
-        (o.products&&o.products.some(p=>p.note&&p.note.toUpperCase().includes(yk)))
-      );
-    }
-    return{...r,order,matchType:order?'matched':'unmatched'};
+    // Find order by extracted code candidates (YK/JR variants)
+    const lookupKeys=buildAiOrderLookupKeys(r.orderCode||'',r.orderCandidates||[],r.rawText||'');
+    const order=resolveOrderFromLookupKeys(lookupKeys);
+    return{...r,order,lookupKeys,matchType:order?'matched':'unmatched'};
   });
 
   const matchedCount=matched.filter(r=>r.matchType==='matched').length;
@@ -15074,6 +15328,7 @@ function renderBulkResult(r,i){
   if(r.matchType==='error') return`
     <div style="background:var(--red-bg);border:1px solid var(--red-border);border-radius:9px;padding:11px;margin-bottom:8px;">
       <div style="font-size:12px;font-weight:700;color:var(--red);">❌ Unreadable: ${r.fileName}</div>
+      ${r.errorMessage?`<div style="font-size:11px;color:var(--muted);margin-top:4px;font-family:var(--mono);word-break:break-word;">${esc(r.errorMessage)}</div>`:''}
     </div>`;
 
   if(r.matchType==='matched'){
@@ -15113,6 +15368,8 @@ function renderBulkResult(r,i){
         <div style="flex:1;">
           <div style="font-size:12px;font-weight:700;color:#854d0e;">❓ Order Not Found: ${esc(r.orderCode||'Code not readable')}</div>
           <div style="font-size:12px;font-family:var(--mono);">${esc(r.tracking)}</div>
+          ${Array.isArray(r.orderCandidates)&&r.orderCandidates.length?`<div style="font-size:10px;color:var(--muted);margin-top:4px;">AI candidates: ${esc(r.orderCandidates.slice(0,4).join(' | '))}</div>`:''}
+          ${Array.isArray(r.lookupKeys)&&r.lookupKeys.length?`<div style="font-size:10px;color:var(--muted);margin-top:4px;">Lookup keys: ${esc(r.lookupKeys.slice(0,6).join(' | '))}</div>`:''}
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:7px;">Manually select an order:</div>
@@ -15145,7 +15402,9 @@ function saveAllBulkCN(){
   const results=window._bulkCNResults||[];
   let saved=0;
   results.forEach((r,i)=>{
-    if(!r.order||!r.tracking||r.matchType==='error') return;
+    if(!r.order||r.matchType==='error') return;
+    const normalizedTracking=normalizeAiTrackingCode(r.tracking);
+    if(!normalizedTracking) return;
     const o=r.order;
   if(o) o.updatedAt=Date.now();
     const prods=o.products||[];
@@ -15161,13 +15420,13 @@ function saveAllBulkCN(){
     if(!targetProds.length) targetProds=[0];
     targetProds.forEach(pi=>{
       if(!prods[pi]) return;
-      prods[pi].cnTracking=r.tracking;
+      prods[pi].cnTracking=normalizedTracking;
       // arrived stays FALSE — physical package not here yet
-      if(pi===0) o.cnTracking=r.tracking;
+      if(pi===0) o.cnTracking=normalizedTracking;
     });
     // Advance status
     if(o.status==='New'||o.status==='Sent to Factory') o.status='At Depot';
-    logActivity('tracking',`CN added via AI: ${esc(r.tracking)} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
+    logActivity('tracking',`CN added via AI: ${esc(normalizedTracking)} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     saved++;
   });
   if(!saved){toast('⚠️ Kaydedilecek eşleşme not found','err');return;}
