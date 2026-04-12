@@ -2767,7 +2767,7 @@ async function login(){
         }else{
           orders=Array.isArray(localOrders)?localOrders:[];
         }
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        persistOrdersLocalSafe(orders);
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
         users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
@@ -3021,7 +3021,7 @@ async function navOrders(status,el){
             if(shouldAcceptRemoteOrders(od.orders)){
               const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
               orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
-              localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+              persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
               updateBadges();
               loaded=true;
             }else{
@@ -3038,7 +3038,7 @@ async function navOrders(status,el){
               if(shouldAcceptRemoteOrders(data.jb_orders)){
                 const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
                 orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
-                localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+                persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
                 updateBadges();
               }else{
                 console.warn('[Pending] Ignoring fallback /api/data orders snapshot to protect local data');
@@ -8315,7 +8315,7 @@ async function loadFromCloud(){
         orders=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'load',pruneMissing:true});
         orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
         restoreOrderImagesFromLocalSources(orders,{source:'load'});
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        persistOrdersLocalSafe(orders);
         // Reload variables from localStorage
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
@@ -10153,7 +10153,7 @@ async function initFirebaseRealtime(opts={}){
         const merged=mergeOrdersByFreshness(orders,incomingLive,{source:'realtime',pruneMissing:true});
         orders=pruneLocalOrdersAgainstRemote(merged,incomingLive);
         restoreOrderImagesFromLocalSources(orders,{source:'realtime'});
-        localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+        persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
         _health.ordersRealtime=true;
         markSync('orders_snapshot');
         if(me){
@@ -10608,7 +10608,7 @@ async function handleFirebaseApiRequest(url,method,body){
       applyOrderDeleteLocally(id,deletedAt||ts);
     }else{
       orders=mergeOrdersByFreshness(orders,[localOrder],{source:'api_upsert'});
-      localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+      persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
     }
     const event=(req&&req.event&&typeof req.event==='object')
       ? {...req.event,orderId:id,opId:String(req.event.opId||opId),v,ts:Number(req.event.ts)||ts}
@@ -11706,7 +11706,7 @@ async function startPendingPoll(){
           const newPending=newOrders.filter(o=>o.pendingApproval).length;
           const mergedOrders=mergeOrdersByFreshness(orders,newOrders,{source:'poll_admin',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
-          localStorage.setItem('jb_orders',JSON.stringify(orders));
+          persistOrdersLocalSafe(orders);
           updateBadges();
           if(newPending>oldPending){
             const latestPending=newOrders.filter(function(o){return o&&o.pendingApproval;}).sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0];
