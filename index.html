@@ -2416,6 +2416,10 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }
 }
 function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
+  // In Cloudflare mode, /api/orders is the only authoritative source for orders.
+  // /api/data may contain stale jb_orders snapshots and can reintroduce old states
+  // such as pendingApproval after approve/reject actions.
+  if(!getFirebaseEnabled()) return false;
   const remoteCount=Array.isArray(fallbackOrders)?fallbackOrders.length:0;
   const localCount=Array.isArray(localOrders)?localOrders.length:0;
   if(remoteCount<=0) return false;
@@ -3009,10 +3013,7 @@ async function navOrders(status,el){
     (async()=>{
       try{
         const api=await ensureWorkingApiBase({silent:true});
-        const k=localStorage.getItem('jb_cloud_key')||'';
-        const headers={};
-        if(k) headers['Authorization']='Bearer '+k;
-        let loaded=false;
+        const headers=getAuthHeaders();
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         const ordRes=await fetch(api+'/api/orders',{headers});
         if(ordRes.ok){
@@ -3029,22 +3030,8 @@ async function navOrders(status,el){
               console.warn('[Pending] Ignoring remote orders snapshot to protect local data');
             }
           }
-        }
-        if(!loaded){
-          const res=await fetch(api+'/api/data',{headers});
-          if(res.ok){
-            const {data}=await res.json();
-            if(data&&Array.isArray(data.jb_orders)){
-              if(shouldAcceptRemoteOrders(data.jb_orders)){
-                const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
-                orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
-                persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
-                updateBadges();
-              }else{
-                console.warn('[Pending] Ignoring fallback /api/data orders snapshot to protect local data');
-              }
-            }
-          }
+        }else{
+          console.warn('[Pending] Failed to load /api/orders, keeping local snapshot');
         }
       }catch(e){}
       renderPendingInTable();
@@ -11751,10 +11738,6 @@ async function startPendingPoll(){
     if(!me)return;
     try{
       const api=await ensureWorkingApiBase({silent:true});
-      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-      if(!res.ok)return;
-      const {data}=await res.json();
-      const localOrdersNow=Array.isArray(orders)?orders:[];
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
@@ -11766,12 +11749,10 @@ async function startPendingPoll(){
             newOrders=[];
           }
         }else{
-          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-          newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
+          return;
         }
       }catch{
-        const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-        newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
+        return;
       }
       if(!shouldAcceptRemoteOrders(newOrders)){
         return;
