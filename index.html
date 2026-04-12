@@ -15061,13 +15061,58 @@ function fileToBase64(file){
 function normalizeAiOrderCode(raw){
   const src=String(raw||'').toUpperCase();
   if(!src) return '';
-  const m=src.match(/\bYK[A-Z0-9\-]{4,30}\b/);
-  if(m&&m[0]) return m[0].replace(/[^A-Z0-9]/g,'');
+  const yk=src.match(/\bYK[A-Z0-9\-]{4,40}\b/);
+  if(yk&&yk[0]) return yk[0].replace(/[^A-Z0-9]/g,'');
+  const jr=src.match(/\bJR[0-9]{6,8}-?[0-9]{2,4}\b/);
+  if(jr&&jr[0]) return jr[0].replace(/[^A-Z0-9]/g,'');
   const compact=src.replace(/[^A-Z0-9]/g,'');
-  return /^YK[A-Z0-9]{4,30}$/.test(compact)?compact:'';
+  if(/^YK[A-Z0-9]{4,40}$/.test(compact)) return compact;
+  if(/^JR[0-9]{8,12}$/.test(compact)) return compact;
+  return '';
 }
 
-function buildAiOrderLookupKeys(rawOrderCode){
+function extractReferenceCandidatesFromText(raw){
+  const src=String(raw||'').toUpperCase();
+  const out=new Set();
+  const add=function(v){
+    const key=normalizeOrderLookupText(v);
+    if(key.length>=6) out.add(key);
+  };
+
+  const ykMatches=src.match(/\bYK[A-Z0-9\-]{4,40}\b/g)||[];
+  ykMatches.forEach(function(v){
+    const n=normalizeOrderLookupText(v);
+    add(n);
+    if(n.startsWith('YK')&&n.length>6) add(n.slice(2));
+    if(n.startsWith('YKJR')&&n.length>8){
+      add(n.slice(2)); // JR...
+      add(n.slice(4)); // numeric/date segment
+    }
+  });
+
+  const jrMatches=src.match(/\bJR[0-9]{6,8}-?[0-9]{2,4}\b/g)||[];
+  jrMatches.forEach(function(v){
+    const n=normalizeOrderLookupText(v);
+    add(n);
+    if(n.startsWith('JR')&&n.length>8){
+      add(n.slice(2));
+    }
+  });
+
+  const plainMatches=src.match(/\b[0-9]{6,8}-[0-9]{2,4}\b/g)||[];
+  plainMatches.forEach(function(v){
+    const n=normalizeOrderLookupText(v);
+    add(n);
+    add('JR'+n);
+  });
+
+  const logisticMatches=src.match(/\b[0-9]{2,4}-[A-Z0-9]{2,4}-[A-Z0-9]{2,4}-[A-Z0-9]{2,4}\b/g)||[];
+  logisticMatches.forEach(add);
+
+  return [...out];
+}
+
+function buildAiOrderLookupKeys(rawOrderCode,extraCandidates,rawText){
   const src=String(rawOrderCode||'').toUpperCase();
   const out=new Set();
   const add=function(v){
@@ -15080,24 +15125,30 @@ function buildAiOrderLookupKeys(rawOrderCode){
     if(normalized.startsWith('YK')&&normalized.length>6){
       add(normalized.slice(2));
     }
-  }
-
-  const ykMatches=src.match(/\bYK[A-Z0-9\-]{4,30}\b/g)||[];
-  ykMatches.forEach(function(v){
-    const n=normalizeOrderLookupText(v);
-    add(n);
-    if(n.startsWith('YK')&&n.length>6){
-      add(n.slice(2));
+    if(normalized.startsWith('YKJR')&&normalized.length>8){
+      add(normalized.slice(4));
     }
-  });
-
-  const jrMatches=src.match(/\bJR[0-9]{6,8}-?[0-9]{2,4}\b/g)||[];
-  jrMatches.forEach(add);
-
-  const logisticMatches=src.match(/\b[0-9]{2,4}-[A-Z0-9]{2,4}-[A-Z0-9]{2,4}-[A-Z0-9]{2,4}\b/g)||[];
-  logisticMatches.forEach(add);
-
+  }
+  extractReferenceCandidatesFromText(src).forEach(add);
+  if(Array.isArray(extraCandidates)){
+    extraCandidates.forEach(function(v){
+      add(v);
+      extractReferenceCandidatesFromText(v).forEach(add);
+    });
+  }
+  extractReferenceCandidatesFromText(rawText).forEach(add);
   return [...out];
+}
+
+function lookupTextMatchesKey(rawValue,key){
+  const v=normalizeOrderLookupText(rawValue);
+  const k=normalizeOrderLookupText(key);
+  if(!v||!k) return false;
+  if(v.includes(k)) return true;
+  if(v.length>=8&&k.length>=10&&k.includes(v)) return true;
+  if(k.startsWith('YK')&&v.includes(k.slice(2))) return true;
+  if(v.startsWith('YK')&&v.slice(2).includes(k)) return true;
+  return false;
 }
 
 function normalizeAiTrackingCode(raw){
@@ -15131,9 +15182,15 @@ function parseAiShippingLabelText(rawText){
 
   let tracking='';
   let orderCode='';
+  let orderCandidates=[];
+  let rawSnippet='';
   if(payload&&typeof payload==='object'){
     tracking=payload.tracking||payload.trackingNo||payload.cnTracking||payload.waybill||'';
     orderCode=payload.orderCode||payload.order_code||payload.order||payload.ref||'';
+    rawSnippet=String(payload.rawText||payload.labelText||payload.ocrText||'');
+    if(Array.isArray(payload.orderCandidates)) orderCandidates=payload.orderCandidates.slice(0,8);
+    else if(payload.candidates&&Array.isArray(payload.candidates)) orderCandidates=payload.candidates.slice(0,8);
+    else if(payload.orderCandidate) orderCandidates=[payload.orderCandidate];
   }
 
   if(!orderCode){
@@ -15157,9 +15214,16 @@ function parseAiShippingLabelText(rawText){
     }
   }
 
+  if(!orderCode){
+    const extracted=extractReferenceCandidatesFromText(rawSnippet||text);
+    if(extracted.length) orderCode=extracted[0];
+  }
+
   return {
     tracking:normalizeAiTrackingCode(tracking),
-    orderCode:normalizeAiOrderCode(orderCode)
+    orderCode:normalizeAiOrderCode(orderCode),
+    orderCandidates:(Array.isArray(orderCandidates)?orderCandidates:[]).map(function(v){return String(v||'').trim();}).filter(Boolean).slice(0,8),
+    rawText:String(rawSnippet||'').slice(0,600)
   };
 }
 
@@ -15180,7 +15244,7 @@ async function aiReadShippingLabel(imagePayload,fileName){
         role:'user',
         content:[
           {type:'image',source:{type:'base64',media_type:mediaType,data:base64}},
-          {type:'text',text:`This is a Chinese shipping label image (${fileName||'unknown'}). Extract exactly two values:\n1. "tracking": CN tracking number (letters+digits, usually long)\n2. "orderCode": internal order code (usually starts with YK)\n\nReturn ONLY JSON:\n{"tracking":"...","orderCode":"..."}`}
+          {type:'text',text:`This is a Chinese shipping label image (${fileName||'unknown'}). Extract:\n1. "tracking": CN tracking number (letters+digits, usually long)\n2. "orderCode": best internal order code candidate (often starts with YK or JR)\n3. "orderCandidates": array of all possible internal order code candidates you can find on label\n4. "rawText": short OCR snippet around order code/candidate line\n\nReturn ONLY JSON:\n{"tracking":"...","orderCode":"...","orderCandidates":["..."],"rawText":"..."}`}
         ]
       }]
     })
@@ -15213,19 +15277,17 @@ function showBulkResults(results){
   const matched=results.map(r=>{
     if(r.error) return{...r,order:null,matchType:'error'};
     // Find order by extracted code candidates (YK/JR variants)
-    const lookupKeys=buildAiOrderLookupKeys(r.orderCode||'');
+    const lookupKeys=buildAiOrderLookupKeys(r.orderCode||'',r.orderCandidates||[],r.rawText||'');
     let order=null;
     if(lookupKeys.length){
       // Search in ref, note, fblink, id, and all text fields
       order=orders.find(o=>
         lookupKeys.some(function(key){
-          return (o.ref&&normalizeOrderLookupText(o.ref).includes(key))||
-            (o.id&&normalizeOrderLookupText(o.id).includes(key))||
-            (o.note&&normalizeOrderLookupText(o.note).includes(key))||
-            (o.fblink&&normalizeOrderLookupText(o.fblink).includes(key))||
-            (o.name&&normalizeOrderLookupText(o.name).includes(key))||
-            (o.address&&normalizeOrderLookupText(o.address).includes(key))||
-            (o.products&&o.products.some(p=>p&&p.note&&normalizeOrderLookupText(p.note).includes(key)));
+          return (o.ref&&lookupTextMatchesKey(o.ref,key))||
+            (o.id&&lookupTextMatchesKey(o.id,key))||
+            (o.note&&lookupTextMatchesKey(o.note,key))||
+            (o.fblink&&lookupTextMatchesKey(o.fblink,key))||
+            (o.products&&o.products.some(p=>p&&p.note&&lookupTextMatchesKey(p.note,key)));
         })
       );
     }
@@ -15292,6 +15354,7 @@ function renderBulkResult(r,i){
         <div style="flex:1;">
           <div style="font-size:12px;font-weight:700;color:#854d0e;">❓ Order Not Found: ${esc(r.orderCode||'Code not readable')}</div>
           <div style="font-size:12px;font-family:var(--mono);">${esc(r.tracking)}</div>
+          ${Array.isArray(r.orderCandidates)&&r.orderCandidates.length?`<div style="font-size:10px;color:var(--muted);margin-top:4px;">AI candidates: ${esc(r.orderCandidates.slice(0,4).join(' | '))}</div>`:''}
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:7px;">Manually select an order:</div>
