@@ -2785,8 +2785,12 @@ async function login(){
 async function logout(){
   stopPendingPoll();
   if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}
+  _globalChatPollInFlight=false;
   if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}
+  _chatPollInFlightByReseller.clear();
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+  _autoSyncTickInFlight=false;
+  _visibilitySyncInFlight=false;
   try{
     if(me && navigator.onLine){
       await withTimeoutPromise(
@@ -11890,6 +11894,7 @@ async function startResellerChatRealtime(){
 }
 
 // Start global poll when admin logs in - checks all reseller chats
+let _globalChatPollInFlight=false;
 function startGlobalChatPoll(){
   if(_globalChatPoll) clearInterval(_globalChatPoll);
   const pollMs=getFirebaseEnabled()?1200:5000;
@@ -11899,9 +11904,11 @@ function startGlobalChatPoll(){
 
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
+  if(_globalChatPollInFlight) return;
+  _globalChatPollInFlight=true;
   try{
     const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+    const res=await fetchWithTimeout(api+'/api/data',{headers:getAuthHeaders()},12000);
     if(!res.ok) return;
     const {data}=await res.json();
     // Check each reseller's chat key
@@ -11975,10 +11982,15 @@ async function pollAllChats(){
     if(document.getElementById('pg-chat')?.classList.contains('on')){
       renderChatList();
     }
-  }catch(e){}
+  }catch(e){
+    console.warn('[pollAllChats]',e&&e.message?e.message:e);
+  }finally{
+    _globalChatPollInFlight=false;
+  }
 }
 let _chatPollInterval = null;
 let _messages = {}; // {resellerId: [{id, from, text, ts}]}
+let _chatPollInFlightByReseller = new Set();
 
 function renderChatList(filter=''){
   const el = document.getElementById('chat-list');
@@ -12012,22 +12024,29 @@ function renderChatList(filter=''){
 
 // ── CHAT POLLING ──
 async function pollMessages(resellerId){
-  if(!resellerId) return;
+  const rid=String(resellerId||'').trim();
+  if(!rid) return;
+  if(_chatPollInFlightByReseller.has(rid)) return;
+  _chatPollInFlightByReseller.add(rid);
   try{
     const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+    const res=await fetchWithTimeout(api+'/api/data',{headers:getAuthHeaders()},12000);
     if(!res.ok) return;
     const {data}=await res.json();
-    const chatKey='jb_chat_'+resellerId;
-    const prevMsgs=Array.isArray(_messages[resellerId])?_messages[resellerId]:readChatMessagesFromCache(chatKey);
+    const chatKey='jb_chat_'+rid;
+    const prevMsgs=Array.isArray(_messages[rid])?_messages[rid]:readChatMessagesFromCache(chatKey);
     const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
     if(JSON.stringify(mergedMsgs)!==JSON.stringify(prevMsgs)){
-      _messages[resellerId]=mergedMsgs;
-      if(_chatReseller===resellerId) renderMessages();
+      _messages[rid]=mergedMsgs;
+      if(_chatReseller===rid) renderMessages();
       renderChatList();
       updateChatBadge();
     }
-  }catch(e){ console.warn('[pollMessages]',e); }
+  }catch(e){
+    console.warn('[pollMessages]',e&&e.message?e.message:e);
+  }finally{
+    _chatPollInFlightByReseller.delete(rid);
+  }
 }
 
 
@@ -12692,6 +12711,8 @@ function initOfflineIndicator(){
 let _autoSyncInterval = null;
 let _autoSyncVisibilityBound=false;
 let _silentLoadInFlight=null;
+let _autoSyncTickInFlight=false;
+let _visibilitySyncInFlight=false;
 
 function runSilentLoadWithLock(){
   if(_silentLoadInFlight) return _silentLoadInFlight;
@@ -12712,21 +12733,32 @@ function startAutoSync(){
   const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:CLOUD_FAST_SYNC_MS;
   // Sync interval adapts when realtime is active.
   _autoSyncInterval = setInterval(async() => {
-    if(me && navigator.onLine){
-      await ensureWorkingApiBase({silent:true}).catch(()=>{});
-      await flushLocalSyncFallback().catch(()=>{});
-      await runSilentLoadWithLock().catch(()=>{});
+    if(!me || !navigator.onLine || _autoSyncTickInFlight) return;
+    _autoSyncTickInFlight=true;
+    try{
+      await withTimeoutPromise(ensureWorkingApiBase({silent:true}).catch(()=>{}),5000,'autosync base');
+      await withTimeoutPromise(flushLocalSyncFallback().catch(()=>{}),8000,'autosync flush');
+      await withTimeoutPromise(runSilentLoadWithLock().catch(()=>{}),15000,'autosync load');
       if(isFirebaseEnabled()){
-        initFirebaseRealtime({silent:true}).catch(()=>{});
+        await withTimeoutPromise(initFirebaseRealtime({silent:true}).catch(()=>{}),5000,'autosync realtime');
       }
+    }catch(e){
+      console.warn('[autoSync_tick]',e&&e.message?e.message:e);
+    }finally{
+      _autoSyncTickInFlight=false;
     }
   }, syncMs);
   
   // Also sync when tab becomes visible
   if(!_autoSyncVisibilityBound){
-    document.addEventListener('visibilitychange', () => {
-      if(document.visibilityState === 'visible' && me && navigator.onLine){
-        loadFromCloud().catch(()=>{});
+    document.addEventListener('visibilitychange', async () => {
+      if(document.visibilityState === 'visible' && me && navigator.onLine && !_visibilitySyncInFlight){
+        _visibilitySyncInFlight=true;
+        try{
+          await withTimeoutPromise(loadFromCloud().catch(()=>{}),20000,'visibility load');
+        }finally{
+          _visibilitySyncInFlight=false;
+        }
       }
     });
     _autoSyncVisibilityBound=true;
