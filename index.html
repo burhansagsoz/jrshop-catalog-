@@ -15125,7 +15125,7 @@ function orderCompareSnapshot(order){
   delete clean.updatedAt;
   return JSON.stringify(clean);
 }
-async function saveOrders(changedOrderIds){
+async function saveOrders(changedOrderIds,opts={}){
   const nowTs=Date.now();
   let previousOrders=[];
   try{
@@ -15135,7 +15135,11 @@ async function saveOrders(changedOrderIds){
   }
   const prevById=new Map((Array.isArray(previousOrders)?previousOrders:[]).filter(o=>o&&o.id).map(o=>[o.id,o]));
   const currentIds=new Set((orders||[]).filter(o=>o&&o.id).map(o=>o.id));
-  const deletedOrderIds=[...prevById.keys()].filter(id=>!currentIds.has(id));
+  // Never infer deletes from memory-vs-storage mismatch by default.
+  // In multi-tab scenarios, stale in-memory state can otherwise tombstone
+  // orders created by another tab. Explicit deletes must use deleteOrderWithTombstone.
+  const inferDeletes=!!(opts&&opts.inferDeletes===true);
+  const deletedOrderIds=inferDeletes?[...prevById.keys()].filter(id=>!currentIds.has(id)):[];
 
   const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):new Set();
   if(!changedSet.size){
