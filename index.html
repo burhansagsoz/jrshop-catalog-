@@ -711,7 +711,7 @@ body.dark .modal-foot{background:#263548;}
             <div class="ftab" onclick="setTab('Sent to Factory',this)">Factory</div>
             <div class="ftab" onclick="setTab('At Depot',this)">Depot</div>
             <div class="ftab" onclick="setTab('Ready',this)">Ready 📦</div>
-            <div class="ftab" onclick="setTab('Sent to Factory',this)">Logistics</div>
+            <div class="ftab" onclick="setTab('Sent to Logistics',this)">Logistics</div>
             <div class="ftab" onclick="setTab('Shipped',this)">Shipped</div>
             <div class="ftab" onclick="setTab('Completed',this)">Done</div>
           </div>
@@ -1717,7 +1717,7 @@ body.dark .modal-foot{background:#263548;}
         <div class="fg"><label class="fl">Status</label>
           <select class="fi" id="e-status">
             <option value="New">🆕 New</option><option value="Sent to Factory">🏭 Sent to Factory</option>
-            <option value="At Depot">🏭 At Depot</option><option value="Sent to Factory">🚛 Sent to Factory</option>
+            <option value="At Depot">🏭 At Depot</option><option value="Sent to Logistics">🚛 Sent to Logistics</option>
             <option value="Shipped">🚚 Shipped</option><option value="Completed">✅ Completed</option>
           </select>
         </div>
@@ -2262,7 +2262,8 @@ const STATUSES=['New','Sent to Factory','At Depot','Sent to Logistics','Shipped'
 const S_LABEL={'New':'New','Sent to Factory':'Sent to Factory','At Depot':'At Depot','Sent to Logistics':'Sent to Logistics','Shipped':'Shipped','Completed':'Completed'};
 function getStatusLabel(s){
   // Normalize old statuses - "Sent to Wechat" shows as "Sent to Factory"
-  if(s==='Sent to WeChat'||s==='Sent to Wechat'||s==='Sent to Logistic') return 'Sent to Factory';
+  if(s==='Sent to WeChat'||s==='Sent to Wechat') return 'Sent to Factory';
+  if(s==='Sent to Logistic') return 'Sent to Logistics';
   return S_LABEL[s]||s;
 }
 const S_EMOJI={New:'🆕','Sent to Factory':'🏭','Sent to Wechat':'🏭','At Depot':'🏭','Sent to Logistics':'🚛',Shipped:'🚚',Completed:'✅'};
@@ -3022,7 +3023,6 @@ async function navOrders(status,el){
               orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
               persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
               updateBadges();
-              loaded=true;
             }else{
               // Guard: ignore empty/partial remote snapshot when local has data.
               console.warn('[Pending] Ignoring remote orders snapshot to protect local data');
@@ -3040,7 +3040,7 @@ async function navOrders(status,el){
   document.getElementById('pg-title').textContent=status==='all'?'All Orders':getStatusLabel(status)+' Orders';
   showOrderTop();
   const tabs=document.querySelectorAll('.ftab');
-  const m={all:0,New:1,'Sent to Factory':2,'At Depot':3,Ready:4,'Sent to Factory':5,Shipped:6,Completed:7};
+  const m={all:0,New:1,'Sent to Factory':2,'At Depot':3,Ready:4,'Sent to Logistics':5,Shipped:6,Completed:7};
   tabs.forEach(t=>t.classList.remove('on'));
   if(m[status]!==undefined)tabs[m[status]].classList.add('on');
   render();
@@ -11384,7 +11384,7 @@ function buildMsgTemplate(o){
     'New':'Your order has been received and is being processed.',
     'Sent to Factory':'Your order is being processed.',
     'At Depot':'Your order has arrived at our depot and is being prepared.',
-    'Sent to Factory':'Your order has been handed to our logistics partner.',
+    'Sent to Logistics':'Your order has been handed to our logistics partner.',
     'Shipped':`Your order is on its way! Tracking: ${o.ukTracking||'—'}`,
     'Completed':'Your order has been delivered. Thank you!'
   };
@@ -11571,7 +11571,7 @@ function quickAdvance(id){
     const statusMessages={
       'Sent to Factory':'Your order is being processed by the factory 🏭',
       'At Depot':'Your order arrived at our depot 📦',
-      'Sent to Factory':'Your order sent to logistics 🚛',
+      'Sent to Logistics':'Your order sent to logistics 🚛',
       'Shipped':`Your order shipped! Tracking: ${o.ukTracking||'—'} 🚚`,
       'Completed':'Your order has been delivered ✅'
     };
@@ -11716,6 +11716,7 @@ async function dispatchRealtimeNotification(opts={}){
 let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
+let _pendingPollInFlight=false;
 async function startPendingPoll(){
   if(getFirebaseEnabled() && _health.ordersRealtime){
     if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}
@@ -11725,6 +11726,8 @@ async function startPendingPoll(){
   const pendingMs=(getFirebaseEnabled()&&_health.ordersRealtime)?30000:CLOUD_FAST_SYNC_MS;
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
+    if(_pendingPollInFlight)return;
+    _pendingPollInFlight=true;
     try{
       const api=await ensureWorkingApiBase({silent:true});
       // Try dedicated orders endpoint first
@@ -11832,6 +11835,7 @@ async function startPendingPoll(){
         }
       }
     }catch(e){}
+    finally{_pendingPollInFlight=false;}
   },pendingMs);
 }
 
@@ -13323,7 +13327,8 @@ function renderResLB(){
 
 function fmtStatus(s){
   if(!s) return 'New';
-  if(s==='Sent to WeChat'||s==='Sent to Logistic') return 'Sent to Factory';
+  if(s==='Sent to WeChat'||s==='Sent to Wechat') return 'Sent to Factory';
+  if(s==='Sent to Logistic') return 'Sent to Logistics';
   return s;
 }
 
@@ -13333,7 +13338,7 @@ function renderResOrders(){
   let myOrders=orders.filter(o=>o.resellerId===me.id);
   
   if(filter==='pending') myOrders=myOrders.filter(o=>o.pendingApproval);
-  else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>o.status==='Sent to Factory'||o.status==='Sent to Factory');
+  else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>o.status==='Sent to Factory'||o.status==='Sent to Wechat');
   else if(filter!=='all') myOrders=myOrders.filter(o=>o.status===filter);
   
   myOrders=myOrders.sort((a,b)=>b.ts-a.ts);
@@ -14822,7 +14827,7 @@ function checkAutoBackup(){
     }).catch(()=>{});
   }
 }
-function stopPendingPoll(){if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}}
+function stopPendingPoll(){if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}_pendingPollInFlight=false;}
 
 function resetSessionTimer(){
   clearTimeout(_sessionTimer);
