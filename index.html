@@ -15137,6 +15137,21 @@ function buildAiOrderLookupKeys(rawOrderCode,extraCandidates,rawText){
   return [...out];
 }
 
+function normalizeRefDigits(raw){
+  return normalizeOrderLookupText(raw).replace(/[^0-9]/g,'');
+}
+
+function fixOcrDigitConfusions(raw){
+  return String(raw||'')
+    .toUpperCase()
+    .replace(/[OQD]/g,'0')
+    .replace(/[IL]/g,'1')
+    .replace(/Z/g,'2')
+    .replace(/S/g,'5')
+    .replace(/G/g,'6')
+    .replace(/B/g,'8');
+}
+
 function lookupTextMatchesKey(rawValue,key){
   const v=normalizeOrderLookupText(rawValue);
   const k=normalizeOrderLookupText(key);
@@ -15145,7 +15160,51 @@ function lookupTextMatchesKey(rawValue,key){
   if(v.length>=8&&k.length>=10&&k.includes(v)) return true;
   if(k.startsWith('YKJR')&&v.includes(k.slice(2))) return true;
   if(v.startsWith('YKJR')&&v.slice(2).includes(k)) return true;
+  const vDigits=normalizeRefDigits(v);
+  const kDigits=normalizeRefDigits(fixOcrDigitConfusions(k));
+  if(vDigits.length>=8&&kDigits.length>=8){
+    if(vDigits===kDigits) return true;
+    if(vDigits.includes(kDigits)) return true;
+    if(kDigits.includes(vDigits)) return true;
+  }
   return false;
+}
+
+function pickBestOrderMatch(candidates){
+  const list=(Array.isArray(candidates)?candidates:[]).filter(Boolean);
+  if(!list.length) return null;
+  const active=list.filter(function(o){
+    return ['New','Sent to Factory','At Depot'].includes(String(o&&o.status||''));
+  });
+  const pool=active.length?active:list;
+  return [...pool].sort(function(a,b){
+    return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);
+  })[0]||null;
+}
+
+function resolveOrderFromLookupKeys(lookupKeys){
+  const keys=(Array.isArray(lookupKeys)?lookupKeys:[]).map(function(v){
+    return normalizeOrderLookupText(v);
+  }).filter(Boolean);
+  if(!keys.length) return null;
+
+  const refMatches=(Array.isArray(orders)?orders:[]).filter(function(o){
+    return o&&o.ref&&keys.some(function(key){return lookupTextMatchesKey(o.ref,key);});
+  });
+  if(refMatches.length) return pickBestOrderMatch(refMatches);
+
+  const otherMatches=(Array.isArray(orders)?orders:[]).filter(function(o){
+    if(!o) return false;
+    return keys.some(function(key){
+      return (o.id&&lookupTextMatchesKey(o.id,key))||
+        (o.note&&lookupTextMatchesKey(o.note,key))||
+        (o.fblink&&lookupTextMatchesKey(o.fblink,key))||
+        (o.products&&o.products.some(function(p){
+          return p&&p.note&&lookupTextMatchesKey(p.note,key);
+        }));
+    });
+  });
+  return pickBestOrderMatch(otherMatches);
 }
 
 function normalizeAiTrackingCode(raw){
@@ -15275,20 +15334,8 @@ function showBulkResults(results){
     if(r.error) return{...r,order:null,matchType:'error'};
     // Find order by extracted code candidates (YK/JR variants)
     const lookupKeys=buildAiOrderLookupKeys(r.orderCode||'',r.orderCandidates||[],r.rawText||'');
-    let order=null;
-    if(lookupKeys.length){
-      // Search in ref, note, fblink, id, and all text fields
-      order=orders.find(o=>
-        lookupKeys.some(function(key){
-          return (o.ref&&lookupTextMatchesKey(o.ref,key))||
-            (o.id&&lookupTextMatchesKey(o.id,key))||
-            (o.note&&lookupTextMatchesKey(o.note,key))||
-            (o.fblink&&lookupTextMatchesKey(o.fblink,key))||
-            (o.products&&o.products.some(p=>p&&p.note&&lookupTextMatchesKey(p.note,key)));
-        })
-      );
-    }
-    return{...r,order,matchType:order?'matched':'unmatched'};
+    const order=resolveOrderFromLookupKeys(lookupKeys);
+    return{...r,order,lookupKeys,matchType:order?'matched':'unmatched'};
   });
 
   const matchedCount=matched.filter(r=>r.matchType==='matched').length;
@@ -15352,6 +15399,7 @@ function renderBulkResult(r,i){
           <div style="font-size:12px;font-weight:700;color:#854d0e;">❓ Order Not Found: ${esc(r.orderCode||'Code not readable')}</div>
           <div style="font-size:12px;font-family:var(--mono);">${esc(r.tracking)}</div>
           ${Array.isArray(r.orderCandidates)&&r.orderCandidates.length?`<div style="font-size:10px;color:var(--muted);margin-top:4px;">AI candidates: ${esc(r.orderCandidates.slice(0,4).join(' | '))}</div>`:''}
+          ${Array.isArray(r.lookupKeys)&&r.lookupKeys.length?`<div style="font-size:10px;color:var(--muted);margin-top:4px;">Lookup keys: ${esc(r.lookupKeys.slice(0,6).join(' | '))}</div>`:''}
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:7px;">Manually select an order:</div>
