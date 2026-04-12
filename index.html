@@ -2385,12 +2385,13 @@ function persistOrdersLocalSafe(list){
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
   const remoteCount=remoteOrders.length;
-  let localCount=0;
+  let localCount=Array.isArray(orders)?orders.length:0;
   try{
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    localCount=Array.isArray(localOrders)?localOrders.length:0;
+    const storageCount=Array.isArray(localOrders)?localOrders.length:0;
+    localCount=Math.max(localCount,storageCount);
   }catch(_e){
-    localCount=Array.isArray(orders)?orders.length:0;
+    localCount=Math.max(localCount,0);
   }
   const hasPendingLocalMutations=getActiveLocalOrderMutationIds().length>0;
   if(remoteCount>0){
@@ -5483,7 +5484,7 @@ async function saveOrder(){
   // Local-first save for instant UX; media upload + cloud sync runs async.
   orders.unshift(o);
   markLocalOrderMutation(o.id,'upsert',{opId:createLocalMutationOpId('create')});
-  saveOrders([o.id]);
+  await saveOrders([o.id]);
   runProdImageUploadAsync(o.id);
   closeOrderModal();
   render();
@@ -15159,7 +15160,10 @@ async function saveOrders(changedOrderIds){
         v:nextV
       };
     }).filter(o=>o&&o.id&&!isOrderDeleted(o));
-    localStorage.setItem('jb_orders',JSON.stringify(orders));
+    const persistedBeforeSync=persistOrdersLocalSafe(orders);
+    if(!persistedBeforeSync){
+      console.warn('[saveOrders] local persist failed before sync', {count:Array.isArray(orders)?orders.length:0});
+    }
 
     const api=await ensureWorkingApiBase({silent:true});
     let queuedFallback=false;
@@ -15278,7 +15282,10 @@ async function saveOrders(changedOrderIds){
     if(queuedFallback){
       console.warn('[saveOrders] queued order events for retry');
     }
-    localStorage.setItem('jb_orders',JSON.stringify(orders));
+    const persistedAfterSync=persistOrdersLocalSafe(orders);
+    if(!persistedAfterSync){
+      console.warn('[saveOrders] local persist failed after sync', {count:Array.isArray(orders)?orders.length:0});
+    }
     markSync('orders_save');
     writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
   } catch(e) {
