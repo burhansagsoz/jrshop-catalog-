@@ -406,6 +406,16 @@ body.dark .modal-foot{background:#263548;}
   .btn{min-height:44px;}
   .ni{min-height:44px;display:flex;align-items:center;}
   input[type=checkbox]{width:20px;height:20px;}
+  /* Remove tap delay on scanner actions */
+  #pg-barcode .btn,
+  #pg-bulk-cn .btn,
+  #pg-barcode button,
+  #pg-bulk-cn button,
+  #pg-barcode .bc-tab,
+  #pg-bulk-cn .bc-tab{
+    touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+  }
 }
 
 /* Safe area for notched devices */
@@ -2243,6 +2253,8 @@ let _editOrderId=null, _editProdImages={};
 let _resImgEditOrderId=null, _resImgEditDraft={};
 let chartDaily=null, chartStatus=null;
 let _emailQueue=[], _scanMode='add', _cameraStream=null, _barcodeInterval=null;
+let _barcodeDetectBusy=false, _bcnDetectBusy=false, _staffDetectBusy=false;
+const SCAN_DETECT_INTERVAL_MS=650;
 let _selectMode=false, _selected=new Set();
 let _singleScanGuard=null;
 
@@ -4143,6 +4155,10 @@ function startBCNCamera(){
   const wrap=document.getElementById('camera-wrap-bcn');
   const video=document.getElementById('camera-video-bcn');
   const status=document.getElementById('camera-status-bcn');
+  if(_bcnStream){
+    wrap.style.display='block';
+    return;
+  }
   navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}})
     .then(stream=>{
       _bcnStream=stream;
@@ -4150,7 +4166,10 @@ function startBCNCamera(){
       wrap.style.display='block';
       if('BarcodeDetector' in window){
         const detector=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','qr_code','data_matrix','itf','codabar']});
+        _bcnDetectBusy=false;
         _bcnInterval=setInterval(async()=>{
+          if(_bcnDetectBusy||!video||video.readyState<2) return;
+          _bcnDetectBusy=true;
           try{
             const bc=await detector.detect(video);
             if(bc.length>0){
@@ -4165,8 +4184,10 @@ function startBCNCamera(){
               }
               toast('📷 CN scanned — tap 💾 to save','ok');
             }
-          }catch(e){}
-        },500);
+          }catch(e){}finally{
+            _bcnDetectBusy=false;
+          }
+        },SCAN_DETECT_INTERVAL_MS);
       } else {
         status.textContent='Camera active — type CN manually';
       }
@@ -4177,6 +4198,7 @@ function startBCNCamera(){
 function stopBCNCamera(){
   if(_bcnStream){_bcnStream.getTracks().forEach(t=>t.stop());_bcnStream=null;}
   if(_bcnInterval){clearInterval(_bcnInterval);_bcnInterval=null;}
+  _bcnDetectBusy=false;
   const wrap=document.getElementById('camera-wrap-bcn');
   if(wrap) wrap.style.display='none';
 }
@@ -4274,12 +4296,20 @@ function updateProdSelect(){/* Add CN mode removed - now in Bulk CN Tracking */}
 async function startCamera(){
   const wrap=document.getElementById('camera-wrap'),video=document.getElementById('camera-video'),
         btn=document.getElementById('btn-camera'),status=document.getElementById('camera-status');
+  if(_cameraStream){
+    if(wrap) wrap.style.display='block';
+    if(btn) btn.style.display='none';
+    return;
+  }
   try{
     _cameraStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}});
     video.srcObject=_cameraStream;wrap.style.display='block';btn.style.display='none';status.textContent='Scanning…';
     if('BarcodeDetector' in window){
       const detector=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','qr_code','data_matrix','itf','codabar']});
+      _barcodeDetectBusy=false;
       _barcodeInterval=setInterval(async()=>{
+        if(_barcodeDetectBusy||!video||video.readyState<2) return;
+        _barcodeDetectBusy=true;
         try{
           const bc=await detector.detect(video);
           if(bc.length>0){
@@ -4289,8 +4319,10 @@ async function startCamera(){
             if(inp){inp.value=val;barcodeSearch();}
             toast('📷 '+val,'ok');playSound('scan');
           }
-        }catch(e){}
-      },500);
+        }catch(e){}finally{
+          _barcodeDetectBusy=false;
+        }
+      },SCAN_DETECT_INTERVAL_MS);
     } else status.textContent='Camera active — type manually.';
   } catch(err){
     console.warn('Camera error:',err);
@@ -4301,6 +4333,7 @@ async function startCamera(){
 function stopCamera(){
   if(_cameraStream){_cameraStream.getTracks().forEach(t=>t.stop());_cameraStream=null;}
   if(_barcodeInterval){clearInterval(_barcodeInterval);_barcodeInterval=null;}
+  _barcodeDetectBusy=false;
   const wrap=document.getElementById('camera-wrap'),btn=document.getElementById('btn-camera');
   if(wrap)wrap.style.display='none';if(btn)btn.style.display='flex';
 }
@@ -4444,7 +4477,7 @@ function markProdArrivedBarcode(orderId, prodIdx){
   if(!o.products[prodIdx]) return;
   o.products[prodIdx].arrived=true;
   const shelf=getShelfStatus(o);
-  saveOrders();updateBadges();
+  saveOrders([o.id]);updateBadges();
   if(shelf.ready){
     toast('🎉 All items arrived! Ready for logistics.','ok');
     if(notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
@@ -4462,11 +4495,11 @@ function copyAddressFromBarcode(orderId){
   // Status progression based on current status
   if(['New','Sent to Factory'].includes(o.status)){
     o.status='At Depot';
-    saveOrders();updateBadges();
+    saveOrders([o.id]);updateBadges();
     toast('🏭 Status: At Depot','info');
   } else if(o.status==='At Depot'){
     o.status='Sent to Logistics';
-    saveOrders();updateBadges();
+    saveOrders([o.id]);updateBadges();
     toast('🚛 Status: Sent to Logistics','info');
   }
 }
@@ -4687,7 +4720,7 @@ function saveDepotPhoto(input){
     if(o&&o.products&&o.products[_depotPhotoProdIdx]){
       o.products[_depotPhotoProdIdx].depotPhoto=img;
       if(o.status==='New'||o.status==='Sent to Factory') o.status='At Depot';
-      saveOrders();
+      saveOrders([o.id]);
       logActivity('tracking',`Depot photo added for ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
       toast('✅ Photo saved!','ok');
     }
@@ -14272,6 +14305,12 @@ function staffToggleCamera(){
 async function staffStartCamera(){
   const wrap = document.getElementById('staff-camera-wrap');
   const video = document.getElementById('staff-camera-video');
+  if(_staffCameraStream){
+    wrap.style.display = 'block';
+    const btn = document.getElementById('staff-cam-btn');
+    if(btn) btn.textContent = '⏹';
+    return;
+  }
   try{
     _staffCameraStream = await navigator.mediaDevices.getUserMedia({
       video:{facingMode:'environment', width:{ideal:1280}}
@@ -14282,7 +14321,10 @@ async function staffStartCamera(){
     
     if('BarcodeDetector' in window){
       const detector = new BarcodeDetector({formats:['code_128','code_39','ean_13','qr_code','data_matrix','itf']});
+      _staffDetectBusy=false;
       _staffCameraInterval = setInterval(async()=>{
+        if(_staffDetectBusy||!video||video.readyState<2) return;
+        _staffDetectBusy=true;
         try{
           const barcodes = await detector.detect(video);
           if(barcodes.length > 0){
@@ -14291,8 +14333,10 @@ async function staffStartCamera(){
             document.getElementById('staff-scan-input').value = val;
             staffProcessScan();
           }
-        }catch(e){}
-      }, 500);
+        }catch(e){}finally{
+          _staffDetectBusy=false;
+        }
+      }, SCAN_DETECT_INTERVAL_MS);
     }
   }catch(e){
     toast('摄像头访问被拒绝','err');
@@ -14305,6 +14349,7 @@ function staffStopCamera(){
     _staffCameraStream = null;
   }
   if(_staffCameraInterval){ clearInterval(_staffCameraInterval); _staffCameraInterval = null; }
+  _staffDetectBusy=false;
   const wrap = document.getElementById('staff-camera-wrap');
   if(wrap) wrap.style.display = 'none';
   const btn = document.getElementById('staff-cam-btn');
