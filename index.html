@@ -2385,12 +2385,13 @@ function persistOrdersLocalSafe(list){
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
   const remoteCount=remoteOrders.length;
-  let localCount=0;
+  let localCount=Array.isArray(orders)?orders.length:0;
   try{
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    localCount=Array.isArray(localOrders)?localOrders.length:0;
+    const storageCount=Array.isArray(localOrders)?localOrders.length:0;
+    localCount=Math.max(localCount,storageCount);
   }catch(_e){
-    localCount=Array.isArray(orders)?orders.length:0;
+    localCount=Math.max(localCount,0);
   }
   const hasPendingLocalMutations=getActiveLocalOrderMutationIds().length>0;
   if(remoteCount>0){
@@ -2966,31 +2967,22 @@ async function approveOrder(id){
   o.updatedAt=Date.now();
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
-  let persisted=false;
-  try{
-    const ready=await initFirebaseRealtime({silent:true});
-    if(ready&&_firebaseDb){
-      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(o.id).set(sanitizeOrderForRemote(o));
-      persisted=true;
-    }
-  }catch(_e){}
-  if(!persisted){
-    try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const k=localStorage.getItem('jb_cloud_key')||'';
-    const headers={'Content-Type':'application/json'};
-    if(k) headers['Authorization']='Bearer '+k;
-    const res=await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
-    persisted=!!(res&&res.ok);
-  }catch(_e2){}
+  const opId=createLocalMutationOpId('approve');
+  markLocalOrderMutation(o.id,'upsert',{opId});
+  await saveOrders([o.id]);
+  const pendingRetry=hasActiveLocalOrderMutation(o.id);
+  if(pendingRetry){
+    console.warn('[OrderSync][approve_pending_retry]',{
+      orderId:String(o.id),
+      opId,
+      ts:Date.now()
+    });
+    toast('⚠️ Approval saved locally, cloud sync pending','info');
   }
-  if(!persisted) toast('⚠️ Approval could not sync now, retry later','err');
   updateBadges();
   renderPendingInTable();
   logActivity('status',`Order approved: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
-  toast('✅ Approved!','ok');
-  try{await syncToCloud('jb_orders',orders);}catch(e){}
+  if(!pendingRetry) toast('✅ Approved!','ok');
 }
 async function rejectOrder(id){
   const note=prompt('Reason for rejection (reseller will see this):');
@@ -5483,7 +5475,7 @@ async function saveOrder(){
   // Local-first save for instant UX; media upload + cloud sync runs async.
   orders.unshift(o);
   markLocalOrderMutation(o.id,'upsert',{opId:createLocalMutationOpId('create')});
-  saveOrders([o.id]);
+  await saveOrders([o.id]);
   runProdImageUploadAsync(o.id);
   closeOrderModal();
   render();
@@ -8229,11 +8221,31 @@ async function loadFromCloudSilent(){
     if(before!==after){
       orders=finalOrders;
       restoreOrderImagesFromLocalSources(orders,{source:'load_silent'});
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
+      persistOrdersLocalSafe(orders);
       render();
     }
     return true;
-  }catch(e){ return false; }
+  }catch(e){
+    const fallbackMetrics=getLocalSyncFallbackMetrics();
+    let storageOrdersCount=0;
+    try{
+      const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+      storageOrdersCount=Array.isArray(localOrders)?localOrders.length:0;
+    }catch(_e){
+      storageOrdersCount=0;
+    }
+    console.warn('[OrderSync][silent_load_failed]',{
+      error:String(e&&e.message||e||'unknown'),
+      memoryOrdersCount:Array.isArray(orders)?orders.length:0,
+      storageOrdersCount,
+      pendingMutations:getActiveLocalOrderMutationIds().length,
+      pendingFallbackOps:Number(fallbackMetrics&&fallbackMetrics.ops)||0,
+      pendingFallbackKeys:Number(fallbackMetrics&&fallbackMetrics.keys)||0,
+      online:!!navigator.onLine,
+      ts:Date.now()
+    });
+    return false;
+  }
 }
 
 
@@ -8479,12 +8491,13 @@ function writeLocalOrderMutations(map){
 }
 function cleanupLocalOrderMutations(map){
   const src=map&&typeof map==='object'?{...map}:readLocalOrderMutations();
+  const pendingFallbackIds=getPendingFallbackOrderIds();
   const now=Date.now();
   let changed=false;
   Object.keys(src).forEach(function(id){
     const row=src[id]||{};
     const ts=Number(row.ts)||0;
-    if(!ts || (now-ts)>=LOCAL_ORDER_MUTATION_KEEP_MS){
+    if((!ts || (now-ts)>=LOCAL_ORDER_MUTATION_KEEP_MS) && !pendingFallbackIds.has(String(id))){
       delete src[id];
       changed=true;
     }
@@ -8492,9 +8505,24 @@ function cleanupLocalOrderMutations(map){
   if(changed) writeLocalOrderMutations(src);
   return src;
 }
+function getPendingFallbackOrderIds(){
+  const fallback=readLocalSyncFallback();
+  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+    ? fallback.jb_order_ops.value
+    : [];
+  const ids=new Set();
+  pendingOps.forEach(function(op){
+    const id=String(op&&op.orderId||'').trim();
+    if(id) ids.add(id);
+  });
+  return ids;
+}
 function getActiveLocalOrderMutationIds(){
   const map=cleanupLocalOrderMutations();
-  return Object.keys(map);
+  const ids=new Set(Object.keys(map));
+  const pendingFallbackIds=getPendingFallbackOrderIds();
+  pendingFallbackIds.forEach(function(id){ ids.add(id); });
+  return Array.from(ids);
 }
 function createLocalMutationOpId(prefix){
   return `${prefix||'ord'}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
@@ -8517,19 +8545,19 @@ function clearLocalOrderMutation(orderId){
   delete map[String(orderId)];
   writeLocalOrderMutations(map);
 }
-function hasActiveLocalOrderMutation(orderId){
+function hasActiveLocalOrderMutation(orderId,pendingFallbackIds){
   if(!orderId) return false;
+  const id=String(orderId);
+  const pendingIds=(pendingFallbackIds&&typeof pendingFallbackIds.has==='function')
+    ? pendingFallbackIds
+    : getPendingFallbackOrderIds();
   const map=cleanupLocalOrderMutations();
-  const row=map[String(orderId)];
-  if(!row) return false;
+  const row=map[id];
+  if(!row) return pendingIds.has(id);
   const ts=Number(row.ts)||0;
   const age=Date.now()-ts;
   if(age<Math.min(LOCAL_ORDER_MUTATION_KEEP_MS,LOCAL_ORDER_CONVERGENCE_GRACE_MS)) return true;
-  const fallback=readLocalSyncFallback();
-  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
-    ? fallback.jb_order_ops.value
-    : [];
-  return pendingOps.some(function(op){return String(op&&op.orderId||'')===String(orderId);});
+  return pendingIds.has(id);
 }
 function readLocalDataMutations(){
   try{
@@ -8809,13 +8837,23 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
   const local=Array.isArray(localOrders)?localOrders:[];
   const remote=Array.isArray(remoteOrders)?remoteOrders:[];
   const remoteIds=new Set(remote.filter(o=>o&&o.id).map(o=>String(o.id)));
+  const pendingFallbackIds=getPendingFallbackOrderIds();
   return local.filter(function(o){
     if(!o||!o.id) return false;
     if(remoteIds.has(String(o.id))) return true;
     const updatedAt=Number(o.updatedAt||o.ts||0);
     const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
     if(isFreshLocal) return true;
-    return hasActiveLocalOrderMutation(o.id);
+    const hasPendingMutation=hasActiveLocalOrderMutation(o.id,pendingFallbackIds);
+    if(hasPendingMutation) return true;
+    console.warn('[OrderSync] Pruning local order missing from remote snapshot', {
+      orderId:String(o.id),
+      updatedAt,
+      ageMs:updatedAt?Math.max(0,Date.now()-updatedAt):null,
+      remoteCount:remote.length,
+      pendingFallbackOps:pendingFallbackIds.size
+    });
+    return false;
   });
 }
 
@@ -9829,6 +9867,7 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
   let merged=[...byId.values()];
   if(pruneMissing){
     const incomingIds=new Set((incomingOrders||[]).filter(o=>o&&o.id).map(o=>String(o.id)));
+    const pendingFallbackIds=getPendingFallbackOrderIds();
     merged=merged.filter(function(o){
       if(!o||!o.id) return false;
       if(incomingIds.has(String(o.id))) return true;
@@ -9836,7 +9875,7 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
       const updatedAt=Number(o.updatedAt||o.ts||0);
       const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
       if(isFreshLocal) return true;
-      if(hasActiveLocalOrderMutation(o.id)) return true;
+      if(hasActiveLocalOrderMutation(o.id,pendingFallbackIds)) return true;
       return false;
     });
   }
@@ -12540,6 +12579,19 @@ function initOfflineIndicator(){
 // ── AUTO SYNC ──
 let _autoSyncInterval = null;
 let _autoSyncVisibilityBound=false;
+let _silentLoadInFlight=null;
+
+function runSilentLoadWithLock(){
+  if(_silentLoadInFlight) return _silentLoadInFlight;
+  _silentLoadInFlight=(async function(){
+    try{
+      return await loadFromCloudSilent();
+    }finally{
+      _silentLoadInFlight=null;
+    }
+  })();
+  return _silentLoadInFlight;
+}
 
 function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
@@ -12551,7 +12603,7 @@ function startAutoSync(){
     if(me && navigator.onLine){
       await ensureWorkingApiBase({silent:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
-      loadFromCloudSilent().catch(()=>{});
+      await runSilentLoadWithLock().catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
       }
@@ -15132,7 +15184,10 @@ async function saveOrders(changedOrderIds){
         v:nextV
       };
     }).filter(o=>o&&o.id&&!isOrderDeleted(o));
-    localStorage.setItem('jb_orders',JSON.stringify(orders));
+    const persistedBeforeSync=persistOrdersLocalSafe(orders);
+    if(!persistedBeforeSync){
+      console.warn('[saveOrders] local persist failed before sync', {count:Array.isArray(orders)?orders.length:0});
+    }
 
     const api=await ensureWorkingApiBase({silent:true});
     let queuedFallback=false;
@@ -15251,7 +15306,10 @@ async function saveOrders(changedOrderIds){
     if(queuedFallback){
       console.warn('[saveOrders] queued order events for retry');
     }
-    localStorage.setItem('jb_orders',JSON.stringify(orders));
+    const persistedAfterSync=persistOrdersLocalSafe(orders);
+    if(!persistedAfterSync){
+      console.warn('[saveOrders] local persist failed after sync', {count:Array.isArray(orders)?orders.length:0});
+    }
     markSync('orders_save');
     writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
   } catch(e) {
