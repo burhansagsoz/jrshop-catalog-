@@ -8371,7 +8371,6 @@ async function recoverOrdersNow(){
   }
 }
 function saveFirebaseSettings(){
-  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
   stopFirebaseRealtime();
   toast('ℹ️ Cloudflare backend modu aktif (Firebase kapalı).','info');
 }
@@ -8391,7 +8390,6 @@ const FIREBASE_CONFIG_DEFAULT={
   measurementId:"G-B1RG9Z0D79"
 };
 const FIREBASE_CONFIG_KEY='jb_firebase_config';
-const FIREBASE_ENABLED_KEY='jb_firebase_enabled';
 const FIREBASE_COLLECTION_ORDERS='orders';
 const FIREBASE_COLLECTION_DATA='app_data';
 const FIREBASE_COLLECTION_MEDIA='media';
@@ -8403,7 +8401,6 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
-const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=90*1000;
@@ -8438,7 +8435,6 @@ let _firebaseAuthNeedsFreshLogin=(function(){
 })();
 let _lastFirebasePermissionLockAt=0;
 let _ordersBulkPushInFlight=false;
-const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
@@ -8466,13 +8462,6 @@ const _nativeFetch=window.fetch.bind(window);
 function ensureFirebaseConfigDefaults(){
   if(!localStorage.getItem(FIREBASE_CONFIG_KEY)){
     localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(FIREBASE_CONFIG_DEFAULT));
-  }
-  if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
-    localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
-  }
-  // Signed-in transport auth only (no anonymous fallback).
-  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
-    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'1');
   }
 }
 ensureFirebaseConfigDefaults();
@@ -9390,7 +9379,7 @@ function clearFirebaseAuthRetryGuards(){
 }
 
 function getFirebaseLoginCreds(){
-  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH || !me || _firebaseAuthNeedsFreshLogin) return null;
+  if(!me || _firebaseAuthNeedsFreshLogin) return null;
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   if(!isValidAuthEmail(meEmail)) return null;
   const mePw=me&&me.password?String(me.password):'';
@@ -9510,7 +9499,7 @@ async function ensureFirebaseOnlineAuth(opts={}){
     _health.authState='waiting_login';
     return null;
   }
-  const creds=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseLoginCreds():null;
+  const creds=getFirebaseLoginCreds();
   if(!creds||!creds.email||!creds.password){
     _health.authState='waiting_login';
     return null;
