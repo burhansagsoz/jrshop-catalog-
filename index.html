@@ -2967,31 +2967,22 @@ async function approveOrder(id){
   o.updatedAt=Date.now();
   o.approvedAt=Date.now();
   o.approvedBy=me?me.email:'admin';
-  localStorage.setItem('jb_orders',JSON.stringify(orders));
-  let persisted=false;
-  try{
-    const ready=await initFirebaseRealtime({silent:true});
-    if(ready&&_firebaseDb){
-      await _firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).doc(o.id).set(sanitizeOrderForRemote(o));
-      persisted=true;
-    }
-  }catch(_e){}
-  if(!persisted){
-    try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const k=localStorage.getItem('jb_cloud_key')||'';
-    const headers={'Content-Type':'application/json'};
-    if(k) headers['Authorization']='Bearer '+k;
-    const res=await fetch(api+'/api/order',{method:'POST',headers,body:JSON.stringify({order:o})});
-    persisted=!!(res&&res.ok);
-  }catch(_e2){}
+  const opId=createLocalMutationOpId('approve');
+  markLocalOrderMutation(o.id,'upsert',{opId});
+  await saveOrders([o.id]);
+  const pendingRetry=hasActiveLocalOrderMutation(o.id);
+  if(pendingRetry){
+    console.warn('[OrderSync][approve_pending_retry]',{
+      orderId:String(o.id),
+      opId,
+      ts:Date.now()
+    });
+    toast('⚠️ Approval saved locally, cloud sync pending','info');
   }
-  if(!persisted) toast('⚠️ Approval could not sync now, retry later','err');
   updateBadges();
   renderPendingInTable();
   logActivity('status',`Order approved: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
-  toast('✅ Approved!','ok');
-  try{await syncToCloud('jb_orders',orders);}catch(e){}
+  if(!pendingRetry) toast('✅ Approved!','ok');
 }
 async function rejectOrder(id){
   const note=prompt('Reason for rejection (reseller will see this):');
@@ -8230,11 +8221,31 @@ async function loadFromCloudSilent(){
     if(before!==after){
       orders=finalOrders;
       restoreOrderImagesFromLocalSources(orders,{source:'load_silent'});
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
+      persistOrdersLocalSafe(orders);
       render();
     }
     return true;
-  }catch(e){ return false; }
+  }catch(e){
+    const fallbackMetrics=getLocalSyncFallbackMetrics();
+    let storageOrdersCount=0;
+    try{
+      const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+      storageOrdersCount=Array.isArray(localOrders)?localOrders.length:0;
+    }catch(_e){
+      storageOrdersCount=0;
+    }
+    console.warn('[OrderSync][silent_load_failed]',{
+      error:String(e&&e.message||e||'unknown'),
+      memoryOrdersCount:Array.isArray(orders)?orders.length:0,
+      storageOrdersCount,
+      pendingMutations:getActiveLocalOrderMutationIds().length,
+      pendingFallbackOps:Number(fallbackMetrics&&fallbackMetrics.ops)||0,
+      pendingFallbackKeys:Number(fallbackMetrics&&fallbackMetrics.keys)||0,
+      online:!!navigator.onLine,
+      ts:Date.now()
+    });
+    return false;
+  }
 }
 
 
@@ -12568,6 +12579,19 @@ function initOfflineIndicator(){
 // ── AUTO SYNC ──
 let _autoSyncInterval = null;
 let _autoSyncVisibilityBound=false;
+let _silentLoadInFlight=null;
+
+function runSilentLoadWithLock(){
+  if(_silentLoadInFlight) return _silentLoadInFlight;
+  _silentLoadInFlight=(async function(){
+    try{
+      return await loadFromCloudSilent();
+    }finally{
+      _silentLoadInFlight=null;
+    }
+  })();
+  return _silentLoadInFlight;
+}
 
 function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
@@ -12579,7 +12603,7 @@ function startAutoSync(){
     if(me && navigator.onLine){
       await ensureWorkingApiBase({silent:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
-      loadFromCloudSilent().catch(()=>{});
+      await runSilentLoadWithLock().catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
       }
