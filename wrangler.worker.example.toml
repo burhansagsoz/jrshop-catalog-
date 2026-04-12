@@ -1,0 +1,11 @@
+name = "jrshop-api"
+main = "worker.js"
+compatibility_date = "2026-04-07"
+
+# Replace with your real account ID from Cloudflare dashboard.
+account_id = "YOUR_ACCOUNT_ID"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jrshop-db"
+database_id = "YOUR_D1_DATABASE_ID"

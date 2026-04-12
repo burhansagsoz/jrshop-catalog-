@@ -2,6 +2,18 @@
 
 This project uses Firebase-first runtime with Firestore, Storage, and optional Firebase Auth mapping.
 
+## Phase 1 stabilization checklist (required)
+
+To avoid `missing or insufficient permissions` and cross-device drift, complete these first:
+
+1. Enable **Email/Password** provider in Firebase Auth.
+2. Ensure every active app user has a matching Firebase Auth user (same email).
+3. Create role docs in Firestore for each active Firebase UID:
+   - `user_roles/{uid}` -> `{ role: "Admin" | "Staff" | "Reseller" }`
+4. Keep anonymous sign-in disabled for production usage.
+
+If role docs are missing for a signed-in UID, Firestore rules will reject reads/writes.
+
 ## Collections
 
 - `orders`

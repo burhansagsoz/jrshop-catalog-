@@ -68,6 +68,19 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);height:100dv
 .lf input::placeholder{color:rgba(255,255,255,.2);}
 .lf input:focus{border-color:var(--accent);background:rgba(249,115,22,.07);}
 .login-btn{width:100%;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font);margin-top:4px;}
+.login-card{animation:loginFadeIn .55s ease both,cardPop .6s cubic-bezier(.34,1.56,.64,1) both;}
+.login-brand .ico{animation:logoFloat 2.6s ease-in-out infinite;}
+.login-btn{transition:transform .2s ease,box-shadow .25s ease,filter .2s ease;box-shadow:0 8px 26px rgba(249,115,22,.28);}
+.login-btn:hover{transform:translateY(-1px);box-shadow:0 14px 34px rgba(249,115,22,.36);}
+.login-btn:active{transform:translateY(0) scale(.99);filter:saturate(1.1);}
+.ni,.btn,.res-order-card,.feed-post,.card-row{transition:transform .2s ease,box-shadow .25s ease,background-color .2s ease;}
+.btn:hover,.ni:hover{transform:translateY(-1px);}
+.res-order-card:hover,.card-row:hover{transform:translateY(-2px);box-shadow:var(--shadow);}
+.topbar{backdrop-filter:blur(8px);}
+.page-enter{animation:pageSlide .3s ease both;}
+.pulse-live{animation:statusRing 1.8s infinite;}
+@keyframes notifPulse{0%{transform:scale(1);}35%{transform:scale(1.22);}100%{transform:scale(1);}}
+.notif-pulse{animation:notifPulse .42s ease;}
 
 /* APP */
 #app{display:none;height:100dvh;flex-direction:row;flex:1;min-height:0;}
@@ -393,6 +406,16 @@ body.dark .modal-foot{background:#263548;}
   .btn{min-height:44px;}
   .ni{min-height:44px;display:flex;align-items:center;}
   input[type=checkbox]{width:20px;height:20px;}
+  /* Remove tap delay on scanner actions */
+  #pg-barcode .btn,
+  #pg-bulk-cn .btn,
+  #pg-barcode button,
+  #pg-bulk-cn button,
+  #pg-barcode .bc-tab,
+  #pg-bulk-cn .bc-tab{
+    touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+  }
 }
 
 /* Safe area for notched devices */
@@ -1049,6 +1072,26 @@ body.dark .modal-foot{background:#263548;}
           <div id="res-detail-content"></div>
         </div>
       </div>
+      <div id="res-img-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:210;align-items:flex-end;justify-content:center;" onclick="if(event.target===this)closeResOrderImageEdit()">
+        <div style="background:var(--card);border-radius:16px 16px 0 0;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;padding:18px 16px 24px;">
+          <div style="width:40px;height:4px;background:rgba(255,255,255,.15);border-radius:2px;margin:0 auto 14px;"></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+            <div>
+              <div style="font-size:16px;font-weight:800;">🖼️ Edit Product Images</div>
+              <div id="res-img-edit-order-meta" style="font-size:11px;color:var(--muted);margin-top:2px;"></div>
+            </div>
+            <button onclick="closeResOrderImageEdit()" style="background:rgba(255,255,255,.08);border:none;color:var(--text);border-radius:8px;padding:6px 10px;cursor:pointer;">✕</button>
+          </div>
+          <div style="background:var(--blue-bg);border:1px solid var(--blue-border);border-radius:10px;padding:10px 12px;font-size:12px;color:var(--blue);margin-bottom:12px;">
+            Only product images will be changed. Address, status and tracking stay untouched.
+          </div>
+          <div id="res-img-edit-list"></div>
+          <div style="display:flex;gap:8px;margin-top:14px;">
+            <button onclick="closeResOrderImageEdit()" style="flex:1;background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;">Cancel</button>
+            <button id="res-img-edit-save-btn" onclick="saveResOrderImageEdit()" style="flex:1;background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:800;cursor:pointer;">💾 Save Images</button>
+          </div>
+        </div>
+      </div>
 
       </div>
       <div class="page scrl" id="pg-track">
@@ -1564,43 +1607,26 @@ body.dark .modal-foot{background:#263548;}
             <div class="fg"><label class="fl">Alert after (days)</label><input type="number" class="fi" id="cfg-alert-days" value="3" min="1" max="30"></div>
             <div class="fg"><label class="fl">Session timeout (minutes)</label><input type="number" class="fi" id="cfg-session-timeout" value="30" min="5" max="120"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Auto-lock when inactive</div></div>
             <div class="fg"><label class="fl">Your Messenger / Facebook Link</label><input type="text" class="fi" id="cfg-messenger-link" placeholder="https://m.me/yourpage or facebook.com/yourpage"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Used in customer catalog — "Send Order" button opens this</div></div>
+            <div class="fg"><label class="fl">Cloudflare Worker API URL</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api.<subdomain>.workers.dev"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Leave empty to use current site origin.</div></div>
+            <div class="fg"><label class="fl">Cloudflare API Key (optional)</label><input type="text" class="fi" id="cfg-cloud-key" placeholder="Bearer token (if your Worker requires auth)"></div>
             <div class="fg"><label class="fl">Sound notifications</label><button class="btn btn-secondary btn-sm" onclick="toggleSound()" id="sound-toggle-btn">🔔 Sounds On</button></div>
           </div>
           <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
+          <div id="cfg-cloud-active" style="margin-top:8px;font-size:11px;color:var(--muted);"></div>
         <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase Sync</div>
+          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">☁️ Cloudflare Sync</div>
           <div style="padding:13px 16px;">
             <div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:8px;">
-              Runtime is now Firebase/Firestore only. Legacy Cloudflare Worker sync is disabled.
+              Runtime is now Cloudflare Worker API mode. Firebase realtime bridge is disabled.
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Firebase</button>
+              <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Cloudflare</button>
               <button class="btn btn-blue" onclick="recoverOrdersNow()">⬇️ Recover Orders</button>
             </div>
+            <div id="sync-health-panel" style="margin-top:10px;"></div>
           </div>
         </div>
-        <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">🔥 Firebase Realtime Sync</div>
-          <div style="padding:13px 16px;">
-            <div class="fg" style="margin-bottom:10px;">
-              <label class="fl">Enable Firebase</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);">
-                <input type="checkbox" id="cfg-firebase-enabled">
-                Realtime updates
-              </label>
-            </div>
-            <div class="fg" style="margin-bottom:10px;">
-              <label class="fl">Firebase Web Config (JSON)</label>
-              <textarea class="fi" id="cfg-firebase-config" rows="6" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","appId":"...","storageBucket":"...","messagingSenderId":"..."}'></textarea>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-primary" onclick="saveFirebaseSettings()">💾 Save Firebase</button>
-              <button class="btn btn-blue" id="btn-connect-firebase-now" onclick="connectFirebaseNow()">🔌 Connect Now</button>
-              <button class="btn btn-ghost" onclick="migrateAllToFirebase()">⬆️ Migrate Current Data</button>
-            </div>
-            <div id="firebase-health-panel" style="margin-top:10px;"></div>
-          </div>
-        </div>
+        
 <!-- AI Settings removed -->
         <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;max-width:560px;">
           <h3 style="font-size:14px;font-weight:700;margin-bottom:3px;">💾 Data Backup</h3>
@@ -1608,7 +1634,7 @@ body.dark .modal-foot{background:#263548;}
           <div id="last-backup-info" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="btn btn-green" onclick="exportBackup()">📤 Export Backup</button>
-            <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">🔥 Firebase Backup</button>
+            <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">☁️ Cloudflare Backup</button>
             <label class="btn btn-ghost" style="cursor:pointer;">📥 Import<input type="file" accept=".json" onchange="importBackup(this)" style="display:none;"></label>
           
             <button class="btn btn-danger btn-sm" onclick="clearCache()">🧹 Clear Cache</button></div>
@@ -1699,6 +1725,9 @@ body.dark .modal-foot{background:#263548;}
         <div class="fg"><label class="fl">Factory</label><select class="fi" id="e-supplier2"><option value="">— Select —</option></select></div>
         <div class="fg span2"><label class="fl">Note</label><input type="text" class="fi" id="e-note"></div>
       </div>
+      <div class="fsec">🖼️ Product Images</div>
+      <div id="e-prod-imgs"></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;">You can add or replace product images while editing this order.</div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" onclick="closeEditModal()">Cancel</button>
@@ -2142,7 +2171,8 @@ function normalizeUsersList(raw){
         ...u,
         id:String(u.id||('u'+Date.now()+Math.random().toString(36).slice(2,6))),
         email:String(u.email||'').trim(),
-        password:String(u.password||''),
+        // Backward compatibility for older backup/user formats.
+        password:String(u.password||u.pw||u.pass||u.userPassword||''),
         role:String(u.role||'Reseller'),
         dname:String(u.dname||'').trim()
       }))
@@ -2151,6 +2181,52 @@ function normalizeUsersList(raw){
   }catch(_e){
     return [...DEFAULT_BOOT_USERS];
   }
+}
+function userIdentityKey(u){
+  const email=String(u&&u.email||'').trim().toLowerCase();
+  if(email) return 'em:'+email;
+  return 'id:'+String(u&&u.id||'');
+}
+function mergeUsersSafely(localRaw,remoteRaw){
+  const local=normalizeUsersList(localRaw);
+  const remote=normalizeUsersList(remoteRaw);
+  // Guard: ignore suspicious remote payloads that only include default admin.
+  if(
+    local.length>=2 &&
+    remote.length===1 &&
+    String(remote[0]&&remote[0].email||'').toLowerCase()==='joobuyadmin@gmail.com'
+  ){
+    return local;
+  }
+  const byKey=new Map();
+  for(const u of local){
+    byKey.set(userIdentityKey(u),u);
+  }
+  for(const u of remote){
+    const key=userIdentityKey(u);
+    const prev=byKey.get(key)||{};
+    byKey.set(key,{...prev,...u});
+  }
+  const merged=[...byKey.values()];
+  return normalizeUsersList(merged.length?merged:[...DEFAULT_BOOT_USERS]);
+}
+function applyRemoteKeyToLocal(key,value,source='remote'){
+  const k=String(key||'').trim();
+  if(!k || k==='jb_orders') return;
+  if(k==='jb_users'){
+    persistUsersLocalSafe(Array.isArray(value)?value:[],source);
+    return;
+  }
+  try{localStorage.setItem(k,JSON.stringify(value));}catch(_e){}
+}
+function persistUsersLocalSafe(remoteUsers,source=''){
+  let localUsers=[];
+  try{localUsers=JSON.parse(localStorage.getItem('jb_users')||'[]');}catch(_e){localUsers=[];}
+  const merged=mergeUsersSafely(localUsers,remoteUsers);
+  try{localStorage.setItem('jb_users',JSON.stringify(merged));}catch(_e){}
+  users=merged;
+  if(source) console.log('[Users] merged from',source,'local',Array.isArray(localUsers)?localUsers.length:0,'remote',Array.isArray(remoteUsers)?remoteUsers.length:0,'final',merged.length);
+  return merged;
 }
 function findUserForLogin(identifier,password){
   const id=String(identifier||'').trim().toLowerCase();
@@ -2173,9 +2249,14 @@ let templates = JSON.parse(localStorage.getItem('jb_templates') || JSON.stringif
 let notifSettings = JSON.parse(localStorage.getItem('jb_notif') || '{"shipped":true}');
 let me=null, selId=null, fStatus='all', fSearch='';
 let prodCount=0, prodImages={};
+let _editOrderId=null, _editProdImages={};
+let _resImgEditOrderId=null, _resImgEditDraft={};
 let chartDaily=null, chartStatus=null;
 let _emailQueue=[], _scanMode='add', _cameraStream=null, _barcodeInterval=null;
+let _barcodeDetectBusy=false, _bcnDetectBusy=false, _staffDetectBusy=false;
+const SCAN_DETECT_INTERVAL_MS=650;
 let _selectMode=false, _selected=new Set();
+let _singleScanGuard=null;
 
 const STATUSES=['New','Sent to Factory','At Depot','Sent to Logistics','Shipped','Completed'];
 const S_LABEL={'New':'New','Sent to Factory':'Sent to Factory','At Depot':'At Depot','Sent to Logistics':'Sent to Logistics','Shipped':'Shipped','Completed':'Completed'};
@@ -2196,20 +2277,35 @@ function displayStatus(s){
 
 // ── DARK MODE ──
 function toggleDark(){const d=document.body.classList.toggle('dark');document.getElementById('dark-btn').textContent=d?'☀️':'🌙';localStorage.setItem('jb_dark',d?'1':'0');}
+function getApiBaseEarly(){
+  const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
+  if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
+  return location.origin;
+}
 (function(){
-  // Firebase-first boot: keep API calls on current origin (/api/* bridge).
-  localStorage.setItem('jb_cloud_api',location.origin);
+  // Initialize API base once; allow operator override from Settings.
+  try{
+    if(!localStorage.getItem('jb_cloud_api')){
+      localStorage.setItem('jb_cloud_api',location.origin);
+    }
+  }catch(_e){}
   const savedUsers=localStorage.getItem('jb_users');
   const hasUsers=savedUsers&&JSON.parse(savedUsers||'[]').length>0;
   if(!hasUsers){
     setTimeout(function(){
       const loginBtn=document.querySelector('.login-btn');
       if(loginBtn)loginBtn.textContent='Loading...';
-      fetch('/api/data')
+      fetch(getApiBaseEarly()+'/api/data')
       .then(function(r){return r.json();})
       .then(function(res){
         if(res.data){
-          Object.keys(res.data).forEach(function(k){localStorage.setItem(k,JSON.stringify(res.data[k]));});
+          Object.keys(res.data).forEach(function(k){
+            if(k==='jb_users'){
+              persistUsersLocalSafe(res.data[k],'boot');
+            }else{
+              localStorage.setItem(k,JSON.stringify(res.data[k]));
+            }
+          });
           users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
         scheduleFirebaseAutoConnect('boot');
           const savedEm=localStorage.getItem('jb_saved_email');
@@ -2245,7 +2341,12 @@ let _ordersStorageWarnAt=0;
 function compactOrdersForStorage(list){
   const arr=Array.isArray(list)?list:[];
   const keepRemoteable=function(v){
-    return (typeof v==='string'&&/^(https?:|blob:)/i.test(v))?v:null;
+    if(typeof v!=='string') return null;
+    const s=v.trim();
+    if(!s) return null;
+    if(/^(https?:|blob:|data:)/i.test(s)) return s;
+    if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+    return null;
   };
   return arr.map(function(o){
     return {
@@ -2283,13 +2384,43 @@ function persistOrdersLocalSafe(list){
 }
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
-  if(remoteOrders.length>0) return true;
+  const remoteCount=remoteOrders.length;
+  let localCount=0;
+  try{
+    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    localCount=Array.isArray(localOrders)?localOrders.length:0;
+  }catch(_e){
+    localCount=Array.isArray(orders)?orders.length:0;
+  }
+  const hasPendingLocalMutations=getActiveLocalOrderMutationIds().length>0;
+  if(remoteCount>0){
+    // If we have pending local writes, reject any snapshot shrink to avoid dropping
+    // newly-created orders that have not been acknowledged yet.
+    if(hasPendingLocalMutations && remoteCount<localCount){
+      console.warn('[Cloud] Remote orders snapshot rejected: pending local mutations', { localCount, remoteCount });
+      return false;
+    }
+    // Guard against partial remote snapshots wiping a much larger local dataset.
+    if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
+      console.warn('[Cloud] Remote orders snapshot rejected: suspicious drop', { localCount, remoteCount });
+      return false;
+    }
+    return true;
+  }
   try{
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
     return !Array.isArray(localOrders)||localOrders.length===0;
   }catch(_e){
     return true;
   }
+}
+function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
+  const remoteCount=Array.isArray(fallbackOrders)?fallbackOrders.length:0;
+  const localCount=Array.isArray(localOrders)?localOrders.length:0;
+  if(remoteCount<=0) return false;
+  if(localCount===0) return true;
+  if(localCount<30 && remoteCount>=localCount) return true;
+  return false;
 }
 function persistOrdersState(nextOrders){
   const arr=Array.isArray(nextOrders)?nextOrders:[];
@@ -2304,7 +2435,8 @@ function isUsableOrderImage(url){
   const v=String(url||'').trim();
   if(!v) return false;
   if(v==='null'||v==='undefined') return false;
-  return /^(https?:|data:|blob:)/i.test(v);
+  if(/^(https?:|data:|blob:)/i.test(v)) return true;
+  return /^\/?api\/image\/[a-z0-9_-]+$/i.test(v);
 }
 function buildCatalogImageLookup(){
   const byName=new Map();
@@ -2517,15 +2649,14 @@ async function login(){
   users=normalizeUsersList(users);
   let u=findUserForLogin(em,pw);
   if(!u){
-    // Firebase-first login retry
+    // Cloudflare API login retry
     const loginBtn=document.querySelector('.login-btn');
     if(loginBtn)loginBtn.textContent='Checking...';
-    fetch('/api/data')
+    fetch(getApiBase()+'/api/data')
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
-        users=normalizeUsersList(res.data.jb_users);
-        localStorage.setItem('jb_users',JSON.stringify(users));
+        users=persistUsersLocalSafe(res.data.jb_users,'login_retry');
         const u2=findUserForLogin(em,pw);
         if(u2){if(loginBtn)loginBtn.textContent='Sign In →';login();return;}
       }
@@ -2592,23 +2723,38 @@ async function login(){
   else{document.getElementById('topbar-right').style.display='none';goDash(document.querySelector('.ni'));startPendingPoll();
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
   scheduleFirebaseAutoConnect('login');
-  setTimeout(function(){
-    localStorage.setItem('jb_cloud_api',location.origin);
-    fetch('/api/data')
+  setTimeout(async function(){
+    fetch(getApiBase()+'/api/data')
     .then(function(r){return r.json();})
-    .then(function(res){
+    .then(async function(res){
       if(res.data){
         Object.keys(res.data).forEach(function(k){
           if(k==='jb_orders') return;
+          if(k==='jb_users'){
+            persistUsersLocalSafe(res.data[k],'login_sync');
+            return;
+          }
           if(k==='jb_feed' || k.indexOf('jb_chat_')===0){
             mergeKeyWithLocalFirst(k,res.data[k]);
           }else{
             localStorage.setItem(k,JSON.stringify(res.data[k]));
           }
         });
-        // Critical: never overwrite local changes on login with stale cloud snapshot.
-        const cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
+        // Prefer authoritative /api/orders on login; fallback to /api/data snapshot only if needed.
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+        let cloudOrders=[];
+        try{
+          const ordRes=await fetch(getApiBase()+'/api/orders',{headers:getAuthHeaders()});
+          if(ordRes.ok){
+            const ordPayload=await ordRes.json();
+            cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
+          }
+        }catch(_e){
+          cloudOrders=[];
+        }
+        if(!cloudOrders.length){
+          cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
+        }
         if(cloudOrders.length){
           const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
@@ -2632,7 +2778,53 @@ async function login(){
     }).catch(function(){});
   },1000);
 }
-function logout(){stopPendingPoll();if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}stopFirebaseRealtime();try{if(_firebaseAuth&&_firebaseAuth.currentUser){_firebaseAuth.signOut().catch(()=>{});}}catch(_e){}try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}clearFirebaseAuthNeedsFreshLogin();resetHealthCounters();me=null;selId=null;document.getElementById('login-screen').style.display='flex';document.getElementById('app').classList.remove('on');document.getElementById('l-em').value='';document.getElementById('l-pw').value='';document.getElementById('login-err').style.display='none';stopCamera();if(_staffCameraStream){_staffCameraStream.getTracks().forEach(t=>t.stop());_staffCameraStream=null;}/* Reset sidebar visibility for next login */const sb=document.getElementById('sidebar');if(sb){sb.style.display='';sb.classList.remove('collapsed');sb.style.width='';}const menuBtn=document.querySelector('.topbar-menu-btn');if(menuBtn) menuBtn.style.display='';}
+async function logout(){
+  stopPendingPoll();
+  if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}
+  if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}
+  if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+  try{
+    if(me && navigator.onLine){
+      await withTimeoutPromise(
+        ensureWorkingApiBase({silent:true,force:true}).catch(()=>{}),
+        3000,
+        'logout api base check'
+      ).catch(()=>{});
+      // Keep logout fast: only a short outbox flush attempt, no full backup push.
+      await withTimeoutPromise(
+        flushLocalSyncFallback().catch(()=>{}),
+        3000,
+        'logout sync flush'
+      ).catch(()=>{});
+    }
+  }catch(_e){}
+  stopFirebaseRealtime();
+  try{if(_firebaseAuth&&_firebaseAuth.currentUser){_firebaseAuth.signOut().catch(()=>{});}}catch(_e){}
+  try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}
+  clearFirebaseAuthNeedsFreshLogin();
+  resetHealthCounters();
+  me=null;
+  selId=null;
+  document.getElementById('login-screen').style.display='flex';
+  document.getElementById('app').classList.remove('on');
+  document.getElementById('l-em').value='';
+  document.getElementById('l-pw').value='';
+  document.getElementById('login-err').style.display='none';
+  stopCamera();
+  if(_staffCameraStream){
+    _staffCameraStream.getTracks().forEach(t=>t.stop());
+    _staffCameraStream=null;
+  }
+  /* Reset sidebar visibility for next login */
+  const sb=document.getElementById('sidebar');
+  if(sb){
+    sb.style.display='';
+    sb.classList.remove('collapsed');
+    sb.style.width='';
+  }
+  const menuBtn=document.querySelector('.topbar-menu-btn');
+  if(menuBtn) menuBtn.style.display='';
+}
 
 // ── SIDEBAR ──
 let _sbOpen=window.innerWidth>900;
@@ -2728,6 +2920,7 @@ function showPage(id){
   const pg=document.getElementById(id);
   if(pg){
     pg.classList.add('on');
+    pg.classList.remove('page-enter');
     // orders-page needs flex-direction:row, others column
     pg.style.display='flex';
     if(pg.classList.contains('orders-page')){
@@ -2739,6 +2932,7 @@ function showPage(id){
       pg.style.flexDirection='column';
     }
     pg.scrollTop=0;
+    requestAnimationFrame(()=>pg.classList.add('page-enter'));
   }
   if(id!=='pg-orders') closeDetail();
   if(id!=='pg-barcode') stopCamera();
@@ -2783,7 +2977,7 @@ async function approveOrder(id){
   }catch(_e){}
   if(!persisted){
     try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const k=localStorage.getItem('jb_cloud_key')||'';
     const headers={'Content-Type':'application/json'};
     if(k) headers['Authorization']='Bearer '+k;
@@ -2822,7 +3016,7 @@ async function navOrders(status,el){
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
-        const api=getApiBase();
+        const api=await ensureWorkingApiBase({silent:true});
         const k=localStorage.getItem('jb_cloud_key')||'';
         const headers={};
         if(k) headers['Authorization']='Bearer '+k;
@@ -3676,8 +3870,73 @@ async function deleteOrder(){
 }
 
 // ── EDIT ORDER ──
+function renderEditProductImageList(order){
+  const el=document.getElementById('e-prod-imgs');
+  if(!el) return;
+  const prods=(order&&Array.isArray(order.products))?order.products:[];
+  if(!prods.length){
+    el.innerHTML='<div style="font-size:12px;color:var(--muted);padding:10px 0;">No products on this order.</div>';
+    return;
+  }
+  el.innerHTML=prods.map(function(p,idx){
+    const originalImg=String((p&&p.img)||'').trim();
+    const draftValue=Object.prototype.hasOwnProperty.call(_editProdImages,String(idx))?_editProdImages[String(idx)]:originalImg;
+    const imgRef=String(draftValue||'').trim();
+    const hasImg=!!imgRef;
+    const changed=imgRef!==originalImg;
+    return `<div style="display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
+      ${hasImg?`<img src="${imgRef}" style="width:58px;height:58px;border-radius:10px;object-fit:cover;border:1px solid var(--border);flex-shrink:0;">`:`<div style="width:58px;height:58px;border-radius:10px;border:1px dashed var(--border);background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">📦</div>`}
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p&&p.name||('Product '+(idx+1)))}</div>
+        <div style="font-size:11px;color:${changed?'var(--green)':'var(--muted)'};margin-top:2px;">${changed?'Updated image pending save':'Current image'}</div>
+        <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">
+          <label for="e-img-input-${idx}" class="btn btn-ghost btn-xs" style="cursor:pointer;">📷 ${hasImg?'Change':'Add'}</label>
+          <input type="file" accept="image/*" id="e-img-input-${idx}" style="display:none;" onchange="handleEditProdImg(${idx},this)">
+          ${hasImg?`<button type="button" class="btn btn-danger btn-xs" onclick="clearEditProdImg(${idx})">Remove</button>`:''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+async function handleEditProdImg(prodIdx,input){
+  if(!input||!input.files||!input.files[0]) return;
+  const order=orders.find(function(x){return x&&x.id===_editOrderId;});
+  if(!order) return;
+  try{
+    const compressed=await new Promise(function(resolve,reject){
+      const reader=new FileReader();
+      reader.onload=function(e){compressImage(e.target.result,1280,0.88).then(resolve).catch(reject);};
+      reader.onerror=reject;
+      reader.readAsDataURL(input.files[0]);
+    });
+    _editProdImages[String(prodIdx)]=compressed;
+    renderEditProductImageList(order);
+    // Upgrade to remote URL in background for cross-device reliability.
+    setTimeout(async function(){
+      try{
+        const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
+        if(!uploaded||uploaded===compressed) return;
+        _editProdImages[String(prodIdx)]=uploaded;
+        const live=orders.find(function(x){return x&&x.id===_editOrderId;});
+        if(live) renderEditProductImageList(live);
+      }catch(_e){}
+    },0);
+  }catch(err){
+    toast('Image prepare failed: '+(err&&err.message?err.message:'unknown'),'err');
+  }finally{
+    input.value='';
+  }
+}
+function clearEditProdImg(prodIdx){
+  const order=orders.find(function(x){return x&&x.id===_editOrderId;});
+  if(!order) return;
+  _editProdImages[String(prodIdx)]=null;
+  renderEditProductImageList(order);
+}
 function openEditModal(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
+  _editOrderId=o.id;
+  _editProdImages={};
   document.getElementById('e-name').value=o.name||'';document.getElementById('e-phone').value=o.phone||'';
   document.getElementById('e-addr').value=o.address||'';document.getElementById('e-city').value=o.city||'';
   document.getElementById('e-post').value=o.postcode||'';document.getElementById('e-state').value=o.state||'';
@@ -3686,9 +3945,16 @@ function openEditModal(){
   document.getElementById('e-status').value=o.status||'New';document.getElementById('e-note').value=o.note||'';
   const resSel=document.getElementById('e-reseller');resSel.innerHTML='<option value="">— None —</option>'+users.filter(u=>u.role==='Reseller').map(u=>`<option value="${u.id}" ${o.resellerId===u.id?'selected':''}>${esc(u.dname||u.email)}</option>`).join('');
   const supSel=document.getElementById('e-supplier2');supSel.innerHTML='<option value="">— Select —</option>'+suppliers.map(s=>`<option value="${s.id}" ${o.supplierId===s.id?'selected':''}>${esc(s.name)}</option>`).join('');
+  renderEditProductImageList(o);
   document.getElementById('edit-modal').classList.add('open');
 }
-function closeEditModal(){document.getElementById('edit-modal').classList.remove('open');}
+function closeEditModal(){
+  document.getElementById('edit-modal').classList.remove('open');
+  _editOrderId=null;
+  _editProdImages={};
+  const list=document.getElementById('e-prod-imgs');
+  if(list) list.innerHTML='';
+}
 function saveEdit(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();
@@ -3701,6 +3967,14 @@ function saveEdit(){
   o.fblink=document.getElementById('e-fblink').value.trim();o.status=document.getElementById('e-status').value;
   o.note=document.getElementById('e-note').value.trim();o.resellerId=document.getElementById('e-reseller').value;
   o.supplierId=document.getElementById('e-supplier2').value;
+  const prods=Array.isArray(o.products)?o.products:[];
+  Object.keys(_editProdImages).forEach(function(key){
+    const idx=Number(key);
+    if(!Number.isInteger(idx)||idx<0||!prods[idx]) return;
+    const nextImg=String(_editProdImages[key]||'').trim();
+    prods[idx].img=nextImg||null;
+  });
+  o.products=prods;
   if(oldStatus!=='Shipped'&&o.status==='Shipped'&&o.resellerId&&notifSettings.shipped){
     setTimeout(()=>{if(confirm('Send shipping notification to reseller?'))triggerResellerNotif(o,'shipped');},300);
   }
@@ -3888,6 +4162,10 @@ function startBCNCamera(){
   const wrap=document.getElementById('camera-wrap-bcn');
   const video=document.getElementById('camera-video-bcn');
   const status=document.getElementById('camera-status-bcn');
+  if(_bcnStream){
+    wrap.style.display='block';
+    return;
+  }
   navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}})
     .then(stream=>{
       _bcnStream=stream;
@@ -3895,7 +4173,10 @@ function startBCNCamera(){
       wrap.style.display='block';
       if('BarcodeDetector' in window){
         const detector=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','qr_code','data_matrix','itf','codabar']});
+        _bcnDetectBusy=false;
         _bcnInterval=setInterval(async()=>{
+          if(_bcnDetectBusy||!video||video.readyState<2) return;
+          _bcnDetectBusy=true;
           try{
             const bc=await detector.detect(video);
             if(bc.length>0){
@@ -3910,8 +4191,10 @@ function startBCNCamera(){
               }
               toast('📷 CN scanned — tap 💾 to save','ok');
             }
-          }catch(e){}
-        },500);
+          }catch(e){}finally{
+            _bcnDetectBusy=false;
+          }
+        },SCAN_DETECT_INTERVAL_MS);
       } else {
         status.textContent='Camera active — type CN manually';
       }
@@ -3922,15 +4205,90 @@ function startBCNCamera(){
 function stopBCNCamera(){
   if(_bcnStream){_bcnStream.getTracks().forEach(t=>t.stop());_bcnStream=null;}
   if(_bcnInterval){clearInterval(_bcnInterval);_bcnInterval=null;}
+  _bcnDetectBusy=false;
   const wrap=document.getElementById('camera-wrap-bcn');
   if(wrap) wrap.style.display='none';
 }
 
 // ── BARCODE ──
 let _depotPhotoOrderId=null, _depotPhotoProdIdx=null;
+let _barcodePendingConfirm=null;
 
+function normalizeTrackingInput(raw){
+  return String(raw||'').trim().toUpperCase().replace(/\s+/g,'');
+}
+function isLikelyTrackingCode(raw){
+  const v=normalizeTrackingInput(raw);
+  if(!v) return false;
+  if(v.length<8||v.length>40) return false;
+  if(!/^[A-Z0-9-]+$/.test(v)) return false;
+  if(/^(0+|1+|X+)$/.test(v)) return false;
+  return true;
+}
+function setBarcodePendingConfirm(orderId,prodIdx,scannedCode){
+  _barcodePendingConfirm={orderId:String(orderId||''),prodIdx:Math.max(0,Number(prodIdx)||0),code:normalizeTrackingInput(scannedCode),ts:Date.now()};
+}
+function clearBarcodePendingConfirm(){
+  _barcodePendingConfirm=null;
+}
+function confirmBarcodeArrival(){
+  if(!_barcodePendingConfirm) return;
+  confirmSingleBarcodeScan(_barcodePendingConfirm.orderId,_barcodePendingConfirm.prodIdx);
+}
+function cancelBarcodePendingConfirm(){
+  clearBarcodePendingConfirm();
+  const result=document.getElementById('barcode-result');
+  if(result){
+    result.innerHTML='<div style="background:var(--yellow-bg);border:1px solid var(--yellow-border);border-radius:9px;padding:11px;font-size:12px;color:#854d0e;">Scan cancelled. Please rescan the parcel barcode.</div>';
+  }
+  const inp=document.getElementById('barcode-input');
+  if(inp){inp.value='';inp.focus();}
+}
+function confirmSingleBarcodeScan(orderId,prodIdx){
+  const o=orders.find(x=>x&&x.id===orderId);
+  if(!o||!Array.isArray(o.products)||!o.products.length) return;
+  const idx=Math.max(0,Number(prodIdx)||0);
+  const prod=o.products[idx]||o.products[0];
+  if(!prod) return;
+  const code=normalizeTrackingInput(prod.cnTracking||o.cnTracking||'');
+  if(!isLikelyTrackingCode(code)){
+    toast('⚠️ Geçersiz barkod formatı. Kodu kontrol edin.','err');
+    return;
+  }
+  const duplicate=orders.find(function(row){
+    if(!row||row.id===o.id) return false;
+    return (row.products||[]).some(function(p){
+      return normalizeTrackingInput(p&&p.cnTracking)===code;
+    }) || normalizeTrackingInput(row.cnTracking)===code;
+  });
+  if(duplicate){
+    const ref=duplicate.ref||String(duplicate.id||'').slice(-6);
+    const okDup=confirm('⚠️ Bu CN başka siparişte mevcut: '+ref+'\nYine de devam edilsin mi?');
+    if(!okDup) return;
+  }
+  const wasArrived=!!prod.arrived;
+  prod.arrived=true;
+  if(idx===0||!o.cnTracking) o.cnTracking=code;
+  if(['New','Sent to Factory'].includes(o.status)) o.status='At Depot';
+  o.updatedAt=Date.now();
+  saveOrders([o.id]);updateBadges();
+  const shelf=getShelfStatus(o);
+  if(!wasArrived){
+    if(shelf.ready){
+      toast(`🎉 All items arrived! ${o.name} — Ready to Ship!`,'ok');
+      if(notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
+    } else {
+      toast(`📦 ${(prod.name||'Item')} arrived (${shelf.arrived}/${shelf.total})`,'ok');
+    }
+  }
+  clearBarcodePendingConfirm();
+  document.getElementById('barcode-input').value='';
+  document.getElementById('barcode-input').focus();
+  showBarcodeResult(o,idx);
+}
 function setScanMode(mode){
   _scanMode='find';stopCamera();
+  clearBarcodePendingConfirm();
   document.getElementById('barcode-result').innerHTML='';
   document.getElementById('depot-photo-section').style.display='none';
   document.getElementById('depot-photo-preview').innerHTML='';
@@ -3945,12 +4303,20 @@ function updateProdSelect(){/* Add CN mode removed - now in Bulk CN Tracking */}
 async function startCamera(){
   const wrap=document.getElementById('camera-wrap'),video=document.getElementById('camera-video'),
         btn=document.getElementById('btn-camera'),status=document.getElementById('camera-status');
+  if(_cameraStream){
+    if(wrap) wrap.style.display='block';
+    if(btn) btn.style.display='none';
+    return;
+  }
   try{
     _cameraStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}});
     video.srcObject=_cameraStream;wrap.style.display='block';btn.style.display='none';status.textContent='Scanning…';
     if('BarcodeDetector' in window){
       const detector=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','qr_code','data_matrix','itf','codabar']});
+      _barcodeDetectBusy=false;
       _barcodeInterval=setInterval(async()=>{
+        if(_barcodeDetectBusy||!video||video.readyState<2) return;
+        _barcodeDetectBusy=true;
         try{
           const bc=await detector.detect(video);
           if(bc.length>0){
@@ -3960,8 +4326,10 @@ async function startCamera(){
             if(inp){inp.value=val;barcodeSearch();}
             toast('📷 '+val,'ok');playSound('scan');
           }
-        }catch(e){}
-      },500);
+        }catch(e){}finally{
+          _barcodeDetectBusy=false;
+        }
+      },SCAN_DETECT_INTERVAL_MS);
     } else status.textContent='Camera active — type manually.';
   } catch(err){
     console.warn('Camera error:',err);
@@ -3972,6 +4340,7 @@ async function startCamera(){
 function stopCamera(){
   if(_cameraStream){_cameraStream.getTracks().forEach(t=>t.stop());_cameraStream=null;}
   if(_barcodeInterval){clearInterval(_barcodeInterval);_barcodeInterval=null;}
+  _barcodeDetectBusy=false;
   const wrap=document.getElementById('camera-wrap'),btn=document.getElementById('btn-camera');
   if(wrap)wrap.style.display='none';if(btn)btn.style.display='flex';
 }
@@ -4009,32 +4378,28 @@ function barcodeSearch(){
 
   // ✅ KEY: Auto-mark the found product as arrived
   if(foundProdIdx>=0&&found.products[foundProdIdx]){
-    const wasArrived=found.products[foundProdIdx].arrived;
-    found.products[foundProdIdx].arrived=true;
-    // Mark order At Depot if not already
-    if(['New','Sent to Factory'].includes(found.status)) found.status='At Depot';
-    saveOrders();updateBadges();
-
-    // Check if all arrived now
-    const shelf=getShelfStatus(found);
-    if(!wasArrived){
-      if(shelf.ready){
-        toast(`🎉 All items arrived! ${found.name} — Ready to Ship!`,'ok');
-        if(notifSettings.depot&&found.resellerId) triggerResellerNotif(found,'depot');
-      } else {
-        toast(`📦 ${found.products[foundProdIdx].name||'Item'} arrived (${shelf.arrived}/${shelf.total})`,'ok');
-      }
+    const scannedCode=normalizeTrackingInput(val);
+    if(scannedCode && !isLikelyTrackingCode(scannedCode)){
+      toast('⚠️ Barkod formatı şüpheli. Tekrar okutun.','err');
+      return;
     }
+    if(scannedCode && !normalizeTrackingInput(found.products[foundProdIdx].cnTracking)){
+      found.products[foundProdIdx].cnTracking=scannedCode;
+      if(foundProdIdx===0||!found.cnTracking) found.cnTracking=scannedCode;
+    }
+    setBarcodePendingConfirm(found.id,foundProdIdx,scannedCode||found.products[foundProdIdx].cnTracking||'');
   } else if(['New','Sent to Factory'].includes(found.status)){
-    // Single product — mark at depot
-    found.status='At Depot';
-    if(found.products[0]) found.products[0].arrived=true;
-    saveOrders();updateBadges();
-    toast(`🏭 ${found.name} — Marked At Depot`,'ok');
+    const scannedCode=normalizeTrackingInput(val);
+    if(scannedCode && !isLikelyTrackingCode(scannedCode)){
+      toast('⚠️ Barkod formatı şüpheli. Tekrar okutun.','err');
+      return;
+    }
+    if(found.products[0] && scannedCode){
+      found.products[0].cnTracking=found.products[0].cnTracking||scannedCode;
+      found.cnTracking=found.cnTracking||scannedCode;
+    }
+    setBarcodePendingConfirm(found.id,0,scannedCode||found.cnTracking||'');
   }
-
-  document.getElementById('barcode-input').value='';
-  document.getElementById('barcode-input').focus();
   showBarcodeResult(found, foundProdIdx);
 }
 
@@ -4069,6 +4434,15 @@ function showBarcodeResult(o, prodIdx){
 
   // Action buttons
   let actionBtns='';
+  const pendingConfirm=(window._barcodePendingConfirm&&window._barcodePendingConfirm.orderId===o.id)?window._barcodePendingConfirm:null;
+  const confirmBox=pendingConfirm?`<div style="background:var(--yellow-bg);border:1px solid var(--yellow-border);border-radius:8px;padding:10px;margin-bottom:10px;">
+    <div style="font-size:12px;font-weight:700;color:#854d0e;margin-bottom:6px;">⚠️ Confirm scan before saving</div>
+    <div style="font-size:12px;color:#854d0e;">Scanned: <span style="font-family:var(--mono);font-weight:800;">${esc(pendingConfirm.code||'')}</span></div>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button class="btn btn-green btn-xs" onclick="confirmBarcodeArrival()">✅ Confirm</button>
+      <button class="btn btn-ghost btn-xs" onclick="cancelBarcodePendingConfirm()">✕ Cancel</button>
+    </div>
+  </div>`:'';
   if(['New','Sent to Factory'].includes(o.status)){
     actionBtns=`<button class="btn btn-primary btn-sm" style="width:100%;justify-content:center;" onclick="quickMarkDepot('${o.id}')">🏭 Mark At Depot</button>`;
   } else if(o.status==='At Depot'&&!allArrived&&prods.length>1){
@@ -4091,6 +4465,7 @@ function showBarcodeResult(o, prodIdx){
       <div style="font-size:11px;color:var(--accent);font-family:var(--mono);margin-bottom:6px;">${esc(o.ref||o.id.slice(-6))}</div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:10px;white-space:pre-line;">${addr}</div>
       ${shelfHtml}
+      ${confirmBox}
       ${actionBtns}
     </div>`;
 
@@ -4109,7 +4484,7 @@ function markProdArrivedBarcode(orderId, prodIdx){
   if(!o.products[prodIdx]) return;
   o.products[prodIdx].arrived=true;
   const shelf=getShelfStatus(o);
-  saveOrders();updateBadges();
+  saveOrders([o.id]);updateBadges();
   if(shelf.ready){
     toast('🎉 All items arrived! Ready for logistics.','ok');
     if(notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
@@ -4127,11 +4502,13 @@ function copyAddressFromBarcode(orderId){
   // Status progression based on current status
   if(['New','Sent to Factory'].includes(o.status)){
     o.status='At Depot';
-    saveOrders();updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🏭 Status: At Depot','info');
   } else if(o.status==='At Depot'){
     o.status='Sent to Logistics';
-    saveOrders();updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🚛 Status: Sent to Logistics','info');
   }
 }
@@ -4314,7 +4691,7 @@ async function downloadImage(src, name){
   const m=String(src||'').match(/\/api\/image\/([^?#]+)/);
   if(!m){toast('⚠️ Image URL invalid','err');return;}
   const id=decodeURIComponent(m[1]);
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   const headers=getAuthHeaders();
   try{
     const res=await fetch(api+'/api/image/'+id,{headers});
@@ -4352,7 +4729,7 @@ function saveDepotPhoto(input){
     if(o&&o.products&&o.products[_depotPhotoProdIdx]){
       o.products[_depotPhotoProdIdx].depotPhoto=img;
       if(o.status==='New'||o.status==='Sent to Factory') o.status='At Depot';
-      saveOrders();
+      saveOrders([o.id]);
       logActivity('tracking',`Depot photo added for ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
       toast('✅ Photo saved!','ok');
     }
@@ -4384,6 +4761,13 @@ function addAnotherPhoto(){
   document.getElementById('depot-skip-btn').style.display='block';
 }
 
+function persistScannerOrderChange(orderId){
+  const id=String(orderId||'').trim();
+  if(!id) return;
+  // Let UI feedback paint first; saveOrders does heavy sync prep on main thread.
+  setTimeout(function(){ saveOrders([id]); },0);
+}
+
 async function copyAndMarkLogistics(){
   const o=orders.find(x=>x.id===_depotPhotoOrderId);if(!o)return;
   o.updatedAt=Date.now();
@@ -4399,7 +4783,8 @@ async function copyAndMarkLogistics(){
     // Mark all products as arrived if not already
     prods.forEach(p=>p.arrived=true);
     o.status='At Depot'; // stays at depot, shelf.ready = true = "Ready to Ship"
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     logActivity('status',`All items marked arrived, Ready to Ship: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     if(notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
     toast('📋 Address copied! Order is Ready to Ship.','ok');
@@ -4414,7 +4799,8 @@ async function copyAndMarkLogistics(){
   } else {
     // Single product: At Depot → Sent to Logistics directly
     o.status='Sent to Logistics';
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     logActivity('status',`Sent to Logistics (barcode scan): ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     if(notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
     toast('📋 Address copied & Sent to Logistics!','ok');
@@ -4432,7 +4818,8 @@ async function copyAndMarkLogistics(){
 async function markSentLogisticsFromBarcode(orderId){
   const o=orders.find(x=>x.id===orderId);if(!o)return;o.updatedAt=Date.now();
   o.status='Sent to Logistics';
-  await saveOrders([o.id]);updateBadges();
+  updateBadges();
+  persistScannerOrderChange(o.id);
   logActivity('status',`Sent to Logistics: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   if(notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
   toast('🚛 Sent to Logistics!','ok');
@@ -4452,11 +4839,13 @@ async function copyAddressOnly(){
   // Status progression based on current status
   if(['New','Sent to Factory'].includes(o.status)){
     o.status='At Depot';
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🏭 Status: At Depot','info');
   } else if(o.status==='At Depot'){
     o.status='Sent to Logistics';
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🚛 Status: Sent to Logistics','info');
   }
 }
@@ -4465,7 +4854,9 @@ async function copyAddressOnly(){
 async function quickMarkDepot(id){
   const o=orders.find(x=>x.id===id);if(!o)return;
   o.updatedAt=Date.now();
-  o.status='At Depot';await saveOrders([o.id]);updateBadges();
+  o.status='At Depot';
+  updateBadges();
+  persistScannerOrderChange(o.id);
   toast('✅ At Depot!','ok');
   showBarcodeResult(o,-1);
 }
@@ -4531,7 +4922,7 @@ async function sendBulkMessage(resellerIdsStr, btn){
   
   if(btn){btn.disabled=true;btn.textContent='Sending...';}
   
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   
   let sent = 0;
   for(const resId of resellerIds){
@@ -5041,7 +5432,7 @@ async function uploadProdImages(){
     const src=prodImages[idx];
     if(src && src.startsWith('data:')){
       try{
-        const res=await fetch('/api/image',{
+        const res=await fetch(apiUrl('/api/image'),{
           method:'POST',
           headers:getAuthHeaders({'Content-Type':'application/json'}),
           body:JSON.stringify({data:src,type:'image/jpeg'})
@@ -5049,7 +5440,7 @@ async function uploadProdImages(){
         if(res.ok){
           const d=await res.json();
           if(d.url||d.id){
-            prodImages[idx]=d.url||('/api/image/'+d.id);
+            prodImages[idx]=d.url||apiUrl('/api/image/'+d.id);
           }else{
             prodImages[idx]=src;
           }
@@ -5090,7 +5481,13 @@ async function saveOrder(){
   const prods=collectProducts();if(!prods.length){toast('⚠️ Add at least one product','err');return;}
   const o={id:'o'+Date.now()+Math.random().toString(36).substr(2,4),updatedAt:Date.now(),ref,name,phone:document.getElementById('f-phone').value.trim(),address:addr,city,state:document.getElementById('f-state').value.trim(),postcode:post,country:document.getElementById('f-country').value.trim()||'GB',email:document.getElementById('f-cemail').value.trim(),fblink:document.getElementById('f-fblink').value.trim(),supplierId:document.getElementById('f-supplier').value,resellerId:document.getElementById('f-reseller').value,products:prods,status:'New',ts:Date.now(),cnTracking:null,ukTracking:null,note:''};
   // Local-first save for instant UX; media upload + cloud sync runs async.
-  orders.unshift(o);saveOrders([o.id]);runProdImageUploadAsync(o.id);closeOrderModal();render();selectOrder(o.id);
+  orders.unshift(o);
+  markLocalOrderMutation(o.id,'upsert',{opId:createLocalMutationOpId('create')});
+  saveOrders([o.id]);
+  runProdImageUploadAsync(o.id);
+  closeOrderModal();
+  render();
+  selectOrder(o.id);
   logActivity('created',`Order created: ${esc(o.ref)} for ${esc(o.name)}`,o.id);
   toast('✅ Order saved!','ok');
 }
@@ -5101,6 +5498,14 @@ function saveSettings(){
   settings.alertDays=parseInt(g('cfg-alert-days')?.value)||3;
   settings.sessionTimeout=parseInt(g('cfg-session-timeout')?.value)||30;
   settings.messengerLink=g('cfg-messenger-link')?.value.trim()||'';
+  const cloudApi=(g('cfg-cloud-api')?.value||'').trim();
+  const cloudKey=(g('cfg-cloud-key')?.value||'').trim();
+  try{
+    localStorage.setItem('jb_cloud_api',cloudApi||location.origin);
+    if(cloudKey) localStorage.setItem('jb_cloud_key',cloudKey);
+    else localStorage.removeItem('jb_cloud_key');
+  }catch(_e){}
+  renderCloudApiSummary();
   localStorage.setItem('jb_settings',JSON.stringify(settings));
   syncGenericKeyToCloud('jb_settings',settings,{opId:createLocalMutationOpId('settings')}).catch(function(){});
   _sessionTimeout=(settings.sessionTimeout)*60*1000;
@@ -5112,13 +5517,13 @@ function loadSettings(){
   if(g('cfg-alert-days')) g('cfg-alert-days').value=settings.alertDays||3;
   if(g('cfg-session-timeout')) g('cfg-session-timeout').value=settings.sessionTimeout||30;
   if(g('cfg-messenger-link')) g('cfg-messenger-link').value=settings.messengerLink||'';
-  if(g('cfg-firebase-enabled')) g('cfg-firebase-enabled').checked=getFirebaseEnabled();
-  if(g('cfg-firebase-config')) g('cfg-firebase-config').value=localStorage.getItem('jb_firebase_config')||'';
+  if(g('cfg-cloud-api')) g('cfg-cloud-api').value=localStorage.getItem('jb_cloud_api')||location.origin;
+  if(g('cfg-cloud-key')) g('cfg-cloud-key').value=localStorage.getItem('jb_cloud_key')||'';
+  renderCloudApiSummary();
   if(g('sound-toggle-btn')) g('sound-toggle-btn').textContent=_soundEnabled?'🔔 Sounds On':'🔕 Sounds Off';
 }
 function applyUsersRealtime(nextUsers){
-  users=normalizeUsersList(Array.isArray(nextUsers)?nextUsers:[]);
-  try{localStorage.setItem('jb_users',JSON.stringify(users));}catch(_e){}
+  users=persistUsersLocalSafe(Array.isArray(nextUsers)?nextUsers:[],'realtime');
   if(me&&me.id){
     const fresh=users.find(function(u){return u&&u.id===me.id;});
     if(fresh){
@@ -5178,9 +5583,16 @@ function extractBackupPayload(raw){
 function importBackup(input){
   if(!input.files||!input.files[0]) return;
   const reader=new FileReader();
-  reader.onload=e=>{
+  reader.onload=async e=>{
+    let raw=null;
     try{
-      const raw=JSON.parse(e.target.result);
+      raw=JSON.parse(e.target.result);
+    }catch(_parseErr){
+      toast('❌ Invalid backup file','err');
+      input.value='';
+      return;
+    }
+    try{
       const payload=extractBackupPayload(raw);
       const importedCount=Array.isArray(payload.orders)?payload.orders.length:0;
       if(!importedCount){
@@ -5195,7 +5607,12 @@ function importBackup(input){
       orders=(payload.orders||[]).map(function(o){
         return {...o,status:normStatus(o&&o.status),updatedAt:(o&&o.updatedAt)||(o&&o.ts)||Date.now()};
       });
-      if(Array.isArray(payload.users)&&payload.users.length) users=payload.users;
+      if(Array.isArray(payload.users)&&payload.users.length){
+        // Never let backup import wipe richer local reseller user list.
+        users=mergeUsersSafely(users,payload.users);
+      }else{
+        users=normalizeUsersList(users);
+      }
       if(Array.isArray(payload.suppliers)&&payload.suppliers.length) suppliers=payload.suppliers;
       if(Array.isArray(payload.catalog)&&payload.catalog.length) catalog=payload.catalog;
       templates=payload.templates||templates||{};
@@ -5203,20 +5620,62 @@ function importBackup(input){
       notifSettings={...(notifSettings||{}),...(payload.notifSettings||{})};
 
       // Persist locally first so restore is instant even if cloud/auth is degraded.
-      localStorage.setItem('jb_orders',JSON.stringify(orders));
-      localStorage.setItem('jb_users',JSON.stringify(users));
-      localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));
-      localStorage.setItem('jb_catalog',JSON.stringify(catalog));
-      localStorage.setItem('jb_templates',JSON.stringify(templates));
-      localStorage.setItem('jb_settings',JSON.stringify(settings));
-      localStorage.setItem('jb_notif',JSON.stringify(notifSettings));
+      const safeSet=function(key,val){
+        try{
+          localStorage.setItem(key,JSON.stringify(val));
+          return true;
+        }catch(err){
+          console.warn('[backup import setItem]',key,err&&err.message?err.message:err);
+          return false;
+        }
+      };
+      safeSet('jb_orders',orders);
+      safeSet('jb_users',users);
+      safeSet('jb_suppliers',suppliers);
+      safeSet('jb_catalog',catalog);
+      safeSet('jb_templates',templates);
+      safeSet('jb_settings',settings);
+      safeSet('jb_notif',notifSettings);
 
       loadSettings();loadTemplates();loadNotifSettings();
       updateBadges();render();
       markSync('backup_import');
       toast(`✅ Backup imported: ${orders.length} orders`,'ok');
+      try{
+        const api=await ensureWorkingApiBase({silent:true,force:true});
+        const backupPayload={orders,users,suppliers,catalog,templates,settings,notifSettings,ts:Date.now()};
+        const bulkRes=await fetchWithTimeout(
+          api+'/api/orders/bulk',
+          {
+            method:'POST',
+            headers:getAuthHeaders({'Content-Type':'application/json'}),
+            body:JSON.stringify(backupPayload)
+          },
+          25000
+        );
+        if(!bulkRes.ok){
+          throw new Error('backup_import_http_'+bulkRes.status);
+        }
+        let bulkPayload={};
+        try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
+        if(!(bulkPayload&&bulkPayload.ok)){
+          throw new Error(String((bulkPayload&&bulkPayload.error)||'backup_import_failed'));
+        }
+        await flushLocalSyncFallback().catch(()=>{});
+        await loadFromCloudSilent().catch(()=>{});
+        const syncedOrders=Number(bulkPayload.orders)||orders.length;
+        toast(`✅ Backup saved to Cloudflare (${syncedOrders} orders)`,'ok');
+      }catch(syncErr){
+        console.error('[backup import cloud sync]', syncErr);
+        // Fallback to legacy row-by-row push if bulk endpoint is temporarily unavailable.
+        await saveAllToCloud().catch(()=>{});
+        await flushLocalSyncFallback().catch(()=>{});
+        await loadFromCloudSilent().catch(()=>{});
+        toast('⚠️ Used fallback cloud sync for backup import','info');
+      }
     }catch(err){
-      toast('❌ Invalid backup file','err');
+      console.error('[importBackup]',err);
+      toast('❌ Backup import failed: '+((err&&err.message)||String(err)),'err');
     }finally{
       input.value='';
     }
@@ -5778,7 +6237,7 @@ async function shareCatalog(){
   try{
     // Load fresh from cloud first
     try{
-      const api=getApiBase();
+      const api=await ensureWorkingApiBase({silent:true});
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(res.ok){
         const {data}=await res.json();
@@ -5789,7 +6248,7 @@ async function shareCatalog(){
     catalog=catalog||JSON.parse(localStorage.getItem('jb_catalog')||'[]');
     if(!catalog||!catalog.length){toast('Add products first!','err');return;}
     
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     
     // Upload images to cloud first (convert base64 to URLs)
     const hasInlineCatalogImages=(catalog||[]).some(function(item){
@@ -6551,7 +7010,7 @@ function sendOrder(){
   if(MESSENGER_LINK)window.open(MESSENGER_LINK,'_blank');
   alert('\u2705 Order code copied: '+orderCode);
   cart=[];updateCartBadge();
-  try{fetch('/api/catalog-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orderData)});}catch(e){}
+  try{fetch(apiUrl('/api/catalog-order'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orderData)});}catch(e){}
 }
 init();
 <\/script>
@@ -6626,7 +7085,7 @@ function importOrderFromCode(){
       return;
     }
     toast('🔍 Looking up order...','info');
-    fetch('/api/catalog-order/'+code,{headers:getAuthHeaders()})
+    fetch(apiUrl('/api/catalog-order/'+code),{headers:getAuthHeaders()})
       .then(r => r.json())
       .then(data => {
         if(data && data.code){
@@ -6756,7 +7215,8 @@ function confirmImportOrder(encoded){
     ukTracking:''
   };
   orders.unshift(newOrder);
-  saveOrders();
+  markLocalOrderMutation(newOrder.id,'upsert',{opId:createLocalMutationOpId('import')});
+  saveOrders([newOrder.id]);
   updateBadges();
   render();
   logActivity('created',`Order imported from catalog: ${newOrder.ref} (${newOrder.name})`,newOrder.id);
@@ -6966,6 +7426,8 @@ async function submitResellerOrder(){
     pendingApproval:true
   };
   orders.unshift(o);
+  markLocalOrderMutation(o.id,'upsert',{opId:createLocalMutationOpId('rescreate')});
+  markSync('reseller_order_local_submit');
   await saveOrders([o.id]);
   updateBadges();
   logActivity('order_request',`Order request submitted by ${me.dname||me.email}: ${esc(o.ref)} for ${esc(name)}`,o.id);
@@ -7002,7 +7464,7 @@ async function trackOrder(){
   // Load from cloud if orders empty
   if(!orders.length){
     try{
-      const api=getApiBase();
+      const api=await ensureWorkingApiBase({silent:true});
       // Önce /api/orders dene
       try{
         const r1=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
@@ -7094,11 +7556,71 @@ async function trackOrder(){
 const CLOUD_API_DEFAULT=location.origin;
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
+let _apiBaseCheckInFlight=null;
+let _apiBaseCheckedAt=0;
+const API_BASE_CHECK_COOLDOWN_MS=60*1000;
 function getApiBase(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
   if(getFirebaseEnabled()) return location.origin;
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
   return CLOUD_API_DEFAULT;
+}
+function isApiEndpointReachableResponse(res){
+  if(!res) return false;
+  // Treat only successful responses as healthy API endpoints.
+  // 5xx (especially 503) must trigger origin fallback.
+  return !!res.ok;
+}
+async function ensureWorkingApiBase(opts={}){
+  const force=!!opts.force;
+  const now=Date.now();
+  if(!force && (now-_apiBaseCheckedAt)<API_BASE_CHECK_COOLDOWN_MS){
+    return getApiBase();
+  }
+  if(_apiBaseCheckInFlight) return _apiBaseCheckInFlight;
+  _apiBaseCheckInFlight=(async function(){
+    const configured=getApiBase();
+    const origin=location.origin.replace(/\/$/,'');
+    try{
+      if(configured===origin){
+        return configured;
+      }
+      let configuredReachable=false;
+      try{
+        const r=await fetchWithTimeout(configured+'/api/test',{headers:getAuthHeaders()},4000);
+        configuredReachable=isApiEndpointReachableResponse(r);
+      }catch(_e){}
+      if(configuredReachable){
+        return configured;
+      }
+      let originReachable=false;
+      try{
+        const r2=await fetchWithTimeout(origin+'/api/test',{headers:getAuthHeaders()},4000);
+        originReachable=isApiEndpointReachableResponse(r2);
+      }catch(_e){}
+      if(originReachable){
+        try{localStorage.setItem('jb_cloud_api',origin);}catch(_e){}
+        renderCloudApiSummary();
+        if(!opts.silent) toast('ℹ️ API URL auto-corrected to current domain','info');
+        return origin;
+      }
+      return configured;
+    }finally{
+      _apiBaseCheckedAt=Date.now();
+      _apiBaseCheckInFlight=null;
+    }
+  })();
+  return _apiBaseCheckInFlight;
+}
+function renderCloudApiSummary(){
+  const el=document.getElementById('cfg-cloud-active');
+  if(!el) return;
+  const api=(localStorage.getItem('jb_cloud_api')||'').trim()||location.origin;
+  const hasKey=!!(localStorage.getItem('jb_cloud_key')||'').trim();
+  el.textContent=`Active API base: ${api} · API key: ${hasKey?'set':'not set'}`;
+}
+function apiUrl(path){
+  return ((localStorage.getItem('jb_cloud_api')||'').trim()||location.origin)+String(path||'');
 }
 function getAuthHeaders(extra){
   const headers={...(extra||{})};
@@ -7202,7 +7724,7 @@ async function flushLocalSyncFallback(){
           try{
             let res=null;
             if(op.op==='delete'){
-              res=await fetch('/api/order/'+encodeURIComponent(op.orderId),{
+              res=await fetch(apiUrl('/api/order/'+encodeURIComponent(op.orderId)),{
                 method:'DELETE',
                 headers:getAuthHeaders({'Content-Type':'application/json'}),
                 body:JSON.stringify({
@@ -7213,7 +7735,7 @@ async function flushLocalSyncFallback(){
                 })
               });
             }else{
-              res=await fetch('/api/order',{
+              res=await fetch(apiUrl('/api/order'),{
                 method:'POST',
                 headers:getAuthHeaders({'Content-Type':'application/json'}),
                 body:JSON.stringify({
@@ -7254,7 +7776,7 @@ async function flushLocalSyncFallback(){
         for(const ev of events){
           if(!ev||!ev.orderId) continue;
           try{
-            const res=await fetch('/api/order-event',{
+            const res=await fetch(apiUrl('/api/order-event'),{
               method:'POST',
               headers:getAuthHeaders({'Content-Type':'application/json'}),
               body:JSON.stringify(ev)
@@ -7288,7 +7810,7 @@ async function flushLocalSyncFallback(){
         for(const ev of events){
           if(!ev||!ev.key) continue;
           try{
-            const res=await fetch('/api/sync',{
+            const res=await fetch(apiUrl('/api/sync'),{
               method:'POST',
               headers:getAuthHeaders({'Content-Type':'application/json'}),
               body:JSON.stringify({
@@ -7316,7 +7838,7 @@ async function flushLocalSyncFallback(){
         }
         continue;
       }
-      const res=await fetch('/api/sync',{
+      const res=await fetch(apiUrl('/api/sync'),{
         method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({key,value:entry&&Object.prototype.hasOwnProperty.call(entry,'value')?entry.value:null})
@@ -7433,19 +7955,26 @@ function buildGenericEventDoc(key,value,meta={}){
   };
 }
 async function syncToCloud(key,value){
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   let parsed=value;
   let eventDoc=null;
   try{
     try{parsed=JSON.parse(value);}catch{parsed=value;}
     // For cloud: strip base64 (too large), keep only http URLs
     // Local storage keeps full base64 images
+    const keepCloudOrderImageRef=function(src){
+      const v=String(src||'').trim();
+      if(!v) return null;
+      if(/^(https?:|data:|blob:)/i.test(v)) return v;
+      if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(v)) return v.startsWith('/')?v:('/'+v);
+      return null;
+    };
     let cloudValue=parsed;
     if(key==='jb_orders'&&Array.isArray(parsed)){
       cloudValue=parsed.map(o=>({...o,
         products:(o.products||[]).map(p=>({...p,
-          img:p.img||null,
-          depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
+          img:keepCloudOrderImageRef(p&&p.img),
+          depotPhoto:keepCloudOrderImageRef(p&&p.depotPhoto)
         }))
       }));
     }
@@ -7472,7 +8001,7 @@ async function syncToCloud(key,value){
 }
 async function syncGenericKeyToCloud(key,value,meta={}){
   if(!key) return false;
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   let parsed=value;
   try{
     parsed=typeof value==='string'?JSON.parse(value):value;
@@ -7509,9 +8038,19 @@ async function syncGenericKeyToCloud(key,value,meta={}){
 }
 
 async function uploadToCloud(){
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true,force:true});
   try{
-    toast('Syncing to Firebase...','info');
+    toast('Syncing to Cloudflare...','info');
+    const testRes=await fetchWithTimeout(api+'/api/test',{headers:getAuthHeaders()},8000);
+    if(!testRes.ok){
+      throw new Error(`Cloud API test failed at ${api}/api/test (HTTP ${testRes.status})`);
+    }
+    let testPayload={};
+    try{testPayload=await testRes.json();}catch(_e){testPayload={};}
+    if(!testPayload || testPayload.ok!==true){
+      const reason=String((testPayload&&testPayload.message)||(testPayload&&testPayload.error)||'api_test_not_ready');
+      throw new Error(`Cloud API test not ready at ${api}/api/test (${reason})`);
+    }
     // Upload non-order data
     const payload={};
     for(const key of SYNC_KEYS){
@@ -7519,28 +8058,138 @@ async function uploadToCloud(){
       const val=localStorage.getItem(key);
       if(val){try{payload[key]=JSON.parse(val);}catch{payload[key]=val;}}
     }
-    await fetch(api+'/api/data',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
-    // Upload all orders individually
-    let saved=0;
-    for(const o of orders){
-      const clean={...o,products:(o.products||[]).map(p=>({...p,
-        img:p.img||null,
-        depotPhoto:(p.depotPhoto&&p.depotPhoto.startsWith('http'))?p.depotPhoto:null
-      }))};
-      try{
-        await fetch(api+'/api/order',{method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})});
-        saved++;
-      }catch(e){}
+    const dataSyncRes=await fetchWithTimeout(
+      api+'/api/data',
+      {method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)},
+      15000
+    );
+    if(!dataSyncRes.ok){
+      throw new Error(`${api}/api/data sync failed (HTTP ${dataSyncRes.status})`);
     }
-    toast(`✅ Synced ${saved} orders`,'ok');
-  }catch(e){toast('Sync failed','err');}
+    // Ensure every order has a unique id before row-level upload.
+    const seenOrderIds=new Set();
+    let fixedOrderIds=0;
+    const normalizedOrders=(Array.isArray(orders)?orders:[]).map(function(order,idx){
+      if(!order||typeof order!=='object') return null;
+      let id=String(order.id||'').trim();
+      if(!id || seenOrderIds.has(id)){
+        id='o'+Date.now().toString(36)+idx.toString(36)+Math.random().toString(36).slice(2,6);
+        fixedOrderIds++;
+      }
+      seenOrderIds.add(id);
+      if(id===String(order.id||'')) return order;
+      return {
+        ...order,
+        id,
+        updatedAt:Number(order.updatedAt||order.ts)||Date.now()
+      };
+    }).filter(Boolean);
+    if(fixedOrderIds>0){
+      orders=normalizedOrders;
+      persistOrdersLocalSafe(orders);
+      toast(`ℹ️ Fixed ${fixedOrderIds} duplicate/missing order IDs before sync`,'info');
+    }
+    // Prefer bulk endpoint for large snapshots (much faster than row-by-row upload).
+    let saved=0;
+    let lastOrderErr='';
+    let failedOrderIds=[];
+    let usedBulk=false;
+    if(normalizedOrders.length){
+      try{
+        const bulkRes=await fetchWithTimeout(
+          api+'/api/orders/bulk',
+          {
+            method:'POST',
+            headers:getAuthHeaders({'Content-Type':'application/json'}),
+            body:JSON.stringify({orders:normalizedOrders})
+          },
+          45000
+        );
+        let bulkPayload={};
+        try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
+        if(bulkRes.ok && bulkPayload && bulkPayload.ok){
+          usedBulk=true;
+          saved=Math.max(
+            0,
+            Number(bulkPayload.saved)||Number(bulkPayload.orders)||normalizedOrders.length
+          );
+        }else{
+          lastOrderErr=String((bulkPayload&&bulkPayload.error)||('HTTP '+bulkRes.status)||'bulk_sync_failed');
+        }
+      }catch(e){
+        lastOrderErr=String((e&&e.message)||e||'bulk_sync_error');
+      }
+    }
+    if(!usedBulk){
+      failedOrderIds=[];
+      for(const o of normalizedOrders){
+        const clean={...o,products:(o.products||[]).map(p=>({...p,
+          img:(function(v){
+            const s=String(v||'').trim();
+            if(!s) return null;
+            if(/^(https?:|data:|blob:)/i.test(s)) return s;
+            if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+            return null;
+          })(p&&p.img),
+          depotPhoto:(function(v){
+            const s=String(v||'').trim();
+            if(!s) return null;
+            if(/^(https?:|data:|blob:)/i.test(s)) return s;
+            if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+            return null;
+          })(p&&p.depotPhoto)
+        }))};
+        try{
+          const orderRes=await fetchWithTimeout(
+            api+'/api/order',
+            {method:'POST',headers:getAuthHeaders({'Content-Type':'application/json'}),body:JSON.stringify({order:clean})},
+            12000
+          );
+          if(!orderRes.ok){
+            lastOrderErr='HTTP '+orderRes.status;
+            failedOrderIds.push(String(o&&o.id||''));
+            continue;
+          }
+          saved++;
+        }catch(e){
+          lastOrderErr=String((e&&e.message)||e||'order_sync_error');
+          failedOrderIds.push(String(o&&o.id||''));
+        }
+      }
+    }
+    // Verify remote row count after upload; abort adopting smaller snapshots.
+    try{
+      const verifyRes=await fetchWithTimeout(api+'/api/orders',{headers:getAuthHeaders()},10000);
+      if(verifyRes.ok){
+        const verifyPayload=await verifyRes.json();
+        const remoteCount=Array.isArray(verifyPayload&&verifyPayload.orders)?verifyPayload.orders.length:0;
+        const localCount=normalizedOrders.length;
+        if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
+          throw new Error(`remote_count_mismatch ${remoteCount}/${localCount}`);
+        }
+      }
+    }catch(verifyErr){
+      lastOrderErr=String((verifyErr&&verifyErr.message)||verifyErr||'verify_failed');
+    }
+    if(lastOrderErr){
+      toast(`⚠️ Synced ${saved}/${orders.length} orders (last error: ${lastOrderErr})`,'err');
+      return {ok:false,saved,total:orders.length,lastOrderErr,failedOrderIds};
+    }else{
+      toast(`✅ Synced ${saved} orders to Cloudflare`,'ok');
+      return {ok:true,saved,total:orders.length,lastOrderErr:'',failedOrderIds:[]};
+    }
+  }catch(e){
+    markError(e);
+    toast('❌ Cloud sync failed: '+((e&&e.message)||String(e)),'err');
+    return {ok:false,saved:0,total:Array.isArray(orders)?orders.length:0,lastOrderErr:String((e&&e.message)||e||'sync_failed'),failedOrderIds:[]};
+  }
 }
 
 
 // Sessiz cloud sync - autoSync için, toast göstermez
 async function loadFromCloudSilent(){
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
 
     // Diğer verileri güncelle (kullanıcılar, katalog vs)
     const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
@@ -7551,10 +8200,12 @@ async function loadFromCloudSilent(){
       if(data[key]===undefined) continue;
       if(hasKeyLocalMutation(key)) continue;
       if(key==='jb_feed'){
-        if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
+        const mergedFeed=mergeFeedByVersion(getFeedPostsFromCache(),Array.isArray(data[key])?data[key]:[])
+          .map(function(post){return normalizeFeedPost(post,post);});
+        setFeedCache(mergedFeed,Date.now());
         continue;
       }
-      localStorage.setItem(key,JSON.stringify(data[key]));
+      applyRemoteKeyToLocal(key,data[key],'load_silent');
     }
 
     // Otoriter sipariş snapshot'u: realtime kapalı olsa bile cihazlar tutarlı olsun.
@@ -7588,7 +8239,7 @@ async function loadFromCloudSilent(){
 
 async function loadFromCloud(){
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
       try{
         console.log('[Remote] Loading data...');
         // Load settings & other data
@@ -7606,20 +8257,24 @@ async function loadFromCloud(){
           if(data[key]===undefined) continue;
           if(hasKeyLocalMutation(key)) continue;
           if(key==='jb_feed'){
-            if(shouldAcceptRemoteFeed(data[key])) setFeedCache(data[key],Date.now());
+            const mergedFeed=mergeFeedByVersion(getFeedPostsFromCache(),Array.isArray(data[key])?data[key]:[])
+              .map(function(post){return normalizeFeedPost(post,post);});
+            setFeedCache(mergedFeed,Date.now());
             continue;
           }
-          localStorage.setItem(key,JSON.stringify(data[key]));
+          applyRemoteKeyToLocal(key,data[key],'load');
         }
         // Keep chat/feed local snapshots durable even when Firebase auth is unstable.
         ['jb_feed','jb_chat_index'].forEach(function(k){
           if(data[k]===undefined) return;
           if(hasKeyLocalMutation(k)) return;
           if(k==='jb_feed'){
-            if(shouldAcceptRemoteFeed(data[k])) setFeedCache(data[k],Date.now());
+            const mergedFeed=mergeFeedByVersion(getFeedPostsFromCache(),Array.isArray(data[k])?data[k]:[])
+              .map(function(post){return normalizeFeedPost(post,post);});
+            setFeedCache(mergedFeed,Date.now());
             return;
           }
-          localStorage.setItem(k,JSON.stringify(data[k]));
+          applyRemoteKeyToLocal(k,data[k],'load_aux');
         });
         // Load orders from dedicated endpoint (individual rows — no size limit)
         const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
@@ -7639,8 +8294,9 @@ async function loadFromCloud(){
             return false;
           }
         } else {
-          cloudOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-          if(!cloudOrders.length) return false;
+          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          if(!shouldUseOrdersDataFallback(fallbackOrders,orders)) return false;
+          cloudOrders=fallbackOrders;
         }
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         // Server-authoritative merge: prune missing remote IDs except recent local mutations.
@@ -7669,7 +8325,25 @@ async function loadFromCloud(){
 async function saveAllToCloud(){
   // Keep this action as full backup (metadata + all order rows),
   // otherwise /api/orders can lag behind and appear as "missing orders" on reload.
-  return uploadToCloud();
+  const uploadResult=await uploadToCloud();
+  const allIds=(Array.isArray(orders)?orders:[]).map(function(o){return o&&o.id;}).filter(Boolean);
+  const failedIds=uploadResult&&Array.isArray(uploadResult.failedOrderIds)?uploadResult.failedOrderIds.filter(Boolean):[];
+  const shouldQueueFallback=(!uploadResult||!uploadResult.ok) && allIds.length>0;
+  const targetIds=failedIds.length?failedIds:(shouldQueueFallback?allIds:[]);
+  if(targetIds.length){
+    // Queue failed row writes through saveOrders so fallback retry can replay them.
+    await saveOrders(targetIds);
+    await flushLocalSyncFallback().catch(()=>{});
+  }
+  const ok=!!(uploadResult&&uploadResult.ok);
+  if(ok){
+    toast('✅ Cloud backup completed','ok');
+  }else{
+    const saved=Number(uploadResult&&uploadResult.saved)||0;
+    const total=Number(uploadResult&&uploadResult.total)||0;
+    toast(`⚠️ Cloud backup finished with issues (${saved}/${total})`,'err');
+  }
+  return ok;
 }
 async function recoverOrdersNow(){
   toast('Recovering orders...','info');
@@ -7678,37 +8352,16 @@ async function recoverOrdersNow(){
     if(ok && Array.isArray(orders) && orders.length){
       toast(`✅ Recovered ${orders.length} orders`,'ok');
     }else{
-      toast('⚠️ No remote orders found. Check Firebase Auth/Rules.','err');
+      toast('⚠️ No remote orders found. Check Cloudflare API/Worker.','err');
     }
   }catch(err){
     toast('❌ Recover failed: '+(err&&err.message?err.message:String(err)),'err');
   }
 }
 function saveFirebaseSettings(){
-  const enabledEl=document.getElementById('cfg-firebase-enabled');
-  const cfgEl=document.getElementById('cfg-firebase-config');
-  const enabled=!!(enabledEl&&enabledEl.checked);
-  const raw=(cfgEl&&cfgEl.value?cfgEl.value:'').trim();
-  if(enabled){
-    if(!raw){
-      toast('⚠️ Firebase config gerekli','err');
-      return;
-    }
-    try{
-      const parsed=JSON.parse(raw);
-      if(!parsed.projectId||!parsed.apiKey||!parsed.appId){
-        toast('❌ Firebase config missing required fields','err');
-        return;
-      }
-      localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(parsed));
-    }catch(e){
-      toast('❌ Firebase config JSON formatı hatalı','err');
-      return;
-    }
-  }
   localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
   stopFirebaseRealtime();
-  toast('ℹ️ Firebase/Auth devre dışı (istek üzerine)','info');
+  toast('ℹ️ Cloudflare backend modu aktif (Firebase kapalı).','info');
 }
 async function syncSettingsToFirebase(){
   try{
@@ -7741,7 +8394,8 @@ const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
-const LOCAL_ORDER_MUTATION_KEEP_MS=10*60*1000;
+const LOCAL_ORDER_MUTATION_KEEP_MS=90*1000;
+const LOCAL_ORDER_CONVERGENCE_GRACE_MS=90*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
 const LOCAL_DATA_META_KEY='jb_data_meta';
 const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
@@ -7749,6 +8403,7 @@ const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
 const FIREBASE_MIGRATE_MAX_BYTES=850000;
+const CLOUD_FAST_SYNC_MS=8000;
 let _firebaseApp=null;
 let _firebaseDb=null;
 let _firebaseStorage=null;
@@ -7770,6 +8425,7 @@ let _firebaseAuthNeedsFreshLogin=(function(){
   try{return localStorage.getItem(FIREBASE_AUTH_FRESH_LOGIN_KEY)==='1';}catch(_e){return false;}
 })();
 let _lastFirebasePermissionLockAt=0;
+let _ordersBulkPushInFlight=false;
 const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
@@ -7782,7 +8438,8 @@ const _health={
   apiCalls:0,
   apiErrors:0,
   lastError:'',
-  authState:'signed_out',
+  lastErrorAt:0,
+  authState:'cloudflare_mode',
   feedRealtime:false,
   ordersRealtime:false,
   dataRealtime:false
@@ -7866,7 +8523,13 @@ function hasActiveLocalOrderMutation(orderId){
   const row=map[String(orderId)];
   if(!row) return false;
   const ts=Number(row.ts)||0;
-  return (Date.now()-ts) < LOCAL_ORDER_MUTATION_KEEP_MS;
+  const age=Date.now()-ts;
+  if(age<Math.min(LOCAL_ORDER_MUTATION_KEEP_MS,LOCAL_ORDER_CONVERGENCE_GRACE_MS)) return true;
+  const fallback=readLocalSyncFallback();
+  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+    ? fallback.jb_order_ops.value
+    : [];
+  return pendingOps.some(function(op){return String(op&&op.orderId||'')===String(orderId);});
 }
 function readLocalDataMutations(){
   try{
@@ -8063,18 +8726,54 @@ function normalizeChatMessage(msg,prev){
     v:nextV
   };
 }
+function readChatMessagesFromCache(chatKey){
+  const key=String(chatKey||'').trim();
+  if(!key) return [];
+  try{
+    const raw=localStorage.getItem(key);
+    const list=raw?JSON.parse(raw):[];
+    return normalizeChatMessages(Array.isArray(list)?list:[],key);
+  }catch(_e){
+    return [];
+  }
+}
+function writeChatMessagesToCache(chatKey,msgs){
+  const key=String(chatKey||'').trim();
+  if(!key) return;
+  const normalized=normalizeChatMessages(Array.isArray(msgs)?msgs:[],key);
+  try{localStorage.setItem(key,JSON.stringify(normalized));}catch(_e){}
+}
+function mergeChatMessagesWithCache(chatKey,remoteMsgs,seedLocal){
+  const key=String(chatKey||'').trim();
+  if(!key) return [];
+  const localBase=Array.isArray(seedLocal)?seedLocal:readChatMessagesFromCache(key);
+  const merged=mergeChatByVersion(
+    normalizeChatMessages(localBase,key),
+    normalizeChatMessages(Array.isArray(remoteMsgs)?remoteMsgs:[],key)
+  );
+  writeChatMessagesToCache(key,merged);
+  return merged;
+}
 function normalizeFeedPost(post,prev){
   const base=post&&typeof post==='object'?post:{};
   const old=prev&&typeof prev==='object'?prev:{};
   const ts=Number(base.ts)||Number(old.ts)||Date.now();
   const nextV=Math.max(1,Number(base.v)||nextDataVersion(base,old));
+  const legacyImg=String(base.img||old.img||'').trim();
+  const listImgs=(function(){
+    const arr=Array.isArray(base.imgs)?base.imgs:(Array.isArray(old.imgs)?old.imgs:[]);
+    return arr.filter(function(src){return !!String(src||'').trim();});
+  })();
+  if(!listImgs.length && legacyImg) listImgs.push(legacyImg);
   return {
     ...old,
     ...base,
     id:base.id||old.id||('post_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)),
     ts,
     updatedAt:Number(base.updatedAt)||ts,
-    v:nextV
+    v:nextV,
+    imgs:listImgs,
+    img:listImgs[0]||null
   };
 }
 function queueOrderOpFallback(op){
@@ -8113,6 +8812,9 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
   return local.filter(function(o){
     if(!o||!o.id) return false;
     if(remoteIds.has(String(o.id))) return true;
+    const updatedAt=Number(o.updatedAt||o.ts||0);
+    const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
+    if(isFreshLocal) return true;
     return hasActiveLocalOrderMutation(o.id);
   });
 }
@@ -8120,6 +8822,10 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
 function markSync(source){
   _health.lastSyncAt=Date.now();
   _health.lastSyncSource=source||'-';
+  // Successful sync should clear stale health error noise.
+  _health.apiErrors=0;
+  _health.lastError='';
+  _health.lastErrorAt=0;
 }
 function markApiCall(){
   _health.apiCalls++;
@@ -8128,6 +8834,7 @@ function resetHealthCounters(){
   _health.apiCalls=0;
   _health.apiErrors=0;
   _health.lastError='';
+  _health.lastErrorAt=0;
 }
 function isFirebasePermissionError(err,msg){
   const code=String(err&&err.code||'').toLowerCase();
@@ -8139,39 +8846,74 @@ function enforceLocalModeOnFirebasePermission(msg){
   const now=Date.now();
   if((now-_lastFirebasePermissionLockAt)<15000) return;
   _lastFirebasePermissionLockAt=now;
-  try{localStorage.setItem(FIREBASE_ENABLED_KEY,'0');}catch(_e){}
-  disconnectFirebaseRealtime();
+  if(getFirebaseEnabled()) disconnectFirebaseRealtime();
   _health.firebaseConnected=false;
   _health.ordersRealtime=false;
   _health.feedRealtime=false;
   _health.dataRealtime=false;
-  _health.authState='local_api_mode';
+  _health.authState='cloud_api_mode';
   if(!(me&&me.role==='Reseller')){
-    toast('⚠️ Firebase yetki hatası algılandı. Sistem API moduna alındı.','info');
+    toast('⚠️ Cloudflare sync issue detected. API route/method kontrol edin.','info');
   }
 }
+function normalizeHealthErrorMessage(err){
+  const raw=String(err&&err.message?err.message:err||'unknown');
+  const low=raw.toLowerCase();
+  if(
+    low.includes('signal is aborted without reason') ||
+    low.includes('aborterror') ||
+    low.includes('request timeout') ||
+    low.includes('timeout') ||
+    low.includes('failed to fetch') ||
+    low.includes('networkerror')
+  ){
+    return 'request timeout or connection aborted';
+  }
+  return raw;
+}
 function markError(err){
-  const code=err&&err.code?` [${err.code}]`:'';
-  const msg=(err&&err.message?err.message:String(err||'unknown'))+code;
+  const normalized=normalizeHealthErrorMessage(err);
+  const codeNum=Number(err&&err.code);
+  const timeoutLike=normalized==='request timeout or connection aborted';
+  const code=(err&&err.code && !timeoutLike && codeNum!==20)?` [${err.code}]`:'';
+  const msg=normalized+code;
   const key=String(msg||'unknown');
   const now=Date.now();
   // Avoid inflating error counter with the same repeating offline/auth error.
   if(key===_lastHealthErrorKey && (now-_lastHealthErrorAt)<15000){
     _health.lastError=msg;
+    _health.lastErrorAt=now;
     return;
   }
   _lastHealthErrorKey=key;
   _lastHealthErrorAt=now;
   _health.apiErrors++;
   _health.lastError=msg;
+  _health.lastErrorAt=now;
   if(isFirebasePermissionError(err,msg)){
     enforceLocalModeOnFirebasePermission(msg);
   }
 }
 function renderHealthPanel(){
-  const el=document.getElementById('firebase-health-panel');
+  const el=document.getElementById('sync-health-panel');
   if(!el) return;
+  if(
+    _health.apiErrors>0 &&
+    _health.lastErrorAt>0 &&
+    (Date.now()-_health.lastErrorAt)>90000 &&
+    _health.lastSyncAt>=_health.lastErrorAt
+  ){
+    _health.apiErrors=0;
+    _health.lastError='';
+    _health.lastErrorAt=0;
+  }
   const fmtTs=_health.lastSyncAt?new Date(_health.lastSyncAt).toLocaleString('tr-TR'):'-';
+  const cloudMode=!getFirebaseEnabled();
+  const shownAuthState=cloudMode?'cloudflare_mode':String(_health.authState||'-');
+  const cloudFresh=!!(_health.lastSyncAt && (Date.now()-_health.lastSyncAt)<120000);
+  const shownOrders=cloudMode?cloudFresh:!!_health.ordersRealtime;
+  const shownFeed=cloudMode?cloudFresh:!!_health.feedRealtime;
+  const shownData=cloudMode?cloudFresh:!!_health.dataRealtime;
   const lastAct=Array.isArray(activityLog)&&activityLog[0]?activityLog[0]:null;
   const lastActTxt=lastAct?`${lastAct.type||'activity'} · ${fmtDateTime(lastAct.ts)}`:'-';
   const q=getLocalSyncFallbackMetrics();
@@ -8180,16 +8922,16 @@ function renderHealthPanel(){
   el.innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">Firebase</div>
-        <div style="font-size:13px;font-weight:700;color:${_health.firebaseConnected?'#22c55e':'#ef4444'};">${_health.firebaseConnected?'Connected':'Disconnected'}</div>
+        <div style="font-size:11px;color:var(--muted);">Cloud Sync</div>
+        <div style="font-size:13px;font-weight:700;color:${_health.apiErrors===0?'#22c55e':'#ef4444'};">${_health.apiErrors===0?'Healthy':'Issues detected'}</div>
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">Auth</div>
-        <div style="font-size:13px;font-weight:700;">${_health.authState}</div>
+        <div style="font-size:13px;font-weight:700;">${shownAuthState}</div>
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">Realtime</div>
-        <div style="font-size:13px;font-weight:700;">orders:${_health.ordersRealtime?'on':'off'} · feed:${_health.feedRealtime?'on':'off'} · data:${_health.dataRealtime?'on':'off'}</div>
+        <div style="font-size:13px;font-weight:700;">orders:${shownOrders?'on':'off'} · feed:${shownFeed?'on':'off'} · data:${shownData?'on':'off'}${cloudMode?' · cloud_live':''}</div>
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
         <div style="font-size:11px;color:var(--muted);">API</div>
@@ -8294,7 +9036,7 @@ function applyDataKeysFromRemote(remoteMap,opts={}){
         notifSettings=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
         if(!silent) loadNotifSettings();
       }else if(key==='jb_users'){
-        users=normalizeUsersList(Array.isArray(incomingValue)?incomingValue:[]);
+        users=persistUsersLocalSafe(Array.isArray(incomingValue)?incomingValue:[],'data_realtime');
       }else if(key==='jb_suppliers'){
         suppliers=Array.isArray(incomingValue)?incomingValue:[];
       }else if(key==='jb_catalog'){
@@ -8319,7 +9061,8 @@ function refreshRealtimeBadges(){
   }
   if(me&&me.role==='Reseller'){
     checkResellerUnreadMessages().catch(()=>{});
-    if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+    // Reseller home counters/chart must refresh from current orders state.
+    renderResellerView();
   }
 }
 
@@ -8336,9 +9079,19 @@ function withTimeoutPromise(promise,ms,label){
 
 async function fetchWithTimeout(url,options={},timeoutMs=UPLOAD_TIMEOUT_MS){
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),Math.max(1000,Number(timeoutMs)||UPLOAD_TIMEOUT_MS));
+  const waitMs=Math.max(1000,Number(timeoutMs)||UPLOAD_TIMEOUT_MS);
+  let didTimeout=false;
+  const timer=setTimeout(()=>{
+    didTimeout=true;
+    controller.abort();
+  },waitMs);
   try{
     return await fetch(url,{...(options||{}),signal:controller.signal});
+  }catch(err){
+    if(didTimeout){
+      throw new Error(`request timeout (${waitMs}ms)`);
+    }
+    throw err;
   }finally{
     clearTimeout(timer);
   }
@@ -8408,7 +9161,27 @@ function applyOrderDeleteLocally(orderId,deletedAt){
   const id=String(orderId||'').trim();
   if(!id) return null;
   const ts=Number(deletedAt)||Date.now();
-  orders=(orders||[]).filter(function(o){return o&&o.id!==id;});
+  const list=Array.isArray(orders)?orders:[];
+  const existing=list.find(function(o){return o&&String(o.id)===id;})||null;
+  if(existing){
+    const baseV=Math.max(0,Number(existing&&existing.v)||0);
+    const nextV=baseV+1;
+    const tombstone={
+      ...existing,
+      id,
+      deletedAt:ts,
+      updatedAt:ts,
+      status:'Deleted',
+      v:nextV,
+      products:[]
+    };
+    orders=list
+      .filter(function(o){return o&&String(o.id)!==id;})
+      .concat([tombstone]);
+  }else{
+    const tombstone={id,deletedAt:ts,updatedAt:ts,status:'Deleted',v:1,products:[]};
+    orders=list.concat([tombstone]);
+  }
   persistOrdersLocalSafe(orders);
   return {id,status:'Deleted',deletedAt:ts,updatedAt:ts};
 }
@@ -8423,7 +9196,7 @@ async function deleteOrderWithTombstone(orderId,meta={}){
   const event=buildOrderEvent('delete',id,{opId,v,ts,source:'client'});
   markLocalOrderMutation(id,'delete',{opId,v});
   applyOrderDeleteLocally(id,ts);
-  const api=getApiBase();
+  const api=await ensureWorkingApiBase({silent:true});
   let acked=false;
   let staleIgnored=false;
   try{
@@ -8745,11 +9518,9 @@ async function firebaseSignInForSession(email,password){
     if(authCode==='auth/too-many-requests'){
       markError(err);
       _health.authState='auth_rate_limited';
-      // Stop retrying cached email/password in a tight loop.
-      clearFirebaseLoginCreds({includeRemember:true});
-      markFirebaseAuthNeedsFreshLogin();
-      setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
-      setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS);
+      // Keep credentials; apply only cooldown to avoid re-login loops.
+      setFirebaseRateLimitRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS*3);
+      setFirebasePasswordRetry(FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS*2);
       return null;
     }
     if(authCode==='auth/invalid-credential'||authCode==='auth/wrong-password'){
@@ -8956,13 +9727,20 @@ async function writeAuditEvent(action,payload){
 }
 
 function sanitizeOrderForRemote(order){
+  const normalizeImageRef=function(v){
+    const s=String(v||'').trim();
+    if(!s) return null;
+    if(/^(https?:|data:|blob:)/i.test(s)) return s;
+    if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
+    return null;
+  };
   const clean={
     ...order,
     status:normalizeStatus(order.status),
     products:(order.products||[]).map(p=>({
       ...p,
-      img:p.img||null,
-      depotPhoto:(p.depotPhoto&&/^(https?:|data:|blob:)/.test(p.depotPhoto))?p.depotPhoto:null
+      img:normalizeImageRef(p&&p.img),
+      depotPhoto:normalizeImageRef(p&&p.depotPhoto)
     }))
   };
   if(!clean.pendingApproval) delete clean.pendingApproval;
@@ -9055,6 +9833,9 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
       if(!o||!o.id) return false;
       if(incomingIds.has(String(o.id))) return true;
       if(preservePendingLocalIds.has(String(o.id))) return true;
+      const updatedAt=Number(o.updatedAt||o.ts||0);
+      const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
+      if(isFreshLocal) return true;
       if(hasActiveLocalOrderMutation(o.id)) return true;
       return false;
     });
@@ -9091,7 +9872,7 @@ function disconnectFirebaseRealtime(){
   _health.feedRealtime=false;
   _health.dataRealtime=false;
   // Keep recoverable auth state; do not downgrade stable fallback states.
-  if(!['signed_in','auth_rate_limited'].includes(String(_health.authState||''))){
+  if(!['signed_in','auth_rate_limited','permission_denied'].includes(String(_health.authState||''))){
     _health.authState='waiting_login';
   }
 }
@@ -9147,8 +9928,13 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
   writeGenericMetaForKey(k,{v:incomingV,updatedAt:ts,lastOpId:incomingOpId});
   if(k==='jb_feed'){
     const localTs=readFeedUpdatedAt();
-    if(localTs && ts+1200<localTs) return;
-    setFeedCache(Array.isArray(value)?value:[],ts);
+    const mergedFeed=mergeFeedByVersion(getFeedPostsFromCache(),Array.isArray(value)?value:[])
+      .map(function(post){return normalizeFeedPost(post,post);});
+    if(localTs && ts+1200<localTs){
+      setFeedCache(mergedFeed,localTs);
+    }else{
+      setFeedCache(mergedFeed,Math.max(ts,localTs||0));
+    }
     _health.feedRealtime=true;
     clearKeyLocalMutation(k);
     markSync('data_feed_snapshot');
@@ -9157,9 +9943,8 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     refreshRealtimeBadges();
     return;
   }
-  localStorage.setItem(k,JSON.stringify(value));
   if(k==='jb_users'){
-    users=normalizeUsersList(Array.isArray(value)?value:[]);
+    users=persistUsersLocalSafe(Array.isArray(value)?value:[],'realtime');
     if(me&&me.id){
       const mine=users.find(u=>u&&u.id===me.id) || users.find(u=>u&&String(u.email||'').toLowerCase()===String(me.email||'').toLowerCase());
       if(mine){
@@ -9173,35 +9958,40 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     }
     renderUsers();
     if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
-  }else if(k==='jb_suppliers'){
+  }else{
+    localStorage.setItem(k,JSON.stringify(value));
+    if(k==='jb_suppliers'){
     suppliers=Array.isArray(value)?value:[];
     renderSuppliers();
     if(typeof renderSupPerf==='function') renderSupPerf();
-  }else if(k==='jb_templates'){
+    }else if(k==='jb_templates'){
     templates=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
     loadTemplates();
-  }else if(k==='jb_notif'){
+    }else if(k==='jb_notif'){
     notifSettings=value&&typeof value==='object'&&!Array.isArray(value)?value:{shipped:true};
     loadNotifSettings();
-  }else if(k==='jb_settings'){
+    }else if(k==='jb_settings'){
     settings=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
     loadSettings();
     _sessionTimeout=(parseInt(settings.sessionTimeout)||30)*60*1000;
-  }else if(k==='jb_catalog'){
+    }else if(k==='jb_catalog'){
     catalog=Array.isArray(value)?value:[];
-  }else if(k==='jb_activity'){
+    }else if(k==='jb_activity'){
     activityLog=Array.isArray(value)?value:[];
     if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
-  }else if(k.indexOf('jb_chat_')===0){
+    }else if(k.indexOf('jb_chat_')===0){
     const rid=k.replace('jb_chat_','');
-    _messages[String(rid||'')]=Array.isArray(value)?value:[];
+    const chatKey='jb_chat_'+String(rid||'');
+    const mergedMsgs=mergeChatMessagesWithCache(chatKey,Array.isArray(value)?value:[],_messages[String(rid||'')]||[]);
+    _messages[String(rid||'')]=mergedMsgs;
     if(_chatReseller && String(_chatReseller)===String(rid||'')) renderMessages();
-    if(me&&me.id&&String(me.id)===String(rid||'')) renderResellerMessages(Array.isArray(value)?value:[]);
+    if(me&&me.id&&String(me.id)===String(rid||'')) renderResellerMessages(mergedMsgs);
     updateChatBadge();
     checkResellerUnreadMessages().catch(()=>{});
     if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
-  }else if(k==='jb_chat_index'){
+    }else if(k==='jb_chat_index'){
     // keep durable snapshot only
+    }
   }
   clearKeyLocalMutation(k);
   markSync('data_snapshot:'+k);
@@ -9229,6 +10019,9 @@ function renderLiveCounters(){
 
 function refreshLiveCounters(){
   renderLiveCounters();
+  if(me&&me.role==='Reseller'){
+    renderResellerView();
+  }
   if(me&&me.role==='Admin'){
     const badge=document.getElementById('sync-state-dot');
     if(badge){
@@ -9590,6 +10383,24 @@ function setChatMessagesForReseller(resellerId,msgs){
 }
 function isApiPath(pathname){
   return pathname.startsWith('/api/');
+}
+function isHealthTrackedApiPath(pathname){
+  const p=String(pathname||'').trim();
+  return p==='/api/test' ||
+    p==='/api/data' ||
+    p==='/api/orders' ||
+    p==='/api/order' ||
+    p==='/api/sync' ||
+    p==='/api/orders/bulk' ||
+    p==='/api/backup/import';
+}
+function shouldMarkSyncFromApiResponse(pathname,method,res){
+  if(!res||!res.ok) return false;
+  const p=String(pathname||'').trim();
+  const m=String(method||'GET').toUpperCase();
+  if(p==='/api/test' || p==='/api/data' || p==='/api/orders') return true;
+  if((p==='/api/order' || p==='/api/sync' || p==='/api/orders/bulk' || p==='/api/backup/import') && m==='POST') return true;
+  return false;
 }
 function shouldRouteApiToFirebase(url){
   if(!getFirebaseEnabled()) return false;
@@ -9980,27 +10791,34 @@ window.fetch=async function(input,init){
   const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
   const body=(init&&Object.prototype.hasOwnProperty.call(init,'body'))?init.body:null;
   let isApiFetch=false;
+  let isHealthApiFetch=false;
+  let apiPath='';
   try{
     const u=new URL(rawUrl,location.origin);
-    isApiFetch=isApiPath(u.pathname);
+    apiPath=String(u.pathname||'');
+    isApiFetch=isApiPath(apiPath);
+    isHealthApiFetch=isHealthTrackedApiPath(apiPath);
   }catch(_e){}
-  if(isApiFetch) markApiCall();
+  if(isHealthApiFetch) markApiCall();
   if(shouldRouteApiToFirebase(rawUrl)){
     try{
       const handled=await handleFirebaseApiRequest(rawUrl,method,body);
       if(handled) return handled;
       return jsonApiResponse({error:'Endpoint not available in Firebase mode'},404);
     }catch(e){
-      markError(e);
+      if(isHealthApiFetch) markError(e);
       return jsonApiResponse({error:e&&e.message?e.message:String(e)},500);
     }
   }
   try{
     const res=await _nativeFetch(input,init);
-    if(!res.ok && isApiFetch) markError(new Error('HTTP '+res.status+' '+res.statusText));
+    if(!res.ok && isHealthApiFetch) markError(new Error('HTTP '+res.status+' '+res.statusText));
+    if(isHealthApiFetch && shouldMarkSyncFromApiResponse(apiPath,method,res)){
+      markSync('api:'+apiPath);
+    }
     return res;
   }catch(e){
-    if(isApiFetch) markError(e);
+    if(isHealthApiFetch) markError(e);
     throw e;
   }
 };
@@ -10025,6 +10843,10 @@ async function pushOrdersToFirebase(changedOrders){
 }
 
 async function migrateAllToFirebase(){
+  if(!getFirebaseEnabled()){
+    toast('ℹ️ Cloudflare backend modu aktif. Firebase migration kapalı.','info');
+    return;
+  }
   const connected=await initFirebaseRealtime({silent:false,force:true});
   if(!connected) return;
   try{
@@ -10084,12 +10906,17 @@ async function migrateAllToFirebase(){
 }
 
 async function connectFirebaseNow(){
+  if(!getFirebaseEnabled()){
+    toast('ℹ️ Cloudflare backend modu aktif. Connect Now devre dışı.','info');
+    return;
+  }
   resetHealthCounters();
   if(_firebaseAuthNeedsFreshLogin){
+    clearFirebaseAuthNeedsFreshLogin();
+    clearFirebaseAuthRetryGuards();
     _health.authState='waiting_login';
     updateConnectNowCooldownUi(0);
-    toast('⚠️ Firebase için yeniden giriş gerekli. Lütfen çıkış yapıp tekrar giriş yapın.','info');
-    return;
+    toast('ℹ️ Eski auth kilidi temizlendi, yeniden bağlanılıyor...','info');
   }
   const waitMs=getFirebaseAuthRetryRemainingMs();
   if(waitMs>0){
@@ -10104,33 +10931,7 @@ async function connectFirebaseNow(){
 
 let _connectNowCooldownTimer=null;
 function updateConnectNowCooldownUi(waitMs){
-  const btn=document.getElementById('btn-connect-firebase-now');
-  if(!btn) return;
-  const remain=Math.max(0,Number(waitMs)||0);
-  const render=function(ms){
-    const left=Math.max(0,Math.ceil(ms/1000));
-    if(left>0){
-      btn.disabled=true;
-      btn.textContent=`⏳ Connect Now (${left}s)`;
-    }else{
-      btn.disabled=false;
-      btn.textContent='🔌 Connect Now';
-    }
-  };
-  if(_connectNowCooldownTimer){
-    clearInterval(_connectNowCooldownTimer);
-    _connectNowCooldownTimer=null;
-  }
-  render(remain);
-  if(remain<=0) return;
-  _connectNowCooldownTimer=setInterval(function(){
-    const live=getFirebaseAuthRetryRemainingMs();
-    render(live);
-    if(live<=0 && _connectNowCooldownTimer){
-      clearInterval(_connectNowCooldownTimer);
-      _connectNowCooldownTimer=null;
-    }
-  },1000);
+  return;
 }
 
 // ── PWA ──
@@ -10239,6 +11040,22 @@ window.addEventListener('load',()=>{
 
 // ── PUSH NOTIFICATIONS ──
 const VAPID_PUBLIC_KEY='BIXbltcWkYVH22URYn4Lpr-CQi9KbTD5KPXf9HGOy7452zNS4ES7hhmIgZfnI3S7O3HZj4BsgwtuDZX-EI2g3HY';
+const PUSH_BLOCK_HINT_KEY='jb_push_blocked_hint_ts';
+function shouldShowPushBlockedHint(cooldownMs=6*60*60*1000){
+  const now=Date.now();
+  const last=Number(localStorage.getItem(PUSH_BLOCK_HINT_KEY)||0);
+  if((now-last)<cooldownMs) return false;
+  localStorage.setItem(PUSH_BLOCK_HINT_KEY,String(now));
+  return true;
+}
+function showPushBlockedHelpToast(){
+  if(!shouldShowPushBlockedHint()) return;
+  const isMobile=/android|iphone|ipad|ipod/i.test(navigator.userAgent||'');
+  const steps=isMobile
+    ? 'Browser settings → Site settings → Notifications → Allow'
+    : 'Address bar lock icon → Site settings → Notifications → Allow';
+  toast('🔕 Browser push is blocked. '+steps+'. In-app alerts continue.','info');
+}
 
 function urlBase64ToUint8Array(base64String){
   const padding='='.repeat((4-base64String.length%4)%4);
@@ -10256,7 +11073,7 @@ async function requestPushPermission(){
   }
   // Check current permission first
   if(Notification.permission === 'denied'){
-    toast('⚠️ Notifications blocked. Enable in browser settings.','info');
+    showPushBlockedHelpToast();
     return false;
   }
   if(Notification.permission === 'granted'){
@@ -10273,7 +11090,7 @@ async function requestPushPermission(){
 async function subscribeToPush(){
   try{
     const granted=await requestPushPermission();
-    if(!granted)return;
+    if(!granted)return false;
     const reg=await navigator.serviceWorker.ready;
     let sub=await reg.pushManager.getSubscription();
     if(!sub){
@@ -10283,7 +11100,7 @@ async function subscribeToPush(){
       });
     }
     // Save to server
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const subData=sub.toJSON();
     await fetch(api+'/api/push/subscribe',{
       method:'POST',
@@ -10307,29 +11124,35 @@ async function subscribeToPush(){
 
 async function sendPushToReseller(resellerId, title, body){
   try{
-    const api=getApiBase();
-    await fetch(api+'/api/push/send',{
+    const api=await ensureWorkingApiBase({silent:true});
+    const res=await fetch(api+'/api/push/send',{
       method:'POST',
       headers:getAuthHeaders({'Content-Type':'application/json'}),
       body:JSON.stringify({userId:resellerId,title,body})
     });
+    return !!(res&&res.ok);
   }catch(e){console.warn('Push send failed:',e);}
+  return false;
 }
 
 // Send push notification to all admins
 async function sendPushToAdmin(title, body){
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     // Send to all admin users
     const admins = users.filter(u => u.role === 'Admin');
+    let allOk=true;
     for(const admin of admins){
-      await fetch(api+'/api/push/send',{
+      const res=await fetch(api+'/api/push/send',{
         method:'POST',
         headers:getAuthHeaders({'Content-Type':'application/json'}),
         body:JSON.stringify({userId:admin.id,title,body})
       });
+      if(!res||!res.ok) allOk=false;
     }
+    return allOk;
   }catch(e){console.warn('Push send to admin failed:',e);}
+  return false;
 }
 
 // Play notification sound
@@ -10356,6 +11179,11 @@ function playNotificationSound(){
 // Auto-subscribe on login for resellers
 async function initPushForReseller(){
   if(!me||me.role!=='Reseller')return;
+  if(Notification.permission!=='denied'){
+    subscribeToPush().catch(()=>{});
+  }else{
+    showPushBlockedHelpToast();
+  }
   // Ask for notification permission after 3 seconds
   setTimeout(async()=>{
     if(Notification.permission==='default'){
@@ -10371,6 +11199,11 @@ async function initPushForReseller(){
 // Auto-subscribe on login for admins
 async function initPushForAdmin(){
   if(!me||me.role!=='Admin')return;
+  if(Notification.permission!=='denied'){
+    subscribeToPush().catch(()=>{});
+  }else{
+    showPushBlockedHelpToast();
+  }
   // Ask for notification permission after 3 seconds
   setTimeout(async()=>{
     if(Notification.permission==='default'){
@@ -10610,7 +11443,10 @@ function duplicateOrder(id){
   const now=new Date();const yy=String(now.getFullYear()).slice(2);const mm=String(now.getMonth()+1).padStart(2,'0');const dd=String(now.getDate()).padStart(2,'0');
   const seq=String(orders.filter(x=>x.ts>now.setHours(0,0,0,0)).length+1).padStart(3,'0');
   const newO={...JSON.parse(JSON.stringify(o)),id:'o'+Date.now(),ref:`JR${yy}${mm}${dd}-${seq}`,ts:Date.now(),status:'New',cnTracking:null,ukTracking:null,products:(o.products||[]).map(p=>({...p,cnTracking:'',arrived:false,depotPhoto:null}))};
-  orders.unshift(newO);saveOrders();render();updateBadges();selectOrder(newO.id);
+  orders.unshift(newO);
+  markLocalOrderMutation(newO.id,'upsert',{opId:createLocalMutationOpId('duplicate')});
+  saveOrders([newO.id]);
+  render();updateBadges();selectOrder(newO.id);
   logActivity('created',`Order duplicated: ${newO.ref} (${newO.name})`,newO.id);
   toast('📋 Order copied','ok');
 }
@@ -10623,8 +11459,105 @@ const _sounds={
   complete:()=>{const a=new AudioContext();[520,660,784].forEach((f,i)=>{const o=a.createOscillator();const g=a.createGain();o.connect(g);g.connect(a.destination);o.frequency.setValueAtTime(f,a.currentTime+i*0.1);g.gain.setValueAtTime(0.12,a.currentTime+i*0.1);g.gain.exponentialRampToValueAtTime(0.001,a.currentTime+i*0.1+0.2);o.start(a.currentTime+i*0.1);o.stop(a.currentTime+i*0.1+0.2);});}
 };
 let _soundEnabled=localStorage.getItem('jb_sound')!=='off';
+function triggerNotificationVibration(pattern){
+  try{
+    if(!navigator||typeof navigator.vibrate!=='function') return;
+    const p=Array.isArray(pattern)&&pattern.length?pattern:[120,70,120];
+    navigator.vibrate(p);
+  }catch(_e){}
+}
+function pulseElementById(id){
+  const el=document.getElementById(String(id||''));
+  if(!el) return;
+  el.classList.remove('notif-pulse');
+  void el.offsetWidth;
+  el.classList.add('notif-pulse');
+}
 function playSound(type){if(!_soundEnabled)return;try{_sounds[type]&&_sounds[type]();}catch(e){}}
 function toggleSound(){_soundEnabled=!_soundEnabled;localStorage.setItem('jb_sound',_soundEnabled?'on':'off');toast(_soundEnabled?'🔔 Sesler active':'🔕 Sounds off','info');}
+
+// ── UNIFIED REALTIME NOTIFICATION ENGINE ──
+const _rtNotifSeen=new Map();
+const RT_NOTIF_TTL_MS=90*1000;
+function makeRtNotifKey(kind,id){
+  return String(kind||'')+':'+String(id||'');
+}
+function shouldDispatchRtNotif(kind,id){
+  const key=makeRtNotifKey(kind,id);
+  const now=Date.now();
+  const prev=Number(_rtNotifSeen.get(key)||0);
+  if(prev && (now-prev)<RT_NOTIF_TTL_MS) return false;
+  _rtNotifSeen.set(key,now);
+  if(_rtNotifSeen.size>300){
+    for(const [k,ts] of _rtNotifSeen){
+      if((now-Number(ts||0))>RT_NOTIF_TTL_MS) _rtNotifSeen.delete(k);
+    }
+  }
+  return true;
+}
+function vibrateDevice(pattern){
+  try{
+    if(!navigator||typeof navigator.vibrate!=='function') return;
+    navigator.vibrate(pattern);
+  }catch(_e){}
+}
+async function ensureLocalNotificationPermission(){
+  if(typeof Notification==='undefined') return false;
+  return Notification.permission==='granted';
+}
+async function dispatchRealtimeNotification(opts={}){
+  const kind=String(opts.kind||'generic');
+  const eventId=String(opts.eventId||'');
+  if(eventId && !shouldDispatchRtNotif(kind,eventId)) return false;
+  const title=String(opts.title||'JRSHOP');
+  const body=String(opts.body||'');
+  const toastType=String(opts.toastType||'info');
+  if(body) toast(body,toastType);
+  if(_soundEnabled) playNotificationSound();
+  if(opts.vibrate!==false){
+    const pattern=Array.isArray(opts.vibratePattern)?opts.vibratePattern:[180,80,180];
+    vibrateDevice(pattern);
+  }
+  if(Array.isArray(opts.badgeElementIds)){
+    opts.badgeElementIds.forEach(function(id){pulseElementById(id);});
+  }
+  if(opts.localNotification!==false){
+    const canNotify=await ensureLocalNotificationPermission();
+    if(canNotify){
+      try{
+        const tag=String(opts.tag||('rt-'+kind));
+        const vibrate=Array.isArray(opts.vibratePattern)?opts.vibratePattern:[180,80,180];
+        if('serviceWorker' in navigator){
+          const reg=await navigator.serviceWorker.ready;
+          if(reg && typeof reg.showNotification==='function'){
+            await reg.showNotification(title,{
+              body,
+              icon:'/icon-192.png',
+              badge:'/icon-192.png',
+              tag,
+              renotify:true,
+              vibrate
+            });
+          }else{
+            new Notification(title,{body,icon:'/icon-192.png',tag,renotify:true});
+          }
+        }else{
+          new Notification(title,{body,icon:'/icon-192.png',tag,renotify:true});
+        }
+      }catch(_e){
+        try{
+          new Notification(title,{
+            body,
+            icon:'/icon-192.png',
+            tag:String(opts.tag||('rt-'+kind)),
+            renotify:true
+          });
+        }catch(_ignored){}
+      }
+    }
+  }
+  return true;
+}
 
 // ── SESSION TIMEOUT ──
 let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
@@ -10636,13 +11569,15 @@ async function startPendingPoll(){
     return;
   }
   if(_pendingPollInterval)clearInterval(_pendingPollInterval);
+  const pendingMs=(getFirebaseEnabled()&&_health.ordersRealtime)?30000:CLOUD_FAST_SYNC_MS;
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
     try{
-      const api=getApiBase();
+      const api=await ensureWorkingApiBase({silent:true});
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(!res.ok)return;
       const {data}=await res.json();
+      const localOrdersNow=Array.isArray(orders)?orders:[];
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
@@ -10654,13 +11589,15 @@ async function startPendingPoll(){
             newOrders=[];
           }
         }else{
-          newOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+          newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
         }
       }catch{
-        newOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+        const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
+        newOrders=shouldUseOrdersDataFallback(fallbackOrders,localOrdersNow)?fallbackOrders:[];
       }
       if(!shouldAcceptRemoteOrders(newOrders)){
-        continue;
+        return;
       }
       if(Array.isArray(newOrders)){
         if(me.role==='Reseller'){
@@ -10687,13 +11624,40 @@ async function startPendingPoll(){
             const old=myOld.find(x=>x.id===o.id);
             if(!old)return;
             if(old.pendingApproval&&!o.pendingApproval&&!o.rejected){
-              toast('✅ Order approved! '+esc(o.ref),'ok');
+              dispatchRealtimeNotification({
+                kind:'reseller_order_approved',
+                eventId:String(o.id)+'_approved_'+String(o.approvedAt||o.updatedAt||Date.now()),
+                title:'✅ Order Approved',
+                body:'Order approved: '+String(o.ref||''),
+                toastType:'ok',
+                localNotification:document.visibilityState!=='visible',
+                tag:'order-approved',
+                vibratePattern:[200,80,120]
+              }).catch(()=>{});
               renderResellerView();
             } else if(!old.rejected&&o.rejected){
-              toast('❌ Order rejected: '+esc(o.ref),'err');
+              dispatchRealtimeNotification({
+                kind:'reseller_order_rejected',
+                eventId:String(o.id)+'_rejected_'+String(o.updatedAt||Date.now()),
+                title:'❌ Order Rejected',
+                body:'Order rejected: '+String(o.ref||''),
+                toastType:'err',
+                localNotification:document.visibilityState!=='visible',
+                tag:'order-rejected',
+                vibratePattern:[260,80,260]
+              }).catch(()=>{});
               renderResellerView();
             } else if(old.status!==o.status){
-              toast('📦 Order status updated: '+esc(o.ref)+' → '+getStatusLabel(o.status),'info');
+              dispatchRealtimeNotification({
+                kind:'reseller_order_status',
+                eventId:String(o.id)+'_status_'+String(o.status),
+                title:'📦 Order Status Updated',
+                body:String(o.ref||'')+' → '+getStatusLabel(o.status),
+                toastType:'info',
+                localNotification:document.visibilityState!=='visible',
+                tag:'order-status',
+                vibratePattern:[120,60,120]
+              }).catch(()=>{});
               renderResellerView();
             }
           });
@@ -10706,12 +11670,22 @@ async function startPendingPoll(){
           localStorage.setItem('jb_orders',JSON.stringify(orders));
           updateBadges();
           if(newPending>oldPending){
-            toast('🔔 New sipariş onay bekliyor!','info');
+            const latestPending=newOrders.filter(function(o){return o&&o.pendingApproval;}).sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0];
+            dispatchRealtimeNotification({
+              kind:'admin_pending_order',
+              eventId:String(latestPending&&latestPending.id||Date.now())+'_pending',
+              title:'🔔 New Order Request',
+              body:'A reseller order is waiting for approval.',
+              toastType:'info',
+              localNotification:document.visibilityState!=='visible',
+              tag:'pending-approval',
+              vibratePattern:[160,80,160]
+            }).catch(()=>{});
           }
         }
       }
     }catch(e){}
-  },30000);
+  },pendingMs);
 }
 
 
@@ -10775,42 +11749,46 @@ function startGlobalChatPoll(){
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
     // Check each reseller's chat key
     const resellers=users.filter(u=>u.role==='Reseller');
     let totalUnread=0;
-    let needsSync = false;
     let hasNewMessages = false;
     let newMessageFrom = '';
+    let newestEventId = '';
     
     resellers.forEach(u=>{
-      const msgs=data['jb_chat_'+u.id]||[];
-      const prevMsgs = _messages[u.id] || [];
-      // Check for new messages
-      if(msgs.length > prevMsgs.length){
-        const newMsgs = msgs.slice(prevMsgs.length);
-        const hasUnreadNew = newMsgs.some(m => m.from !== 'admin' && !m.read);
-        if(hasUnreadNew){
-          hasNewMessages = true;
-          newMessageFrom = u.dname || u.email;
-        }
+      const chatKey='jb_chat_'+u.id;
+      const prevMsgs=Array.isArray(_messages[u.id])?_messages[u.id]:readChatMessagesFromCache(chatKey);
+      const prevUnreadIds=new Set(prevMsgs.filter(function(m){return m&&m.from!=='admin'&&!m.read;}).map(function(m){return String(m.id||'');}));
+      const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
+      const latestUnread=[...mergedMsgs].reverse().find(function(m){
+        const id=String(m&&m.id||'');
+        return m&&m.from!=='admin'&&!m.read && !prevUnreadIds.has(id);
+      });
+      if(latestUnread){
+        hasNewMessages = true;
+        newMessageFrom = u.dname || u.email;
+        newestEventId=String(latestUnread.id||(`${u.id}_${latestUnread.ts||Date.now()}`));
       }
-      _messages[u.id] = msgs;
+      _messages[u.id]=mergedMsgs;
     });
     
     // Show local notification if new messages and page not focused on chat
-    if(hasNewMessages && document.visibilityState !== 'visible'){
-      playNotificationSound();
-      if(Notification.permission === 'granted'){
-        new Notification('💬 New Message', {
-          body: `Message from ${newMessageFrom}`,
-          icon: '/icon-192.png',
-          tag: 'chat-notification'
-        });
-      }
+    if(hasNewMessages){
+      dispatchRealtimeNotification({
+        kind:'admin_chat',
+        eventId:newestEventId||('from_'+newMessageFrom),
+        title:'💬 New Message',
+        body:`Message from ${newMessageFrom}`,
+        toastType:'info',
+        localNotification:document.visibilityState!=='visible',
+        tag:'chat-notification',
+        vibratePattern:[120,70,120]
+      }).catch(()=>{});
     }
     
     // If a chat is open, mark as read and sync to cloud
@@ -10885,13 +11863,15 @@ function renderChatList(filter=''){
 async function pollMessages(resellerId){
   if(!resellerId) return;
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
-    const newMsgs=data['jb_chat_'+resellerId]||[];
-    if(newMsgs.length !== (_messages[resellerId]||[]).length){
-      _messages[resellerId]=newMsgs;
+    const chatKey='jb_chat_'+resellerId;
+    const prevMsgs=Array.isArray(_messages[resellerId])?_messages[resellerId]:readChatMessagesFromCache(chatKey);
+    const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
+    if(JSON.stringify(mergedMsgs)!==JSON.stringify(prevMsgs)){
+      _messages[resellerId]=mergedMsgs;
       if(_chatReseller===resellerId) renderMessages();
       renderChatList();
       updateChatBadge();
@@ -11085,23 +12065,29 @@ function startResellerMessagePoll(){
 async function checkResellerUnreadMessages(){
   if(!me) return;
   try{
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {data}=await res.json();
-    const msgs=data['jb_chat_'+me.id]||[];
+    const chatKey='jb_chat_'+me.id;
+    const msgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],_messages[String(me.id)]||[]);
+    _messages[String(me.id)]=msgs;
     const unreadCount = msgs.filter(m => m.from === 'admin' && !m.read).length;
     
     // Check for new messages (unread count increased)
-    if(unreadCount > _lastResUnreadCount && document.visibilityState !== 'visible'){
-      playNotificationSound();
-      if(Notification.permission === 'granted'){
-        new Notification('💬 New Message from Admin', {
-          body: 'You have a new message',
-          icon: '/icon-192.png',
-          tag: 'reseller-chat'
-        });
-      }
+    if(unreadCount > _lastResUnreadCount){
+      const lastUnread=[...msgs].reverse().find(function(m){return m&&m.from==='admin'&&!m.read;});
+      const eventId=String(lastUnread&&lastUnread.id||('admin_'+(lastUnread&&lastUnread.ts||Date.now())));
+      dispatchRealtimeNotification({
+        kind:'reseller_chat',
+        eventId,
+        title:'💬 New Message from Admin',
+        body:'You have a new message',
+        toastType:'info',
+        localNotification:document.visibilityState!=='visible',
+        tag:'reseller-chat',
+        vibratePattern:[180,90,180]
+      }).catch(()=>{});
     }
     _lastResUnreadCount = unreadCount;
     
@@ -11159,8 +12145,16 @@ async function loadResellerMessages(){
   if(!me) return;
   try{
     const chatKey='jb_chat_'+me.id;
-    let msgs=[];
-    try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
+    let msgs=readChatMessagesFromCache(chatKey);
+    try{
+      const api=await ensureWorkingApiBase({silent:true});
+      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+      if(res.ok){
+        const {data}=await res.json();
+        msgs=mergeChatMessagesWithCache(chatKey,data&&data[chatKey]?data[chatKey]:[],msgs);
+      }
+    }catch(_e){}
+    _messages[String(me.id)]=msgs;
     
     // Mark admin messages as read if chat is open
     const isChatOpen = document.getElementById('res-chat-overlay')?.style.display === 'flex';
@@ -11176,7 +12170,7 @@ async function loadResellerMessages(){
       
       // Save read status to cloud
       if(hasUnread){
-        try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+        writeChatMessagesToCache(chatKey,msgs);
         await syncChatThreadToCloud(chatKey,msgs,{
           opId:createLocalMutationOpId('reschatread')
         });
@@ -11197,6 +12191,11 @@ function renderResellerMessages(msgs){
   const el=document.getElementById('res-chat-messages')||document.getElementById('res-chat-msgs');
   if(!el){ console.warn('[renderResellerMessages] element bulunamadı'); return; }
   if(!msgs) msgs = [];
+  const prevScrollTop=el.scrollTop||0;
+  const prevClientHeight=el.clientHeight||0;
+  const prevScrollHeight=el.scrollHeight||0;
+  const wasAtBottom=(prevScrollTop+prevClientHeight)>=prevScrollHeight-24;
+  const prevLen=el.querySelectorAll('.msg-item').length;
   if(!msgs.length){el.innerHTML='<div style="text-align:center;color:var(--muted);font-size:13px;padding:20px;">No messages yet. Say hi! 👋</div>';return;}
   
   // Get admin photo
@@ -11236,6 +12235,7 @@ function renderResellerMessages(msgs){
       </div>
     </div>`;
   }).join('');
+  const newLen=msgs.length;
   if(wasAtBottom || (typeof newLen!=="undefined" && newLen > prevLen)) el.scrollTop=el.scrollHeight;
 }
 
@@ -11246,15 +12246,32 @@ async function sendChatMsg(){
   const text = inp?.value.trim();
   if(!text) return;
   inp.value = '';
-  const api=getApiBase();
-  const msg = {id:'m'+Date.now(), from:'admin', to:_chatReseller, text, ts:Date.now()};
+  const api=await ensureWorkingApiBase({silent:true});
   const chatKey='jb_chat_'+_chatReseller;
-  if(!_messages[_chatReseller]) _messages[_chatReseller] = [];
-  _messages[_chatReseller].push(msg);
-  try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
+  let msgs=mergeChatByVersion(
+    Array.isArray(_messages[_chatReseller])?_messages[_chatReseller]:[],
+    readChatMessagesFromCache(chatKey)
+  );
+  try{
+    const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+    if(dataRes.ok){
+      const {data}=await dataRes.json();
+      msgs=mergeChatByVersion(msgs,normalizeChatMessages(data&&data[chatKey]?data[chatKey]:[],chatKey));
+    }
+  }catch(_e){}
+  const msg = normalizeChatMessage({
+    id:'m'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    from:'admin',
+    to:_chatReseller,
+    text,
+    ts:Date.now(),
+    updatedAt:Date.now()
+  },msgs[msgs.length-1]||null);
+  msgs=mergeChatByVersion(msgs,[msg]);
+  _messages[_chatReseller]=msgs;
+  writeChatMessagesToCache(chatKey,msgs);
   renderMessages();
   try{
-    const msgs = (_messages[_chatReseller]||[]).slice();
     const synced=await syncChatThreadToCloud(chatKey,msgs,{
       opId:createLocalMutationOpId('chatadmin')
     });
@@ -11266,7 +12283,7 @@ async function sendChatMsg(){
     }
   }catch(e){
     console.error('[sendChatMsg]',e);
-    persistLocalSyncFallback(chatKey,_messages[_chatReseller]||[]);
+    persistLocalSyncFallback(chatKey,msgs);
   }
 }
 
@@ -11276,21 +12293,36 @@ async function sendResellerChatMsg(){
   if(!text||!me) return;
   inp.value='';
   const chatKey='jb_chat_'+me.id;
-  const msg={id:'m'+Date.now(),from:me.id,to:'admin',text,ts:Date.now()};
   try{
-    let msgs=[];
-    try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
-    msgs.push(msg);
-    try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+    const api=await ensureWorkingApiBase({silent:true});
+    let msgs=readChatMessagesFromCache(chatKey);
+    try{
+      const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+      if(dataRes.ok){
+        const {data}=await dataRes.json();
+        msgs=mergeChatByVersion(msgs,normalizeChatMessages(data&&data[chatKey]?data[chatKey]:[],chatKey));
+      }
+    }catch(_e){}
+    const msg=normalizeChatMessage({
+      id:'m'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+      from:me.id,
+      to:'admin',
+      text,
+      ts:Date.now(),
+      updatedAt:Date.now()
+    },msgs[msgs.length-1]||null);
+    msgs=mergeChatByVersion(msgs,[msg]);
+    _messages[String(me.id)]=msgs;
+    writeChatMessagesToCache(chatKey,msgs);
+    renderResellerMessages(msgs);
     const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
       opId:createLocalMutationOpId('reschatmsg')
     });
     if(!syncOk) throw new Error('chat sync failed');
-    renderResellerMessages(msgs);
     // Push notification to admin
     await sendPushToAdmin('💬 New Message', `${me.dname||me.email}: ${text.slice(0,50)}${text.length>50?'...':''}`);
   }catch(e){
-    persistLocalSyncFallback(chatKey,JSON.parse(localStorage.getItem(chatKey)||'[]'));
+    persistLocalSyncFallback(chatKey,readChatMessagesFromCache(chatKey));
     console.error('[sendResellerChatMsg]', e);
   }
 }
@@ -11320,6 +12352,95 @@ function resNavTo(page){
   if(page==='tips') renderResTips();
   if(page==='orders') renderResOrders();
   if(page==='finance') renderResFinance();
+  if(page==='home') renderResellerView();
+}
+
+let _pullRefreshBound=false;
+let _pullRefreshInFlight=false;
+let _pullStartY=0;
+let _pullTracking=false;
+let _pullTarget=null;
+
+async function runPullToRefresh(){
+  if(_pullRefreshInFlight||!me||!navigator.onLine) return;
+  _pullRefreshInFlight=true;
+  try{
+    toast('🔄 Refreshing...','info');
+    await loadFromCloudSilent().catch(()=>{});
+    await loadFromCloud().catch(()=>{});
+    if(me&&me.role==='Reseller'){
+      renderResellerView();
+      renderResOrders();
+    }else{
+      updateBadges();
+      render();
+      if(document.getElementById('pg-dash')?.classList.contains('on')) renderDash();
+    }
+    toast('✅ Updated','ok');
+  }finally{
+    _pullRefreshInFlight=false;
+  }
+}
+
+function bindPullToRefresh(){
+  if(_pullRefreshBound) return;
+  _pullRefreshBound=true;
+  const shouldAllowTarget=function(target){
+    if(!target||!target.closest) return false;
+    // Admin: active page scroll container; Reseller: reseller page container.
+    const activePage=document.querySelector('.page.on');
+    if(me&&me.role==='Reseller'){
+      const resPage=document.getElementById('pg-reseller');
+      return !!(resPage&&resPage.contains(target));
+    }
+    return !!(activePage&&activePage.contains(target));
+  };
+  document.addEventListener('touchstart',function(e){
+    if(_pullRefreshInFlight||!me||!navigator.onLine) return;
+    const t=e.touches&&e.touches[0];
+    if(!t) return;
+    if(!shouldAllowTarget(e.target)) return;
+    const scroller=(me&&me.role==='Reseller')
+      ? document.getElementById('pg-reseller')
+      : (function(){
+          const active=document.querySelector('.page.on');
+          if(!active) return null;
+          if(active.classList.contains('orders-page')){
+            return document.querySelector('.orders-page .list-panel')||active;
+          }
+          return active;
+        })();
+    if(!scroller) return;
+    if((scroller.scrollTop||0)>0) return;
+    _pullStartY=t.clientY;
+    _pullTracking=true;
+    _pullTarget=scroller;
+  },{passive:true});
+  document.addEventListener('touchmove',function(e){
+    if(!_pullTracking||!_pullTarget) return;
+    const t=e.touches&&e.touches[0];
+    if(!t) return;
+    if((_pullTarget.scrollTop||0)>0){
+      _pullTracking=false;
+      _pullTarget=null;
+      return;
+    }
+    const dy=t.clientY-_pullStartY;
+    if(dy<0){
+      _pullTracking=false;
+      _pullTarget=null;
+    }
+  },{passive:true});
+  document.addEventListener('touchend',function(e){
+    if(!_pullTracking||!_pullTarget) return;
+    const t=e.changedTouches&&e.changedTouches[0];
+    const dy=t?(t.clientY-_pullStartY):0;
+    _pullTracking=false;
+    _pullTarget=null;
+    if(dy>85){
+      runPullToRefresh().catch(()=>{});
+    }
+  },{passive:true});
 }
 
 // ── TOUCH GESTURES (Swipe Navigation) ──
@@ -11393,9 +12514,10 @@ function initOfflineIndicator(){
     if(!me || reconnectInFlight) return;
     reconnectInFlight=true;
     try{
+      await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
+      await flushLocalSyncFallback().catch(()=>{});
       if(getFirebaseEnabled()){
         await initFirebaseRealtime({silent:true,force:true});
-        await flushLocalSyncFallback().catch(()=>{});
       }
       await loadFromCloudSilent().catch(()=>{});
       await loadFromCloud().catch(()=>{});
@@ -11423,14 +12545,15 @@ function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
   warmFirebaseConnect();
   
-  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:30000;
+  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:CLOUD_FAST_SYNC_MS;
   // Sync interval adapts when realtime is active.
-  _autoSyncInterval = setInterval(() => {
+  _autoSyncInterval = setInterval(async() => {
     if(me && navigator.onLine){
+      await ensureWorkingApiBase({silent:true}).catch(()=>{});
+      await flushLocalSyncFallback().catch(()=>{});
       loadFromCloudSilent().catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
-        flushLocalSyncFallback().catch(()=>{});
       }
     }
   }, syncMs);
@@ -11880,10 +13003,17 @@ function formatVideoDuration(seconds){
 function getFeedPostsFromCache(){
   try{
     const raw=localStorage.getItem('jb_feed');
-    return raw?JSON.parse(raw):[];
+    const arr=raw?JSON.parse(raw):[];
+    if(!Array.isArray(arr)) return [];
+    return arr.map(function(post){return normalizeFeedPost(post,post);});
   }catch(_e){
     return [];
   }
+}
+function isFreshFeedPost(post){
+  const ts=Number(post&&post.ts)||0;
+  if(!ts) return false;
+  return (Date.now()-ts) <= (36*60*60*1000);
 }
 
 
@@ -11917,6 +13047,7 @@ function renderResFeed(searchQuery=''){
         const liked=myLikes[post.id];
         const tagClass={'NEW':'feed-tag-new','HOT':'feed-tag-hot','SALE':'feed-tag-sale','INFO':'feed-tag-info'}[post.tag]||'feed-tag-info';
         const tagEmoji={'NEW':'🆕','HOT':'🔥','SALE':'💰','INFO':'📢'}[post.tag]||'';
+        const isFresh=(Date.now()-Number(post.ts||0))<(6*60*60*1000);
         return `<div class="feed-post" style="animation-delay:${index*0.1}s;">
           <!-- Header -->
           <div style="padding:14px 16px;display:flex;align-items:center;gap:12px;">
@@ -11926,6 +13057,7 @@ function renderResFeed(searchQuery=''){
               <div style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px;">
                 <span>${fmtDate(post.ts)}</span>
                 ${post.tag?`<span class="feed-tag ${tagClass}">${tagEmoji} ${post.tag}</span>`:''}
+                ${isFresh?`<span class="feed-tag feed-tag-new">✨ Fresh</span>`:''}
               </div>
             </div>
           </div>
@@ -12155,7 +13287,8 @@ function openResDetail(orderId){
       }).join('')}
     </div>
     
-    <div style="display:flex;gap:8px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      ${(me&&me.role==='Reseller'&&o.resellerId===me.id)?`<button onclick="openResOrderImageEdit('${o.id}')" style="flex:1 1 100%;background:rgba(34,197,94,.12);color:#16a34a;border:1px solid rgba(34,197,94,.35);border-radius:10px;padding:10px;font-size:12px;font-weight:800;cursor:pointer;">🖼️ Edit Product Images</button>`:''}
       <button onclick="closeResDetail()" style="flex:1;background:rgba(255,255,255,.08);color:var(--text);border:none;border-radius:10px;padding:12px;font-size:13px;font-weight:700;cursor:pointer;">Close</button>
       <button onclick="openResellerChat()" style="flex:1;background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;border:none;border-radius:10px;padding:12px;font-size:13px;font-weight:700;cursor:pointer;">💬 Message Admin</button>
     </div>`;
@@ -12166,6 +13299,119 @@ function openResDetail(orderId){
 function closeResDetail(){
   const modal=document.getElementById('res-detail-modal');
   if(modal)modal.style.display='none';
+}
+
+function renderResOrderImageEditList(order){
+  const list=document.getElementById('res-img-edit-list');
+  if(!list) return;
+  const prods=(order&&Array.isArray(order.products))?order.products:[];
+  if(!prods.length){
+    list.innerHTML='<div style="font-size:12px;color:var(--muted);padding:8px 0;">No products on this order.</div>';
+    return;
+  }
+  list.innerHTML=prods.map(function(p,idx){
+    const original=String((p&&p.img)||'').trim();
+    const draft=Object.prototype.hasOwnProperty.call(_resImgEditDraft,String(idx))?_resImgEditDraft[String(idx)]:original;
+    const imgRef=String(draft||'').trim();
+    const changed=imgRef!==original;
+    return `<div style="display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
+      ${imgRef?`<img src="${imgRef}" style="width:56px;height:56px;border-radius:10px;object-fit:cover;border:1px solid var(--border);flex-shrink:0;">`:`<div style="width:56px;height:56px;border-radius:10px;border:1px dashed var(--border);background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">📦</div>`}
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p&&p.name||('Product '+(idx+1)))}</div>
+        <div style="font-size:11px;color:${changed?'var(--green)':'var(--muted)'};margin-top:2px;">${changed?'Will be updated on save':'Current image'}</div>
+        <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">
+          <label for="res-edit-img-${idx}" class="btn btn-ghost btn-xs" style="cursor:pointer;">📷 ${imgRef?'Change':'Add'}</label>
+          <input type="file" accept="image/*" id="res-edit-img-${idx}" style="display:none;" onchange="handleResOrderImageInput(${idx},this)">
+          ${imgRef?`<button type="button" class="btn btn-danger btn-xs" onclick="clearResOrderImageDraft(${idx})">Remove</button>`:''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function openResOrderImageEdit(orderId){
+  if(!me||me.role!=='Reseller') return;
+  const order=orders.find(function(x){return x&&x.id===orderId&&x.resellerId===me.id;});
+  if(!order){
+    toast('Order not found','err');
+    return;
+  }
+  _resImgEditOrderId=order.id;
+  _resImgEditDraft={};
+  const meta=document.getElementById('res-img-edit-order-meta');
+  if(meta) meta.textContent=(order.ref||order.id.slice(-6))+' · '+(order.name||'');
+  renderResOrderImageEditList(order);
+  const modal=document.getElementById('res-img-edit-modal');
+  if(modal) modal.style.display='flex';
+}
+function closeResOrderImageEdit(){
+  const modal=document.getElementById('res-img-edit-modal');
+  if(modal) modal.style.display='none';
+  _resImgEditOrderId=null;
+  _resImgEditDraft={};
+}
+async function handleResOrderImageInput(prodIdx,input){
+  if(!input||!input.files||!input.files[0]) return;
+  const order=orders.find(function(x){return x&&x.id===_resImgEditOrderId;});
+  if(!order) return;
+  try{
+    const compressed=await new Promise(function(resolve,reject){
+      const reader=new FileReader();
+      reader.onload=function(e){compressImage(e.target.result,1280,0.88).then(resolve).catch(reject);};
+      reader.onerror=reject;
+      reader.readAsDataURL(input.files[0]);
+    });
+    _resImgEditDraft[String(prodIdx)]=compressed;
+    renderResOrderImageEditList(order);
+    setTimeout(async function(){
+      try{
+        const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
+        if(!uploaded||uploaded===compressed) return;
+        _resImgEditDraft[String(prodIdx)]=uploaded;
+        const live=orders.find(function(x){return x&&x.id===_resImgEditOrderId;});
+        if(live) renderResOrderImageEditList(live);
+      }catch(_e){}
+    },0);
+  }catch(err){
+    toast('Image prepare failed: '+(err&&err.message?err.message:'unknown'),'err');
+  }finally{
+    input.value='';
+  }
+}
+function clearResOrderImageDraft(prodIdx){
+  const order=orders.find(function(x){return x&&x.id===_resImgEditOrderId;});
+  if(!order) return;
+  _resImgEditDraft[String(prodIdx)]=null;
+  renderResOrderImageEditList(order);
+}
+async function saveResOrderImageEdit(){
+  if(!me||me.role!=='Reseller'||!_resImgEditOrderId) return;
+  const order=orders.find(function(x){return x&&x.id===_resImgEditOrderId&&x.resellerId===me.id;});
+  if(!order){
+    toast('Order not found','err');
+    return;
+  }
+  const btn=document.getElementById('res-img-edit-save-btn');
+  if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    const prods=Array.isArray(order.products)?order.products:[];
+    Object.keys(_resImgEditDraft).forEach(function(key){
+      const idx=Number(key);
+      if(!Number.isInteger(idx)||idx<0||!prods[idx]) return;
+      const nextImg=String(_resImgEditDraft[key]||'').trim();
+      prods[idx].img=nextImg||null;
+    });
+    order.products=prods;
+    order.updatedAt=Date.now();
+    await saveOrders([order.id]);
+    logActivity('edited',`Reseller updated product images: ${esc(order.ref||order.id.slice(-6))} (${esc(order.name)})`,order.id);
+    closeResOrderImageEdit();
+    openResDetail(order.id);
+    renderResellerView();
+    updateBadges();
+    toast('✅ Product images updated','ok');
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='💾 Save Images';}
+  }
 }
 
 // ── TIPS ──
@@ -12286,7 +13532,8 @@ function previewFeedImgs(input){
     const reader=new FileReader();
     reader.onload=async function(e){
       try{
-        const compressed=await compressImage(e.target.result,520,0.55);
+        // Feed cards should keep detail: use larger target + higher JPEG quality.
+        const compressed=await compressImage(e.target.result,1280,0.88);
         _feedImgs.push({data:compressed,url:null});
         const idx=_feedImgs.length-1;
         const wrap=document.createElement('div');
@@ -12431,7 +13678,16 @@ async function createFeedPost(){
   
   try{
     // Local-first optimistic update to prevent UI rollback feel.
-    const posts=getFeedPostsFromCache();
+    let posts=getFeedPostsFromCache();
+    try{
+      const api=await ensureWorkingApiBase({silent:true});
+      const feedRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+      if(feedRes.ok){
+        const payload=await feedRes.json();
+        const remoteFeed=Array.isArray(payload&&payload.data&&payload.data.jb_feed)?payload.data.jb_feed:[];
+        posts=mergeFeedByVersion(posts,remoteFeed).map(function(item){return normalizeFeedPost(item,item);});
+      }
+    }catch(_e){}
     posts.push(post);
     setFeedCache(posts,Date.now());
     if(me&&me.role==='Reseller') renderResFeed();
@@ -12628,7 +13884,8 @@ async function sendChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,360,0.5);
+      // Chat image quality tuned up to avoid visibly blurry media.
+      const compressed=await compressImage(e.target.result,1280,0.88);
       const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+_chatReseller;
       if(!_messages[_chatReseller])_messages[_chatReseller]=[];
@@ -12642,7 +13899,7 @@ async function sendChatImage(input){
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
         try{
-          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
           if(!uploaded || uploaded===compressed) return;
           const msgs=_messages[_chatReseller]||[];
           const found=msgs.find(m=>m&&m.id===msg.id);
@@ -12905,7 +14162,8 @@ async function sendResChatImage(input){
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
-      const compressed=await compressImage(e.target.result,360,0.5);
+      // Chat image quality tuned up to avoid visibly blurry media.
+      const compressed=await compressImage(e.target.result,1280,0.88);
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+me.id;
       let msgs=[];
@@ -12920,7 +14178,7 @@ async function sendResChatImage(input){
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
         try{
-          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:450});
+          const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
           if(!uploaded || uploaded===compressed) return;
           let live=[];
           try{live=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){live=[];}
@@ -13087,6 +14345,12 @@ function staffToggleCamera(){
 async function staffStartCamera(){
   const wrap = document.getElementById('staff-camera-wrap');
   const video = document.getElementById('staff-camera-video');
+  if(_staffCameraStream){
+    wrap.style.display = 'block';
+    const btn = document.getElementById('staff-cam-btn');
+    if(btn) btn.textContent = '⏹';
+    return;
+  }
   try{
     _staffCameraStream = await navigator.mediaDevices.getUserMedia({
       video:{facingMode:'environment', width:{ideal:1280}}
@@ -13097,7 +14361,10 @@ async function staffStartCamera(){
     
     if('BarcodeDetector' in window){
       const detector = new BarcodeDetector({formats:['code_128','code_39','ean_13','qr_code','data_matrix','itf']});
+      _staffDetectBusy=false;
       _staffCameraInterval = setInterval(async()=>{
+        if(_staffDetectBusy||!video||video.readyState<2) return;
+        _staffDetectBusy=true;
         try{
           const barcodes = await detector.detect(video);
           if(barcodes.length > 0){
@@ -13106,8 +14373,10 @@ async function staffStartCamera(){
             document.getElementById('staff-scan-input').value = val;
             staffProcessScan();
           }
-        }catch(e){}
-      }, 500);
+        }catch(e){}finally{
+          _staffDetectBusy=false;
+        }
+      }, SCAN_DETECT_INTERVAL_MS);
     }
   }catch(e){
     toast('摄像头访问被拒绝','err');
@@ -13120,6 +14389,7 @@ function staffStopCamera(){
     _staffCameraStream = null;
   }
   if(_staffCameraInterval){ clearInterval(_staffCameraInterval); _staffCameraInterval = null; }
+  _staffDetectBusy=false;
   const wrap = document.getElementById('staff-camera-wrap');
   if(wrap) wrap.style.display = 'none';
   const btn = document.getElementById('staff-cam-btn');
@@ -13864,7 +15134,7 @@ async function saveOrders(changedOrderIds){
     }).filter(o=>o&&o.id&&!isOrderDeleted(o));
     localStorage.setItem('jb_orders',JSON.stringify(orders));
 
-    const api=getApiBase();
+    const api=await ensureWorkingApiBase({silent:true});
     let queuedFallback=false;
 
     for(const o of targetOrders){
@@ -14078,7 +15348,7 @@ function fillFromCatalog(idx,sel){
   set('pcn-'+idx,opt.getAttribute('data-namecn'));
 }
 
-['order-modal','edit-modal','sup-modal','user-modal','catalog-modal','reseller-order-modal','img-editor-modal','cn-product-modal','product-detail-modal'].forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener('click',function(e){if(e.target===this)this.classList.remove('open');});});
+['order-modal','edit-modal','sup-modal','user-modal','catalog-modal','reseller-order-modal','img-editor-modal','cn-product-modal','product-detail-modal','res-img-edit-modal'].forEach(id=>{const el=document.getElementById(id);if(!el) return;el.addEventListener('click',function(e){if(e.target!==this) return;if(id==='res-img-edit-modal'){closeResOrderImageEdit();return;}this.classList.remove('open');});});
 
 document.addEventListener('DOMContentLoaded',()=>{
   const dz=document.getElementById('drop-zone');if(!dz)return;
