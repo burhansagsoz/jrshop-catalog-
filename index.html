@@ -8479,12 +8479,13 @@ function writeLocalOrderMutations(map){
 }
 function cleanupLocalOrderMutations(map){
   const src=map&&typeof map==='object'?{...map}:readLocalOrderMutations();
+  const pendingFallbackIds=getPendingFallbackOrderIds();
   const now=Date.now();
   let changed=false;
   Object.keys(src).forEach(function(id){
     const row=src[id]||{};
     const ts=Number(row.ts)||0;
-    if(!ts || (now-ts)>=LOCAL_ORDER_MUTATION_KEEP_MS){
+    if((!ts || (now-ts)>=LOCAL_ORDER_MUTATION_KEEP_MS) && !pendingFallbackIds.has(String(id))){
       delete src[id];
       changed=true;
     }
@@ -8492,9 +8493,24 @@ function cleanupLocalOrderMutations(map){
   if(changed) writeLocalOrderMutations(src);
   return src;
 }
+function getPendingFallbackOrderIds(){
+  const fallback=readLocalSyncFallback();
+  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+    ? fallback.jb_order_ops.value
+    : [];
+  const ids=new Set();
+  pendingOps.forEach(function(op){
+    const id=String(op&&op.orderId||'').trim();
+    if(id) ids.add(id);
+  });
+  return ids;
+}
 function getActiveLocalOrderMutationIds(){
   const map=cleanupLocalOrderMutations();
-  return Object.keys(map);
+  const ids=new Set(Object.keys(map));
+  const pendingFallbackIds=getPendingFallbackOrderIds();
+  pendingFallbackIds.forEach(function(id){ ids.add(id); });
+  return Array.from(ids);
 }
 function createLocalMutationOpId(prefix){
   return `${prefix||'ord'}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
@@ -8517,19 +8533,19 @@ function clearLocalOrderMutation(orderId){
   delete map[String(orderId)];
   writeLocalOrderMutations(map);
 }
-function hasActiveLocalOrderMutation(orderId){
+function hasActiveLocalOrderMutation(orderId,pendingFallbackIds){
   if(!orderId) return false;
+  const id=String(orderId);
+  const pendingIds=(pendingFallbackIds&&typeof pendingFallbackIds.has==='function')
+    ? pendingFallbackIds
+    : getPendingFallbackOrderIds();
   const map=cleanupLocalOrderMutations();
-  const row=map[String(orderId)];
-  if(!row) return false;
+  const row=map[id];
+  if(!row) return pendingIds.has(id);
   const ts=Number(row.ts)||0;
   const age=Date.now()-ts;
   if(age<Math.min(LOCAL_ORDER_MUTATION_KEEP_MS,LOCAL_ORDER_CONVERGENCE_GRACE_MS)) return true;
-  const fallback=readLocalSyncFallback();
-  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
-    ? fallback.jb_order_ops.value
-    : [];
-  return pendingOps.some(function(op){return String(op&&op.orderId||'')===String(orderId);});
+  return pendingIds.has(id);
 }
 function readLocalDataMutations(){
   try{
@@ -8809,13 +8825,23 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
   const local=Array.isArray(localOrders)?localOrders:[];
   const remote=Array.isArray(remoteOrders)?remoteOrders:[];
   const remoteIds=new Set(remote.filter(o=>o&&o.id).map(o=>String(o.id)));
+  const pendingFallbackIds=getPendingFallbackOrderIds();
   return local.filter(function(o){
     if(!o||!o.id) return false;
     if(remoteIds.has(String(o.id))) return true;
     const updatedAt=Number(o.updatedAt||o.ts||0);
     const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
     if(isFreshLocal) return true;
-    return hasActiveLocalOrderMutation(o.id);
+    const hasPendingMutation=hasActiveLocalOrderMutation(o.id,pendingFallbackIds);
+    if(hasPendingMutation) return true;
+    console.warn('[OrderSync] Pruning local order missing from remote snapshot', {
+      orderId:String(o.id),
+      updatedAt,
+      ageMs:updatedAt?Math.max(0,Date.now()-updatedAt):null,
+      remoteCount:remote.length,
+      pendingFallbackOps:pendingFallbackIds.size
+    });
+    return false;
   });
 }
 
@@ -9829,6 +9855,7 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
   let merged=[...byId.values()];
   if(pruneMissing){
     const incomingIds=new Set((incomingOrders||[]).filter(o=>o&&o.id).map(o=>String(o.id)));
+    const pendingFallbackIds=getPendingFallbackOrderIds();
     merged=merged.filter(function(o){
       if(!o||!o.id) return false;
       if(incomingIds.has(String(o.id))) return true;
@@ -9836,7 +9863,7 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
       const updatedAt=Number(o.updatedAt||o.ts||0);
       const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
       if(isFreshLocal) return true;
-      if(hasActiveLocalOrderMutation(o.id)) return true;
+      if(hasActiveLocalOrderMutation(o.id,pendingFallbackIds)) return true;
       return false;
     });
   }
