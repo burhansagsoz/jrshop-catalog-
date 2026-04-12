@@ -60,3 +60,33 @@ Then hard refresh and test `Push to Cloudflare`.
 Current worker uses `Access-Control-Allow-Origin: *`.
 You can restrict it later to your production domain after everything is stable.
 
+## 7) Security and reliability env variables (recommended)
+
+Set these Worker variables for the hardened API mode:
+
+- Authentication
+  - `JWT_AUTH_SECRET` (preferred)
+  - `API_AUTH_TOKEN` (optional admin fallback token)
+  - `SETUP_ENABLED=false` in production
+- Default admin bootstrap
+  - `DEFAULT_ADMIN_EMAIL`
+  - `DEFAULT_ADMIN_PASSWORD`
+- Logistics provider
+  - `HUALEI_BASE_URL`
+  - `HUALEI_USERNAME`
+  - `HUALEI_PASSWORD`
+  - `HUALEI_LABEL_BASE_URL` (optional)
+- Rate/replay protection
+  - `API_RATE_LIMIT_WINDOW_MS`
+  - `API_RATE_LIMIT_MAX`
+  - `REPLAY_MAX_SKEW_MS`
+  - `REPLAY_CACHE_MS`
+- Secret rotation health
+  - `SECRET_ROTATED_AT` (epoch ms)
+  - `SECRET_MAX_AGE_MS`
+
+New operator endpoints:
+
+- `GET /api/auth/health` (public): auth mode + secret rotation status
+- `GET /api/ops/health` (Admin): rate/replay/auth metrics + outbox/audit summary
+

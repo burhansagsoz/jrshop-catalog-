@@ -2767,7 +2767,7 @@ async function login(){
         }else{
           orders=Array.isArray(localOrders)?localOrders:[];
         }
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        persistOrdersLocalSafe(orders);
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
         users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
@@ -3021,7 +3021,7 @@ async function navOrders(status,el){
             if(shouldAcceptRemoteOrders(od.orders)){
               const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
               orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
-              localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+              persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
               updateBadges();
               loaded=true;
             }else{
@@ -3038,7 +3038,7 @@ async function navOrders(status,el){
               if(shouldAcceptRemoteOrders(data.jb_orders)){
                 const mergedPendingData=mergeOrdersByFreshness(localOrders,data.jb_orders,{source:'pending_nav_data',pruneMissing:true});
                 orders=pruneLocalOrdersAgainstRemote(mergedPendingData,data.jb_orders);
-                localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+                persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
                 updateBadges();
               }else{
                 console.warn('[Pending] Ignoring fallback /api/data orders snapshot to protect local data');
@@ -7614,11 +7614,44 @@ function renderCloudApiSummary(){
 function apiUrl(path){
   return ((localStorage.getItem('jb_cloud_api')||'').trim()||location.origin)+String(path||'');
 }
+function createClientRequestId(prefix){
+  const p=String(prefix||'rq').replace(/[^a-z0-9_-]/gi,'').slice(0,8)||'rq';
+  return `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,10)}`;
+}
+function buildSyncCursor(){
+  const list=Array.isArray(orders)?orders:[];
+  let maxV=0;
+  let maxTs=0;
+  list.forEach(function(o){
+    if(!o||typeof o!=='object') return;
+    const v=Number(o.v)||0;
+    const ts=Number(o.updatedAt||o.ts)||0;
+    if(v>maxV) maxV=v;
+    if(ts>maxTs) maxTs=ts;
+  });
+  return {
+    ts:maxTs,
+    v:maxV
+  };
+}
 function getAuthHeaders(extra){
   const headers={...(extra||{})};
   const k=(localStorage.getItem('jb_cloud_key')||'').trim();
   if(k) headers.Authorization='Bearer '+k;
+  if(!headers['X-Client-Timestamp']) headers['X-Client-Timestamp']=String(Date.now());
+  if(!headers['X-Request-Id']) headers['X-Request-Id']=createClientRequestId('api');
   return headers;
+}
+function appendIncrementalCursorToApiUrl(baseUrl){
+  try{
+    const u=new URL(String(baseUrl||''),location.origin);
+    const c=buildSyncCursor();
+    if(Number(c.ts)>0) u.searchParams.set('sinceTs',String(Number(c.ts)));
+    if(Number(c.v)>0) u.searchParams.set('sinceV',String(Number(c.v)));
+    return u.toString();
+  }catch(_e){
+    return String(baseUrl||'');
+  }
 }
 function readLocalSyncFallback(){
   try{
@@ -7628,6 +7661,43 @@ function readLocalSyncFallback(){
   }catch(_e){
     return {};
   }
+}
+function readLocalSyncDeadletter(){
+  try{
+    const raw=localStorage.getItem(LOCAL_SYNC_DEADLETTER_KEY);
+    const list=raw?JSON.parse(raw):[];
+    return Array.isArray(list)?list:[];
+  }catch(_e){
+    return [];
+  }
+}
+function persistLocalSyncDeadletter(list){
+  const arr=Array.isArray(list)?list:[];
+  try{localStorage.setItem(LOCAL_SYNC_DEADLETTER_KEY,JSON.stringify(arr.slice(-200)));}catch(_e){}
+}
+function pushSyncDeadletter(entry){
+  if(!entry||typeof entry!=='object') return;
+  const list=readLocalSyncDeadletter();
+  list.push({
+    key:String(entry.key||'unknown'),
+    reason:String(entry.reason||'retry_exhausted'),
+    attempt:Math.max(0,Number(entry.attempt)||0),
+    ts:Number(entry.ts)||Date.now(),
+    sample:entry.sample===undefined?null:entry.sample
+  });
+  persistLocalSyncDeadletter(list);
+}
+function getLocalSyncDeadletterMetrics(){
+  const list=readLocalSyncDeadletter();
+  let oldestTs=0;
+  list.forEach(function(row){
+    const ts=Number(row&&row.ts)||0;
+    if(ts && (!oldestTs || ts<oldestTs)) oldestTs=ts;
+  });
+  return {
+    count:list.length,
+    oldestTs
+  };
 }
 function persistLocalSyncFallback(key,value){
   if(!key) return;
@@ -7661,6 +7731,19 @@ function persistFallbackRetryState(key,value,entry,reason){
   if(!key) return;
   const prev=entry&&typeof entry==='object'?entry:{};
   const nextAttempt=Math.max(1,(Number(prev.attempt)||0)+1);
+  const valueList=Array.isArray(value)?value:[value];
+  const maxAttempts=Math.max(2,Number(settings&&settings.syncDeadletterMaxAttempts)||9);
+  if(nextAttempt>maxAttempts){
+    pushSyncDeadletter({
+      key,
+      reason:String(reason||prev.lastError||'sync_deadletter'),
+      attempt:nextAttempt,
+      ts:Date.now(),
+      ops:valueList.length
+    });
+    clearLocalSyncFallbackKey(key);
+    return;
+  }
   const nextRetryAt=Date.now()+getFallbackBackoffMs(nextAttempt);
   const map=readLocalSyncFallback();
   map[key]={
@@ -8201,7 +8284,8 @@ async function loadFromCloudSilent(){
     }
 
     // Otoriter sipariş snapshot'u: realtime kapalı olsa bile cihazlar tutarlı olsun.
-    const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
+    const incrementalOrdersUrl=appendIncrementalCursorToApiUrl(api+'/api/orders');
+    const ordRes=await fetch(incrementalOrdersUrl,{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
     const ordPayload=await ordRes.json();
     const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
@@ -8289,7 +8373,8 @@ async function loadFromCloud(){
           applyRemoteKeyToLocal(k,data[k],'load_aux');
         });
         // Load orders from dedicated endpoint (individual rows — no size limit)
-        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
+        const incrementalOrdersUrl=appendIncrementalCursorToApiUrl(api+'/api/orders');
+        const ordRes=await fetch(incrementalOrdersUrl,{headers:getAuthHeaders()});
         let cloudOrders=[];
         if(ordRes.ok){
           const od=await ordRes.json();
@@ -8315,7 +8400,7 @@ async function loadFromCloud(){
         orders=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'load',pruneMissing:true});
         orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
         restoreOrderImagesFromLocalSources(orders,{source:'load'});
-        localStorage.setItem('jb_orders',JSON.stringify(orders));
+        persistOrdersLocalSafe(orders);
         // Reload variables from localStorage
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
@@ -8414,6 +8499,7 @@ const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
+const LOCAL_SYNC_DEADLETTER_KEY='jb_sync_deadletter';
 const FIREBASE_MIGRATE_MAX_BYTES=850000;
 const CLOUD_FAST_SYNC_MS=8000;
 let _firebaseApp=null;
@@ -8454,7 +8540,11 @@ const _health={
   authState:'cloudflare_mode',
   feedRealtime:false,
   ordersRealtime:false,
-  dataRealtime:false
+  dataRealtime:false,
+  syncBacklogOps:0,
+  syncBacklogKeys:0,
+  syncBacklogOldestTs:0,
+  syncDeadLetterOps:0
 };
 let _realtimeRenderTimer=null;
 let _realtimeMetricsTimer=null;
@@ -8858,6 +8948,12 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
 }
 
 function markSync(source){
+  const q=getLocalSyncFallbackMetrics();
+  const dl=getLocalSyncDeadletterMetrics();
+  _health.syncBacklogOps=Number(q&&q.ops)||0;
+  _health.syncBacklogKeys=Number(q&&q.keys)||0;
+  _health.syncBacklogOldestTs=Number(q&&q.oldestTs)||0;
+  _health.syncDeadLetterOps=Number(dl&&dl.ops)||0;
   _health.lastSyncAt=Date.now();
   _health.lastSyncSource=source||'-';
   // Successful sync should clear stale health error noise.
@@ -8955,6 +9051,7 @@ function renderHealthPanel(){
   const lastAct=Array.isArray(activityLog)&&activityLog[0]?activityLog[0]:null;
   const lastActTxt=lastAct?`${lastAct.type||'activity'} · ${fmtDateTime(lastAct.ts)}`:'-';
   const q=getLocalSyncFallbackMetrics();
+  const dlq=getLocalSyncDeadletterMetrics();
   const nextRetryTxt=(q.nextRetryAt&&q.nextRetryAt>Date.now())?`${Math.max(1,Math.ceil((q.nextRetryAt-Date.now())/1000))}s`:'now';
   const oldestTxt=q.oldestTs?`${Math.max(0,Math.floor((Date.now()-q.oldestTs)/1000))}s`:'-';
   el.innerHTML=`
@@ -8979,6 +9076,11 @@ function renderHealthPanel(){
         <div style="font-size:11px;color:var(--muted);">Outbox</div>
         <div style="font-size:13px;font-weight:700;">${q.ops} ops / ${q.keys} keys</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px;">oldest:${oldestTxt} · retry:${nextRetryTxt}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Dead Letter</div>
+        <div style="font-size:13px;font-weight:700;color:${dlq.count>0?'#f59e0b':'#22c55e'};">${dlq.count} entries</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;">oldest:${dlq.oldestTs?`${Math.max(0,Math.floor((Date.now()-dlq.oldestTs)/1000))}s`:'-'}</div>
       </div>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted);">Last sync: ${fmtTs} (${_health.lastSyncSource})</div>
@@ -10153,7 +10255,7 @@ async function initFirebaseRealtime(opts={}){
         const merged=mergeOrdersByFreshness(orders,incomingLive,{source:'realtime',pruneMissing:true});
         orders=pruneLocalOrdersAgainstRemote(merged,incomingLive);
         restoreOrderImagesFromLocalSources(orders,{source:'realtime'});
-        localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+        persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
         _health.ordersRealtime=true;
         markSync('orders_snapshot');
         if(me){
@@ -10426,6 +10528,7 @@ function isApiPath(pathname){
 function isHealthTrackedApiPath(pathname){
   const p=String(pathname||'').trim();
   return p==='/api/test' ||
+    p==='/api/ops/health' ||
     p==='/api/data' ||
     p==='/api/orders' ||
     p==='/api/order' ||
@@ -10437,7 +10540,7 @@ function shouldMarkSyncFromApiResponse(pathname,method,res){
   if(!res||!res.ok) return false;
   const p=String(pathname||'').trim();
   const m=String(method||'GET').toUpperCase();
-  if(p==='/api/test' || p==='/api/data' || p==='/api/orders') return true;
+  if(p==='/api/test' || p==='/api/data' || p==='/api/orders' || p==='/api/ops/health') return true;
   if((p==='/api/order' || p==='/api/sync' || p==='/api/orders/bulk' || p==='/api/backup/import') && m==='POST') return true;
   return false;
 }
@@ -10570,12 +10673,47 @@ async function handleFirebaseApiRequest(url,method,body){
       return jsonApiResponse({ok:true,localOnly:true});
     }
   }
+  if(path==='/api/ops/health'&&m==='GET'){
+    return jsonApiResponse({
+      ok:true,
+      ts:Date.now(),
+      authMode:'firebase_local',
+      setupEnabled:false,
+      metrics:{
+        authOk:0,
+        authRejected:0,
+        rateLimitBlocked:0,
+        replayBlocked:0,
+        setupBlocked:0
+      },
+      outbox:{
+        pending:Number(getLocalSyncFallbackMetrics().ops)||0,
+        oldestCreatedAt:Number(getLocalSyncFallbackMetrics().oldestTs)||0
+      },
+      audit:null,
+      localOnly:true
+    });
+  }
   if(path==='/api/orders'&&m==='GET'){
     if(firebaseOnline){
       try{
-        const remoteOrders=getLiveOrdersOnly(await readFirebaseOrders());
+        const sinceTs=Math.max(0,Number(u.searchParams.get('sinceTs'))||0);
+        const sinceV=Math.max(0,Number(u.searchParams.get('sinceV'))||0);
+        const allOrders=getLiveOrdersOnly(await readFirebaseOrders());
+        const remoteOrders=(sinceTs>0||sinceV>0)
+          ? allOrders.filter(function(order){
+              const ov=Number(order&&order.v)||0;
+              const ots=Number(order&&order.updatedAt||order&&order.ts)||0;
+              return ov>=sinceV && ots>=sinceTs;
+            })
+          : allOrders;
         writeLocalJson('jb_orders',remoteOrders);
-        return jsonApiResponse({orders:remoteOrders});
+        return jsonApiResponse({
+          orders:remoteOrders,
+          incremental:!!(sinceTs>0||sinceV>0),
+          sinceTs,
+          sinceV
+        });
       }catch(err){
         markError(err);
       }
@@ -10608,7 +10746,7 @@ async function handleFirebaseApiRequest(url,method,body){
       applyOrderDeleteLocally(id,deletedAt||ts);
     }else{
       orders=mergeOrdersByFreshness(orders,[localOrder],{source:'api_upsert'});
-      localStorage.setItem('jb_orders',JSON.stringify(Array.isArray(orders)?orders:[]));
+      persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
     }
     const event=(req&&req.event&&typeof req.event==='object')
       ? {...req.event,orderId:id,opId:String(req.event.opId||opId),v,ts:Number(req.event.ts)||ts}
@@ -11706,7 +11844,7 @@ async function startPendingPoll(){
           const newPending=newOrders.filter(o=>o.pendingApproval).length;
           const mergedOrders=mergeOrdersByFreshness(orders,newOrders,{source:'poll_admin',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
-          localStorage.setItem('jb_orders',JSON.stringify(orders));
+          persistOrdersLocalSafe(orders);
           updateBadges();
           if(newPending>oldPending){
             const latestPending=newOrders.filter(function(o){return o&&o.pendingApproval;}).sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0];
@@ -15125,7 +15263,7 @@ function orderCompareSnapshot(order){
   delete clean.updatedAt;
   return JSON.stringify(clean);
 }
-async function saveOrders(changedOrderIds){
+async function saveOrders(changedOrderIds,opts={}){
   const nowTs=Date.now();
   let previousOrders=[];
   try{
@@ -15135,7 +15273,11 @@ async function saveOrders(changedOrderIds){
   }
   const prevById=new Map((Array.isArray(previousOrders)?previousOrders:[]).filter(o=>o&&o.id).map(o=>[o.id,o]));
   const currentIds=new Set((orders||[]).filter(o=>o&&o.id).map(o=>o.id));
-  const deletedOrderIds=[...prevById.keys()].filter(id=>!currentIds.has(id));
+  // Never infer deletes from memory-vs-storage mismatch by default.
+  // In multi-tab scenarios, stale in-memory state can otherwise tombstone
+  // orders created by another tab. Explicit deletes must use deleteOrderWithTombstone.
+  const inferDeletes=!!(opts&&opts.inferDeletes===true);
+  const deletedOrderIds=inferDeletes?[...prevById.keys()].filter(id=>!currentIds.has(id)):[];
 
   const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):new Set();
   if(!changedSet.size){
