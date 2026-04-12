@@ -4495,11 +4495,13 @@ function copyAddressFromBarcode(orderId){
   // Status progression based on current status
   if(['New','Sent to Factory'].includes(o.status)){
     o.status='At Depot';
-    saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🏭 Status: At Depot','info');
   } else if(o.status==='At Depot'){
     o.status='Sent to Logistics';
-    saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🚛 Status: Sent to Logistics','info');
   }
 }
@@ -4752,6 +4754,13 @@ function addAnotherPhoto(){
   document.getElementById('depot-skip-btn').style.display='block';
 }
 
+function persistScannerOrderChange(orderId){
+  const id=String(orderId||'').trim();
+  if(!id) return;
+  // Let UI feedback paint first; saveOrders does heavy sync prep on main thread.
+  setTimeout(function(){ saveOrders([id]); },0);
+}
+
 async function copyAndMarkLogistics(){
   const o=orders.find(x=>x.id===_depotPhotoOrderId);if(!o)return;
   o.updatedAt=Date.now();
@@ -4767,7 +4776,8 @@ async function copyAndMarkLogistics(){
     // Mark all products as arrived if not already
     prods.forEach(p=>p.arrived=true);
     o.status='At Depot'; // stays at depot, shelf.ready = true = "Ready to Ship"
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     logActivity('status',`All items marked arrived, Ready to Ship: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     if(notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
     toast('📋 Address copied! Order is Ready to Ship.','ok');
@@ -4782,7 +4792,8 @@ async function copyAndMarkLogistics(){
   } else {
     // Single product: At Depot → Sent to Logistics directly
     o.status='Sent to Logistics';
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     logActivity('status',`Sent to Logistics (barcode scan): ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     if(notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
     toast('📋 Address copied & Sent to Logistics!','ok');
@@ -4800,7 +4811,8 @@ async function copyAndMarkLogistics(){
 async function markSentLogisticsFromBarcode(orderId){
   const o=orders.find(x=>x.id===orderId);if(!o)return;o.updatedAt=Date.now();
   o.status='Sent to Logistics';
-  await saveOrders([o.id]);updateBadges();
+  updateBadges();
+  persistScannerOrderChange(o.id);
   logActivity('status',`Sent to Logistics: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   if(notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
   toast('🚛 Sent to Logistics!','ok');
@@ -4820,11 +4832,13 @@ async function copyAddressOnly(){
   // Status progression based on current status
   if(['New','Sent to Factory'].includes(o.status)){
     o.status='At Depot';
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🏭 Status: At Depot','info');
   } else if(o.status==='At Depot'){
     o.status='Sent to Logistics';
-    await saveOrders([o.id]);updateBadges();
+    updateBadges();
+    persistScannerOrderChange(o.id);
     toast('🚛 Status: Sent to Logistics','info');
   }
 }
@@ -4833,7 +4847,9 @@ async function copyAddressOnly(){
 async function quickMarkDepot(id){
   const o=orders.find(x=>x.id===id);if(!o)return;
   o.updatedAt=Date.now();
-  o.status='At Depot';await saveOrders([o.id]);updateBadges();
+  o.status='At Depot';
+  updateBadges();
+  persistScannerOrderChange(o.id);
   toast('✅ At Depot!','ok');
   showBarcodeResult(o,-1);
 }
