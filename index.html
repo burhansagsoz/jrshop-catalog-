@@ -2657,7 +2657,7 @@ async function login(){
     // Cloudflare API login retry
     const loginBtn=document.querySelector('.login-btn');
     if(loginBtn)loginBtn.textContent='Checking...';
-    fetch(getApiBase()+'/api/data')
+    fetch(getApiBase()+'/api/data',{headers:getAuthHeaders()})
     .then(r=>r.json())
     .then(res=>{
       if(res.data&&res.data.jb_users){
@@ -2757,9 +2757,7 @@ async function login(){
         }catch(_e){
           cloudOrders=[];
         }
-        if(!cloudOrders.length){
-          cloudOrders=Array.isArray(res.data&&res.data.jb_orders)?res.data.jb_orders:[];
-        }
+        // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         if(cloudOrders.length){
           const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
@@ -7453,15 +7451,7 @@ async function trackOrder(){
           if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
         }
       }catch(e){}
-      // Yoksa /api/data dene
-      if(!orders.length){
-        const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-        if(res.ok){
-          const d=await res.json();
-          const incoming=(d&&d.data&&Array.isArray(d.data.jb_orders))?d.data.jb_orders:(Array.isArray(d&&d.jb_orders)?d.jb_orders:[]);
-          if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
-        }
-      }
+      // Deterministic behavior: do not fallback to /api/data.jb_orders snapshots.
     }catch(e){}
   }
   if(btn){btn.textContent='Track';btn.disabled=false;}
@@ -8378,9 +8368,8 @@ async function loadFromCloud(){
             return false;
           }
         } else {
-          const fallbackOrders=Array.isArray(data&&data.jb_orders)?data.jb_orders:[];
-          if(!shouldUseOrdersDataFallback(fallbackOrders,orders)) return false;
-          cloudOrders=fallbackOrders;
+          // Deterministic behavior: never ingest jb_orders from /api/data fallback.
+          return false;
         }
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         // Server-authoritative merge: prune missing remote IDs except recent local mutations.
@@ -10691,7 +10680,7 @@ async function handleFirebaseApiRequest(url,method,body){
           ? allOrders.filter(function(order){
               const ov=Number(order&&order.v)||0;
               const ots=Number(order&&order.updatedAt||order&&order.ts)||0;
-              return ov>=sinceV && ots>=sinceTs;
+              return (sinceV>0 && ov>sinceV) || (sinceTs>0 && ots>sinceTs);
             })
           : allOrders;
         writeLocalJson('jb_orders',remoteOrders);

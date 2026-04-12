@@ -940,8 +940,8 @@ export default {
         return json({ ok: true, saved: keys.length });
       }
       if (path === '/api/sync' && method === 'POST') {
-        const { key, value } = await request.json();
-        return await syncKey(db, key, value);
+        const { key, value, event } = await request.json();
+        return await syncKey(db, key, value, event);
       }
 
       // Orders
@@ -981,9 +981,7 @@ export default {
           }
         }
 
-        const prevTableOrder = await readOrderFromTable(db, id);
-        const prevKvOrder = await readOrderFromKvSnapshot(db, id);
-        const prevOrder = pickFresherOrder(prevTableOrder, prevKvOrder);
+        const prevOrder = await readOrderFromTable(db, id);
         const prevV = Number(prevOrder && prevOrder.v) || 0;
         const prevTs = Number(prevOrder && (prevOrder.updatedAt || prevOrder.ts)) || 0;
         const prevDeleted = !!(prevOrder && prevOrder.deletedAt);
@@ -1046,7 +1044,7 @@ export default {
         `).bind(id, deletedAt, JSON.stringify(tombstone), nextV, nextV, deletedAt).run();
         const changed = Number(writeRes && writeRes.meta && writeRes.meta.changes) || 0;
         if (!changed) {
-          const latest = pickFresherOrder(await readOrderFromTable(db, id), await readOrderFromKvSnapshot(db, id));
+          const latest = await readOrderFromTable(db, id);
           const latestV = Number(latest && latest.v) || prevV || nextV;
           const latestTs = Number(latest && (latest.updatedAt || latest.ts)) || deletedAt;
           const staleResponse = {
@@ -1285,8 +1283,108 @@ async function getData(db) {
   return json({ data });
 }
 
-async function syncKey(db, key, value) {
-  if (key === 'jb_users') {
+function getSyncMetaStoreKey(key) {
+  return `sync_meta:${String(key || '').slice(0, 180)}`;
+}
+
+function parseSyncEventMeta(event, key) {
+  if (!event || typeof event !== 'object') return null;
+  const eventKey = String(event.key || key || '').trim();
+  if (!eventKey) return null;
+  if (String(key || '').trim() && eventKey !== String(key).trim()) return null;
+  const opId = normalizeOpId(event.opId || event.id || event.lastOpId, '');
+  if (!opId) return null;
+  return {
+    key: eventKey,
+    opId,
+    v: Math.max(1, Number(event.v) || 1),
+    ts: Math.max(1, Number(event.ts) || Date.now())
+  };
+}
+
+function normalizeChatMessageForStore(msg) {
+  const base = msg && typeof msg === 'object' ? msg : {};
+  const ts = Number(base.ts) || Date.now();
+  const from = String(base.from || '');
+  const to = String(base.to || '');
+  const text = String(base.text || '');
+  const id = base.id
+    ? String(base.id)
+    : `${from}|${to}|${ts}|${text.slice(0, 120)}`;
+  return {
+    ...base,
+    id,
+    from,
+    to,
+    text,
+    ts,
+    updatedAt: Number(base.updatedAt) || ts,
+    v: Math.max(1, Number(base.v) || 1),
+    read: !!base.read
+  };
+}
+
+function mergeChatMessagesConservative(existingRaw, incomingRaw) {
+  const existing = Array.isArray(existingRaw) ? existingRaw : [];
+  const incoming = Array.isArray(incomingRaw) ? incomingRaw : [];
+  const byId = new Map();
+  const mergeOne = (raw) => {
+    const msg = normalizeChatMessageForStore(raw);
+    const prev = byId.get(msg.id);
+    if (!prev) {
+      byId.set(msg.id, msg);
+      return;
+    }
+    const prevV = Number(prev.v) || 0;
+    const nextV = Number(msg.v) || 0;
+    const prevTs = Number(prev.updatedAt || prev.ts) || 0;
+    const nextTs = Number(msg.updatedAt || msg.ts) || 0;
+    const winner = (nextV > prevV || (nextV === prevV && nextTs >= prevTs))
+      ? { ...prev, ...msg }
+      : { ...msg, ...prev };
+    // "read=true" should be monotonic; once read, never regress.
+    winner.read = !!(prev.read || msg.read);
+    byId.set(msg.id, winner);
+  };
+  existing.forEach(mergeOne);
+  incoming.forEach(mergeOne);
+  return [...byId.values()].sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0));
+}
+
+async function syncKey(db, key, value, event = null) {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return json({ error: 'key missing' }, 400);
+  const eventMeta = parseSyncEventMeta(event, normalizedKey);
+  const metaKey = getSyncMetaStoreKey(normalizedKey);
+  let previousMeta = null;
+  if (eventMeta) {
+    const metaRow = await db.prepare('SELECT value FROM kv_store WHERE key=?').bind(metaKey).first();
+    previousMeta = safeParseJson(metaRow && metaRow.value, null);
+    if (previousMeta && previousMeta.opId && String(previousMeta.opId) === String(eventMeta.opId)) {
+      return json({ ok: true, idempotent: true, opId: eventMeta.opId, key: normalizedKey });
+    }
+    if (
+      previousMeta &&
+      (
+        Number(previousMeta.v || 0) > Number(eventMeta.v || 0) ||
+        (
+          Number(previousMeta.v || 0) === Number(eventMeta.v || 0) &&
+          Number(previousMeta.ts || 0) > Number(eventMeta.ts || 0)
+        )
+      )
+    ) {
+      return json({
+        ok: true,
+        staleIgnored: true,
+        key: normalizedKey,
+        ackV: Number(previousMeta.v || 0),
+        opId: String(previousMeta.opId || ''),
+        shouldRefetch: true
+      });
+    }
+  }
+
+  if (normalizedKey === 'jb_users') {
     const existingUsers = await readUsersFromStore(db);
     const nextUsers = mergeUsersConservative(existingUsers, value);
     await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
@@ -1300,11 +1398,37 @@ async function syncKey(db, key, value) {
       await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
         .bind('jb_users_backup', JSON.stringify(nextUsers)).run();
     }
+    if (eventMeta) {
+      await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .bind(metaKey, JSON.stringify({ ...eventMeta, updatedAt: Date.now() })).run();
+    }
     return json({ ok: true, users: nextUsers.length });
   }
+
+  if (normalizedKey.startsWith('jb_chat_')) {
+    let existingChat = [];
+    const row = await db.prepare('SELECT value FROM kv_store WHERE key=?').bind(normalizedKey).first();
+    if (row && row.value) {
+      const parsed = safeParseJson(row.value, []);
+      existingChat = Array.isArray(parsed) ? parsed : [];
+    }
+    const mergedChat = mergeChatMessagesConservative(existingChat, value);
+    await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .bind(normalizedKey, JSON.stringify(mergedChat)).run();
+    if (eventMeta) {
+      await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .bind(metaKey, JSON.stringify({ ...eventMeta, updatedAt: Date.now() })).run();
+    }
+    return json({ ok: true, key: normalizedKey, messages: mergedChat.length, merged: true });
+  }
+
   await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-    .bind(key, JSON.stringify(value)).run();
-  return json({ ok: true });
+    .bind(normalizedKey, JSON.stringify(value)).run();
+  if (eventMeta) {
+    await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .bind(metaKey, JSON.stringify({ ...eventMeta, updatedAt: Date.now() })).run();
+  }
+  return json({ ok: true, key: normalizedKey });
 }
 
 async function readOrderFromTable(db, id) {
@@ -1502,29 +1626,6 @@ async function saveOrdersBulk(db, body, authContext = null) {
   return json(response);
 }
 
-async function readOrderFromKvSnapshot(db, id) {
-  const kv = await db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first();
-  if (!kv || !kv.value) return null;
-  try {
-    const list = JSON.parse(kv.value);
-    if (!Array.isArray(list)) return null;
-    return list.find(o => o && String(o.id) === String(id)) || null;
-  } catch {
-    return null;
-  }
-}
-
-function pickFresherOrder(a, b) {
-  if (!a) return b || null;
-  if (!b) return a || null;
-  const av = Number(a.v) || 0;
-  const bv = Number(b.v) || 0;
-  const ats = Number(a.updatedAt || a.ts) || 0;
-  const bts = Number(b.updatedAt || b.ts) || 0;
-  if (bv > av || (bv === av && bts > ats)) return b;
-  return a;
-}
-
 async function getOrders(db, authContext = null, opts = {}) {
   const startedAt = Date.now();
   const sinceTs = Math.max(0, Number(opts && opts.sinceTs) || 0);
@@ -1538,40 +1639,7 @@ async function getOrders(db, authContext = null, opts = {}) {
     const tableOrders = rows.results
       .map(r => { try { return JSON.parse(r.data); } catch { return null; } })
       .filter(Boolean);
-
-    // Always merge with kv_store snapshot as a safety net. In some legacy/import
-    // scenarios orders table can be partial while kv has the full historical set.
-    let kvOrders = [];
-    const kv = await withD1Retry(
-      () => db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first(),
-      { op: 'orders_list_kv' }
-    );
-    if (kv && kv.value) {
-      try { kvOrders = JSON.parse(kv.value) || []; } catch { kvOrders = []; }
-    }
-
-    const byId = new Map();
-    const mergeOne = (order) => {
-      if (!order || !order.id) return;
-      const id = String(order.id);
-      const prev = byId.get(id);
-      if (!prev) {
-        byId.set(id, order);
-        return;
-      }
-      const ov = Number(order.v) || 0;
-      const pv = Number(prev.v) || 0;
-      const ots = Number(order.updatedAt || order.ts) || 0;
-      const pts = Number(prev.updatedAt || prev.ts) || 0;
-      if (ov > pv || (ov === pv && ots >= pts)) {
-        byId.set(id, order);
-      }
-    };
-
-    (Array.isArray(kvOrders) ? kvOrders : []).forEach(mergeOne);
-    (Array.isArray(tableOrders) ? tableOrders : []).forEach(mergeOne);
-
-    const orders = [...byId.values()]
+    const orders = tableOrders
       .filter(order => !(order && order.deletedAt))
       .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
     const incremental = !!(sinceTs > 0 || sinceV > 0);
@@ -1579,12 +1647,14 @@ async function getOrders(db, authContext = null, opts = {}) {
       ? orders.filter((order) => {
           const ov = Number(order && order.v) || 0;
           const ots = Number(order && (order.updatedAt || order.ts)) || 0;
-          return ov >= sinceV && ots >= sinceTs;
+          if (sinceV <= 0 && sinceTs <= 0) return true;
+          if (sinceV > 0 && sinceTs > 0) return ov > sinceV || ots > sinceTs;
+          if (sinceV > 0) return ov > sinceV;
+          return ots > sinceTs;
         })
       : orders;
     logWorker('info', 'orders_list_served', {
       tableCount: tableOrders.length,
-      kvCount: Array.isArray(kvOrders) ? kvOrders.length : 0,
       mergedCount: orders.length,
       resultCount: filteredOrders.length,
       incremental,
@@ -1621,15 +1691,10 @@ async function saveOrder(db, payload, authContext = null) {
   const id = String(clean && clean.id || '').trim();
   if (!id) return json({ error: 'order id missing' }, 400);
 
-  const prevTable = await withD1Retry(
+  const prev = await withD1Retry(
     () => readOrderFromTable(db, id),
     { op: 'order_prev_table', orderId: id }
   );
-  const prevKv = await withD1Retry(
-    () => readOrderFromKvSnapshot(db, id),
-    { op: 'order_prev_kv', orderId: id }
-  );
-  const prev = pickFresherOrder(prevTable, prevKv);
   const prevV = Math.max(0, Number(prev && prev.v) || 0);
   const prevTs = Number(prev && (prev.updatedAt || prev.ts)) || 0;
   const prevDeleted = !!(prev && prev.deletedAt);
@@ -1720,9 +1785,9 @@ async function saveOrder(db, payload, authContext = null) {
   const changed = Number(writeRes && writeRes.meta && writeRes.meta.changes) || 0;
 
   if (!changed) {
-    const latest = pickFresherOrder(
-      await withD1Retry(() => readOrderFromTable(db, id), { op: 'order_latest_table', orderId: id, opId }),
-      await withD1Retry(() => readOrderFromKvSnapshot(db, id), { op: 'order_latest_kv', orderId: id, opId })
+    const latest = await withD1Retry(
+      () => readOrderFromTable(db, id),
+      { op: 'order_latest_table', orderId: id, opId }
     );
     const latestV = Number(latest && latest.v) || prevV || incomingV;
     const latestTs = Number(latest && (latest.updatedAt || latest.ts)) || prevTs || incomingTs;
