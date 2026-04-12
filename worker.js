@@ -3,13 +3,7 @@
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
-
-const HUALEI = {
-  baseUrl: 'http://193.112.161.59:8082',
-  username: 'BURHAN',
-  password: 'HSD369',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Timestamp, X-Idempotency-Key, X-Request-Id',
 };
 
 function json(data, status = 200) {
@@ -23,8 +17,13 @@ const ORDER_OP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const ORDER_BULK_CHUNK_SIZE = 80;
 const ORDER_MAX_BULK_ROWS = 500;
 const ORDER_OP_PRUNE_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_ADMIN_EMAIL = 'joobuyadmin@gmail.com';
 let _orderTablesEnsuredAt = 0;
 let _lastOrderOpsPruneAt = 0;
+let _securityWarnedMissingAuthToken = false;
+let _lastSecurityPruneAt = 0;
+const _rateLimitBuckets = new Map();
+const _replayProtectionBuckets = new Map();
 
 function safeParseJson(raw, fallback = null) {
   if (raw === null || raw === undefined) return fallback;
@@ -217,13 +216,212 @@ function validateOrderPayload(order) {
   return '';
 }
 
-const DEFAULT_ADMIN_USER = {
-  id: 'u1',
-  email: 'joobuyadmin@gmail.com',
-  password: 'joobuy1212.',
-  role: 'Admin',
-  dname: 'Admin'
-};
+function toBoundedInt(raw, fallback, min, max) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function isWriteMethod(method) {
+  const m = String(method || '').toUpperCase();
+  return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE';
+}
+
+function getClientIp(request) {
+  const cfIp = String(request.headers.get('CF-Connecting-IP') || '').trim();
+  if (cfIp) return cfIp;
+  const forwarded = String(request.headers.get('X-Forwarded-For') || '').trim();
+  if (!forwarded) return 'unknown';
+  return String(forwarded.split(',')[0] || '').trim() || 'unknown';
+}
+
+function timingSafeEqual(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  const maxLen = Math.max(left.length, right.length);
+  let diff = left.length === right.length ? 0 : 1;
+  for (let i = 0; i < maxLen; i++) {
+    const l = i < left.length ? left.charCodeAt(i) : 0;
+    const r = i < right.length ? right.charCodeAt(i) : 0;
+    diff |= (l ^ r);
+  }
+  return diff === 0;
+}
+
+function parseBearerToken(headerValue) {
+  const raw = String(headerValue || '').trim();
+  if (!raw) return '';
+  if (/^bearer\s+/i.test(raw)) return raw.replace(/^bearer\s+/i, '').trim();
+  return raw;
+}
+
+function getApiAuthSecret(env) {
+  return String(env.API_AUTH_TOKEN || env.CLOUD_API_KEY || env.WORKER_SHARED_SECRET || '').trim();
+}
+
+function isPublicApiRoute(path, method) {
+  const m = String(method || '').toUpperCase();
+  if (path === '/api/test') return true;
+  if (path.startsWith('/api/image/') && m === 'GET') return true;
+  if (path.startsWith('/api/catalog-order/') && m === 'GET') return true;
+  return false;
+}
+
+function shouldApplyReplayGuard(path, method) {
+  if (!isWriteMethod(method)) return false;
+  if (path === '/api/order' || path.startsWith('/api/order/')) return false;
+  return path.startsWith('/api/');
+}
+
+function pruneSecurityState(now) {
+  if ((now - _lastSecurityPruneAt) < 60000) return;
+  _lastSecurityPruneAt = now;
+  for (const [key, bucket] of _rateLimitBuckets.entries()) {
+    if (!bucket || Number(bucket.resetAt) <= now) _rateLimitBuckets.delete(key);
+  }
+  for (const [key, entry] of _replayProtectionBuckets.entries()) {
+    if (!entry || Number(entry.expiresAt) <= now) _replayProtectionBuckets.delete(key);
+  }
+}
+
+function enforceRateLimit(request, env, path, method) {
+  if (!isWriteMethod(method)) return null;
+  const now = Date.now();
+  pruneSecurityState(now);
+  const windowMs = toBoundedInt(env.API_RATE_LIMIT_WINDOW_MS, 60000, 1000, 10 * 60 * 1000);
+  const maxHits = toBoundedInt(env.API_RATE_LIMIT_MAX, 240, 10, 10000);
+  const key = `${getClientIp(request)}:write`;
+  const prev = _rateLimitBuckets.get(key);
+  const bucket = (!prev || Number(prev.resetAt) <= now)
+    ? { count: 0, resetAt: now + windowMs }
+    : prev;
+  bucket.count += 1;
+  _rateLimitBuckets.set(key, bucket);
+  if (bucket.count <= maxHits) return null;
+  const retryAfterMs = Math.max(0, Number(bucket.resetAt) - now);
+  logWorker('warn', 'rate_limit_blocked', {
+    path,
+    method: String(method || '').toUpperCase(),
+    ip: getClientIp(request),
+    retryAfterMs,
+    maxHits,
+    windowMs
+  });
+  return json({
+    error: 'rate_limited',
+    retryAfterMs,
+    limit: maxHits,
+    windowMs
+  }, 429);
+}
+
+function enforceReplayGuard(request, env, path, method) {
+  if (!shouldApplyReplayGuard(path, method)) return null;
+  const now = Date.now();
+  pruneSecurityState(now);
+  const skewMs = toBoundedInt(env.REPLAY_MAX_SKEW_MS, 5 * 60 * 1000, 60 * 1000, 60 * 60 * 1000);
+  const tsRaw = String(
+    request.headers.get('X-Client-Timestamp') ||
+    request.headers.get('X-Request-Timestamp') ||
+    ''
+  ).trim();
+  if (tsRaw) {
+    const ts = Number(tsRaw);
+    if (!Number.isFinite(ts) || ts <= 0) {
+      return json({ error: 'invalid_client_timestamp' }, 400);
+    }
+    if (Math.abs(now - ts) > skewMs) {
+      return json({
+        error: 'stale_request',
+        maxSkewMs: skewMs
+      }, 409);
+    }
+  }
+
+  const rawKey = String(request.headers.get('X-Idempotency-Key') || request.headers.get('X-Request-Id') || '').trim();
+  if (!rawKey) return null;
+  const replayKey = rawKey.slice(0, 190);
+  const replayTtlMs = toBoundedInt(env.REPLAY_CACHE_MS, 10 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000);
+  const key = `${getClientIp(request)}:${String(method || '').toUpperCase()}:${path}:${replayKey}`;
+  const known = _replayProtectionBuckets.get(key);
+  if (known && Number(known.expiresAt) > now) {
+    logWorker('warn', 'replay_blocked', {
+      path,
+      method: String(method || '').toUpperCase(),
+      ip: getClientIp(request),
+      replayKey
+    });
+    return json({ error: 'replay_detected', replay: true }, 409);
+  }
+  _replayProtectionBuckets.set(key, { expiresAt: now + replayTtlMs });
+  return null;
+}
+
+async function enforceEndpointSecurity(request, env, path, method) {
+  if (!path.startsWith('/api/')) return null;
+  if (isPublicApiRoute(path, method)) return null;
+  const configuredSecret = getApiAuthSecret(env);
+  if (configuredSecret) {
+    const token = parseBearerToken(request.headers.get('Authorization'));
+    if (!token || !timingSafeEqual(token, configuredSecret)) {
+      logWorker('warn', 'auth_rejected', {
+        path,
+        method: String(method || '').toUpperCase(),
+        ip: getClientIp(request)
+      });
+      return json({ error: 'unauthorized' }, 401);
+    }
+  } else if (!_securityWarnedMissingAuthToken) {
+    _securityWarnedMissingAuthToken = true;
+    logWorker('warn', 'auth_secret_missing', {
+      hint: 'Set API_AUTH_TOKEN (or CLOUD_API_KEY) in Worker env to enforce endpoint auth'
+    });
+  }
+  const limited = enforceRateLimit(request, env, path, method);
+  if (limited) return limited;
+  return enforceReplayGuard(request, env, path, method);
+}
+
+function buildDefaultAdminUser(env) {
+  const email = String(env.DEFAULT_ADMIN_EMAIL || DEFAULT_ADMIN_EMAIL).trim();
+  const password = String(env.DEFAULT_ADMIN_PASSWORD || '').trim();
+  if (!email || !password) return null;
+  return {
+    id: 'u1',
+    email,
+    password,
+    role: 'Admin',
+    dname: 'Admin'
+  };
+}
+
+function getLogisticsConfig(env) {
+  return {
+    baseUrl: String(env.HUALEI_BASE_URL || '').trim().replace(/\/+$/, ''),
+    username: String(env.HUALEI_USERNAME || '').trim(),
+    password: String(env.HUALEI_PASSWORD || '').trim(),
+    labelBaseUrl: String(env.HUALEI_LABEL_BASE_URL || '').trim().replace(/\/+$/, '')
+  };
+}
+
+function resolveLogisticsLabelBase(config) {
+  if (config && config.labelBaseUrl) return config.labelBaseUrl;
+  const base = String(config && config.baseUrl || '').trim();
+  if (!base) return '';
+  if (/:8082$/i.test(base)) return base.replace(/:8082$/i, ':8089');
+  return base;
+}
+
+function getLogisticsConfigError(config, opts = {}) {
+  if (!config || !config.baseUrl || !config.username || !config.password) {
+    return 'logistics_not_configured';
+  }
+  if (opts.requireLabelBase) {
+    const labelBase = resolveLogisticsLabelBase(config);
+    if (!labelBase) return 'logistics_label_not_configured';
+  }
+  return '';
+}
 
 function normalizeUsersForStore(raw) {
   let list = raw;
@@ -232,7 +430,7 @@ function normalizeUsersForStore(raw) {
     list = Object.values(list).filter(v => v && typeof v === 'object');
   }
   if (!Array.isArray(list)) list = [];
-  const out = list
+  return list
     .filter(u => u && typeof u === 'object')
     .map(u => ({
       ...u,
@@ -243,7 +441,6 @@ function normalizeUsersForStore(raw) {
       dname: String(u.dname || '').trim(),
     }))
     .filter(u => u.email && u.password);
-  return out.length ? out : [{ ...DEFAULT_ADMIN_USER }];
 }
 
 function userIdentityKey(u) {
@@ -269,7 +466,7 @@ function mergeUsersConservative(existingRaw, incomingRaw) {
   if (
     existing.length >= 2 &&
     incoming.length === 1 &&
-    String(incoming[0] && incoming[0].email || '').toLowerCase() === String(DEFAULT_ADMIN_USER.email).toLowerCase()
+    String(incoming[0] && incoming[0].email || '').toLowerCase() === String(DEFAULT_ADMIN_EMAIL).toLowerCase()
   ) {
     return existing;
   }
@@ -319,7 +516,10 @@ export default {
     if (path === '/catalog' && method === 'GET') return await getCatalog(env);
     if (path.startsWith('/api/image/') && method === 'GET') return await getImage(env, path.replace('/api/image/', ''));
 
-    // Setup - public, auth gerekmez
+    const securityFailure = await enforceEndpointSecurity(request, env, path, method);
+    if (securityFailure) return securityFailure;
+
+    // Setup
     if (path === '/api/setup' && method === 'GET') {
       try {
         const db = env.DB;
@@ -327,7 +527,7 @@ export default {
         await db.prepare('CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
         await db.prepare('CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)').run();
         // Admin kullanıcısı ekle (mevcut kullanıcı listesini EZME)
-        const adminUser = {"id":"u1","email":"joobuyadmin@gmail.com","password":"joobuy1212.","role":"Admin","dname":"Admin"};
+        const adminUser = buildDefaultAdminUser(env);
         const currentUsersRow = await db.prepare("SELECT value FROM kv_store WHERE key='jb_users'").first();
         let users = [];
         if (currentUsersRow && currentUsersRow.value) {
@@ -338,15 +538,31 @@ export default {
           }
         }
         if (!Array.isArray(users)) users = [];
-        const hasAdmin = users.some(u => u && String(u.email || '').toLowerCase() === String(adminUser.email).toLowerCase());
-        if (!hasAdmin) users.unshift(adminUser);
+        let adminCreated = false;
+        if (adminUser) {
+          const hasAdmin = users.some(u => u && String(u.email || '').toLowerCase() === String(adminUser.email).toLowerCase());
+          if (!hasAdmin) {
+            users.unshift(adminUser);
+            adminCreated = true;
+          }
+        } else {
+          logWorker('warn', 'setup_admin_skipped', {
+            reason: 'DEFAULT_ADMIN_PASSWORD missing',
+            hint: 'Set DEFAULT_ADMIN_PASSWORD in Worker env before running /api/setup'
+          });
+        }
         await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
           .bind('jb_users', JSON.stringify(users)).run();
-        return json({ ok: true, message: 'Setup tamam! Kullanıcı listesi korundu.', usersCount: users.length });
+        return json({
+          ok: true,
+          message: adminUser
+            ? 'Setup tamam! Kullanıcı listesi korundu.'
+            : 'Setup tamam! Admin bootstrap skipped (DEFAULT_ADMIN_PASSWORD missing).',
+          usersCount: users.length,
+          adminCreated
+        });
       } catch(e) { return json({ error: e.message }, 500); }
     }
-
-    // Auth devre dışı
 
     try {
       const db = env.DB;
@@ -548,11 +764,14 @@ export default {
 
       // Logistics
       if (path === '/api/logistics/auth' && method === 'POST') {
+        const logistics = getLogisticsConfig(env);
+        const configErr = getLogisticsConfigError(logistics);
+        if (configErr) return json({ ok: false, error: configErr }, 503);
         try {
-          const res = await fetch(`${HUALEI.baseUrl}/selectAuth.htm`, {
+          const res = await fetch(`${logistics.baseUrl}/selectAuth.htm`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ username: HUALEI.username, password: HUALEI.password }),
+            body: new URLSearchParams({ username: logistics.username, password: logistics.password }),
           });
           const text = await res.text();
           let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
@@ -561,10 +780,13 @@ export default {
       }
 
       if (path === '/api/logistics/create' && method === 'POST') {
+        const logistics = getLogisticsConfig(env);
+        const configErr = getLogisticsConfigError(logistics);
+        if (configErr) return json({ ok: false, error: configErr }, 503);
         const { order } = await request.json();
         try {
           const params = new URLSearchParams({
-            username: HUALEI.username, password: HUALEI.password,
+            username: logistics.username, password: logistics.password,
             receiverName: order.name || '',
             receiverPhone: order.phone || '',
             receiverAddress: [order.address, order.city, order.postcode].filter(Boolean).join(', '),
@@ -575,7 +797,7 @@ export default {
             goodsWeight: '0.5',
             referenceNo: order.ref || order.id,
           });
-          const res = await fetch(`${HUALEI.baseUrl}/createOrderApi.htm`, {
+          const res = await fetch(`${logistics.baseUrl}/createOrderApi.htm`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: params,
@@ -588,14 +810,21 @@ export default {
       }
 
       if (path === '/api/logistics/label-url' && method === 'GET') {
+        const logistics = getLogisticsConfig(env);
+        const configErr = getLogisticsConfigError(logistics, { requireLabelBase: true });
+        if (configErr) return json({ ok: false, error: configErr }, 503);
         const no = url.searchParams.get('no') || '';
-        return Response.redirect(`http://193.112.161.59:8089/order/FastRpt/PDF_NEW.aspx?no=${no}`, 302);
+        const labelBase = resolveLogisticsLabelBase(logistics);
+        return Response.redirect(`${labelBase}/order/FastRpt/PDF_NEW.aspx?no=${encodeURIComponent(no)}`, 302);
       }
 
       if (path === '/api/logistics/track' && method === 'POST') {
+        const logistics = getLogisticsConfig(env);
+        const configErr = getLogisticsConfigError(logistics);
+        if (configErr) return json({ ok: false, error: configErr }, 503);
         const { trackingNo } = await request.json();
         try {
-          const res = await fetch(`${HUALEI.baseUrl}/trackOrder.htm?no=${trackingNo}&username=${HUALEI.username}&password=${HUALEI.password}`);
+          const res = await fetch(`${logistics.baseUrl}/trackOrder.htm?no=${encodeURIComponent(trackingNo)}&username=${encodeURIComponent(logistics.username)}&password=${encodeURIComponent(logistics.password)}`);
           const text = await res.text();
           let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
           return json({ ok: true, data });

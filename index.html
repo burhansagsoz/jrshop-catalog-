@@ -7614,10 +7614,16 @@ function renderCloudApiSummary(){
 function apiUrl(path){
   return ((localStorage.getItem('jb_cloud_api')||'').trim()||location.origin)+String(path||'');
 }
+function createClientRequestId(prefix){
+  const p=String(prefix||'rq').replace(/[^a-z0-9_-]/gi,'').slice(0,8)||'rq';
+  return `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,10)}`;
+}
 function getAuthHeaders(extra){
   const headers={...(extra||{})};
   const k=(localStorage.getItem('jb_cloud_key')||'').trim();
   if(k) headers.Authorization='Bearer '+k;
+  if(!headers['X-Client-Timestamp']) headers['X-Client-Timestamp']=String(Date.now());
+  if(!headers['X-Request-Id']) headers['X-Request-Id']=createClientRequestId('api');
   return headers;
 }
 function readLocalSyncFallback(){
