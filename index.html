@@ -3018,7 +3018,7 @@ async function navOrders(status,el){
         const api=await ensureWorkingApiBase({silent:true});
         const headers=getAuthHeaders();
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-        const ordRes=await fetch(api+'/api/orders',{headers});
+        const ordRes=await fetchWithTimeout(api+'/api/orders',{headers},12000);
         if(ordRes.ok){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
@@ -11737,7 +11737,7 @@ async function startPendingPoll(){
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
-        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
+        const ordRes=await fetchWithTimeout(api+'/api/orders',{headers:getAuthHeaders()},12000);
         if(ordRes.ok){
           const od=await ordRes.json();
           newOrders=Array.isArray(od&&od.orders)?od.orders:[];
