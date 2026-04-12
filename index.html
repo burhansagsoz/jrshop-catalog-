@@ -2392,7 +2392,14 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }catch(_e){
     localCount=Array.isArray(orders)?orders.length:0;
   }
+  const hasPendingLocalMutations=getActiveLocalOrderMutationIds().length>0;
   if(remoteCount>0){
+    // If we have pending local writes, reject any snapshot shrink to avoid dropping
+    // newly-created orders that have not been acknowledged yet.
+    if(hasPendingLocalMutations && remoteCount<localCount){
+      console.warn('[Cloud] Remote orders snapshot rejected: pending local mutations', { localCount, remoteCount });
+      return false;
+    }
     // Guard against partial remote snapshots wiping a much larger local dataset.
     if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
       console.warn('[Cloud] Remote orders snapshot rejected: suspicious drop', { localCount, remoteCount });
@@ -5474,7 +5481,13 @@ async function saveOrder(){
   const prods=collectProducts();if(!prods.length){toast('⚠️ Add at least one product','err');return;}
   const o={id:'o'+Date.now()+Math.random().toString(36).substr(2,4),updatedAt:Date.now(),ref,name,phone:document.getElementById('f-phone').value.trim(),address:addr,city,state:document.getElementById('f-state').value.trim(),postcode:post,country:document.getElementById('f-country').value.trim()||'GB',email:document.getElementById('f-cemail').value.trim(),fblink:document.getElementById('f-fblink').value.trim(),supplierId:document.getElementById('f-supplier').value,resellerId:document.getElementById('f-reseller').value,products:prods,status:'New',ts:Date.now(),cnTracking:null,ukTracking:null,note:''};
   // Local-first save for instant UX; media upload + cloud sync runs async.
-  orders.unshift(o);saveOrders([o.id]);runProdImageUploadAsync(o.id);closeOrderModal();render();selectOrder(o.id);
+  orders.unshift(o);
+  markLocalOrderMutation(o.id,'upsert',{opId:createLocalMutationOpId('create')});
+  saveOrders([o.id]);
+  runProdImageUploadAsync(o.id);
+  closeOrderModal();
+  render();
+  selectOrder(o.id);
   logActivity('created',`Order created: ${esc(o.ref)} for ${esc(o.name)}`,o.id);
   toast('✅ Order saved!','ok');
 }
@@ -7202,7 +7215,8 @@ function confirmImportOrder(encoded){
     ukTracking:''
   };
   orders.unshift(newOrder);
-  saveOrders();
+  markLocalOrderMutation(newOrder.id,'upsert',{opId:createLocalMutationOpId('import')});
+  saveOrders([newOrder.id]);
   updateBadges();
   render();
   logActivity('created',`Order imported from catalog: ${newOrder.ref} (${newOrder.name})`,newOrder.id);
@@ -7412,6 +7426,7 @@ async function submitResellerOrder(){
     pendingApproval:true
   };
   orders.unshift(o);
+  markLocalOrderMutation(o.id,'upsert',{opId:createLocalMutationOpId('rescreate')});
   markSync('reseller_order_local_submit');
   await saveOrders([o.id]);
   updateBadges();
@@ -8797,6 +8812,9 @@ function pruneLocalOrdersAgainstRemote(localOrders,remoteOrders){
   return local.filter(function(o){
     if(!o||!o.id) return false;
     if(remoteIds.has(String(o.id))) return true;
+    const updatedAt=Number(o.updatedAt||o.ts||0);
+    const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
+    if(isFreshLocal) return true;
     return hasActiveLocalOrderMutation(o.id);
   });
 }
@@ -9815,6 +9833,9 @@ function mergeOrdersByFreshness(localOrders,incomingOrders,opts={}){
       if(!o||!o.id) return false;
       if(incomingIds.has(String(o.id))) return true;
       if(preservePendingLocalIds.has(String(o.id))) return true;
+      const updatedAt=Number(o.updatedAt||o.ts||0);
+      const isFreshLocal=((Date.now()-updatedAt)>=0) && ((Date.now()-updatedAt)<LOCAL_ORDER_CONVERGENCE_GRACE_MS);
+      if(isFreshLocal) return true;
       if(hasActiveLocalOrderMutation(o.id)) return true;
       return false;
     });
@@ -11422,7 +11443,10 @@ function duplicateOrder(id){
   const now=new Date();const yy=String(now.getFullYear()).slice(2);const mm=String(now.getMonth()+1).padStart(2,'0');const dd=String(now.getDate()).padStart(2,'0');
   const seq=String(orders.filter(x=>x.ts>now.setHours(0,0,0,0)).length+1).padStart(3,'0');
   const newO={...JSON.parse(JSON.stringify(o)),id:'o'+Date.now(),ref:`JR${yy}${mm}${dd}-${seq}`,ts:Date.now(),status:'New',cnTracking:null,ukTracking:null,products:(o.products||[]).map(p=>({...p,cnTracking:'',arrived:false,depotPhoto:null}))};
-  orders.unshift(newO);saveOrders();render();updateBadges();selectOrder(newO.id);
+  orders.unshift(newO);
+  markLocalOrderMutation(newO.id,'upsert',{opId:createLocalMutationOpId('duplicate')});
+  saveOrders([newO.id]);
+  render();updateBadges();selectOrder(newO.id);
   logActivity('created',`Order duplicated: ${newO.ref} (${newO.name})`,newO.id);
   toast('📋 Order copied','ok');
 }
