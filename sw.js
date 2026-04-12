@@ -1,5 +1,5 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260410-notify-anim-v1';
+const CACHE_VERSION = 'jrshop-v20260412-cn-jr-ref-v2';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
