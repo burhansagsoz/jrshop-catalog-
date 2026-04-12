@@ -19,6 +19,204 @@ function json(data, status = 200) {
   });
 }
 
+const ORDER_OP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const ORDER_BULK_CHUNK_SIZE = 80;
+const ORDER_MAX_BULK_ROWS = 500;
+const ORDER_OP_PRUNE_INTERVAL_MS = 5 * 60 * 1000;
+let _orderTablesEnsuredAt = 0;
+let _lastOrderOpsPruneAt = 0;
+
+function safeParseJson(raw, fallback = null) {
+  if (raw === null || raw === undefined) return fallback;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeOpId(value, fallback = '') {
+  const normalized = String(value || '').trim();
+  if (normalized) return normalized.slice(0, 190);
+  return String(fallback || '').trim().slice(0, 190);
+}
+
+function buildFallbackOpId(opType, orderId, v, ts) {
+  return `${String(opType || 'op')}:${String(orderId || 'na')}:${Number(v) || 0}:${Number(ts) || 0}`;
+}
+
+function logWorker(level, event, details = {}) {
+  const payload = {
+    event,
+    ts: Date.now(),
+    ...details
+  };
+  const line = `[worker] ${JSON.stringify(payload)}`;
+  if (level === 'error') console.error(line);
+  else if (level === 'warn') console.warn(line);
+  else console.log(line);
+}
+
+function isRetryableD1Error(err) {
+  const text = String(err && err.message ? err.message : err || '').toLowerCase();
+  return (
+    text.includes('database is locked') ||
+    text.includes('database busy') ||
+    text.includes('too many requests') ||
+    text.includes('temporarily unavailable') ||
+    text.includes('network')
+  );
+}
+
+async function waitMs(ms) {
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function withD1Retry(fn, meta = {}) {
+  const maxAttempts = Math.max(1, Number(meta.maxAttempts) || 3);
+  let attempt = 0;
+  while (attempt < maxAttempts) {
+    attempt++;
+    try {
+      const result = await fn();
+      if (attempt > 1) {
+        logWorker('warn', 'd1_retry_recovered', {
+          op: String(meta.op || 'd1_query'),
+          attempt,
+          maxAttempts,
+          orderId: meta.orderId ? String(meta.orderId) : undefined,
+          opId: meta.opId ? String(meta.opId) : undefined
+        });
+      }
+      return result;
+    } catch (err) {
+      const retryable = isRetryableD1Error(err);
+      if (!retryable || attempt >= maxAttempts) {
+        logWorker('error', 'd1_query_failed', {
+          op: String(meta.op || 'd1_query'),
+          attempt,
+          maxAttempts,
+          retryable,
+          message: String(err && err.message ? err.message : err || 'unknown'),
+          orderId: meta.orderId ? String(meta.orderId) : undefined,
+          opId: meta.opId ? String(meta.opId) : undefined
+        });
+        throw err;
+      }
+      const delay = Math.min(500, 40 * Math.pow(2, attempt - 1));
+      logWorker('warn', 'd1_retry_scheduled', {
+        op: String(meta.op || 'd1_query'),
+        attempt,
+        maxAttempts,
+        delayMs: delay,
+        message: String(err && err.message ? err.message : err || 'unknown')
+      });
+      await waitMs(delay);
+    }
+  }
+  throw new Error('d1_retry_exhausted');
+}
+
+async function executeD1Statements(db, statements) {
+  const list = Array.isArray(statements) ? statements.filter(Boolean) : [];
+  if (!list.length) return [];
+  if (typeof db.batch === 'function') {
+    return await db.batch(list);
+  }
+  const out = [];
+  for (const stmt of list) {
+    if (!stmt || typeof stmt.run !== 'function') continue;
+    out.push(await stmt.run());
+  }
+  return out;
+}
+
+async function ensureOrderTables(db) {
+  const now = Date.now();
+  if (now - _orderTablesEnsuredAt < 15000) return;
+  await db.prepare("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)").run();
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS order_ops (
+      op_id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      op_type TEXT NOT NULL,
+      req_v INTEGER NOT NULL,
+      req_ts INTEGER NOT NULL,
+      ack_v INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      response TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `).run();
+  _orderTablesEnsuredAt = now;
+}
+
+async function readOrderOpRecord(db, opId) {
+  const id = normalizeOpId(opId);
+  if (!id) return null;
+  try {
+    return await db.prepare('SELECT * FROM order_ops WHERE op_id=?').bind(id).first();
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function storeOrderOpRecord(db, row) {
+  const opId = normalizeOpId(row && row.opId);
+  if (!opId) return;
+  const now = Date.now();
+  const response = JSON.stringify((row && row.response) || {});
+  await db.prepare(`
+    INSERT INTO order_ops (op_id,order_id,op_type,req_v,req_ts,ack_v,status,response,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(op_id) DO UPDATE SET
+      ack_v=excluded.ack_v,
+      status=excluded.status,
+      response=excluded.response
+  `).bind(
+    opId,
+    String((row && row.orderId) || ''),
+    String((row && row.opType) || 'upsert'),
+    Number((row && row.reqV) || 0),
+    Number((row && row.reqTs) || now),
+    Number((row && row.ackV) || 0),
+    String((row && row.status) || 'applied'),
+    response,
+    now
+  ).run();
+}
+
+async function maybePruneOrderOps(db) {
+  const now = Date.now();
+  if ((now - _lastOrderOpsPruneAt) < ORDER_OP_PRUNE_INTERVAL_MS) return;
+  _lastOrderOpsPruneAt = now;
+  try {
+    await db.prepare('DELETE FROM order_ops WHERE created_at < ?').bind(now - ORDER_OP_RETENTION_MS).run();
+  } catch (_e) {}
+}
+
+function parseOrderMutationPayload(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const hasNestedOrder = src.order && typeof src.order === 'object';
+  const order = hasNestedOrder ? src.order : (src && typeof src === 'object' ? src : null);
+  return {
+    order,
+    opId: src.opId || src.requestId || (order && (order.opId || order.lastOpId)) || '',
+    requestId: src.requestId || '',
+    v: Number(src.v),
+    ts: Number(src.ts),
+  };
+}
+
+function validateOrderPayload(order) {
+  if (!order || typeof order !== 'object') return 'order missing';
+  const id = String(order.id || '').trim();
+  if (!id) return 'order id missing';
+  if (order.products !== undefined && !Array.isArray(order.products)) return 'order products invalid';
+  return '';
+}
+
 const DEFAULT_ADMIN_USER = {
   id: 'u1',
   email: 'joobuyadmin@gmail.com',
@@ -176,8 +374,8 @@ export default {
         return await saveOrdersBulk(db, body);
       }
       if (path === '/api/order' && method === 'POST') {
-        const { order } = await request.json();
-        return await saveOrder(db, order);
+        const payload = await request.json();
+        return await saveOrder(db, payload);
       }
       if (path === '/api/order-event' && method === 'POST') {
         const event = await request.json();
@@ -191,7 +389,16 @@ export default {
         const nowTs = Date.now();
         const requestedDeletedAt = Number(req && req.deletedAt) || nowTs;
         const requestedV = Number(req && req.v) || 0;
-        const requestedOpId = String(req && req.opId || ('srv_del_' + nowTs.toString(36)));
+        const requestedOpId = String(req && req.opId || '').trim() || (`del_${id}_${requestedV || 0}_${requestedDeletedAt}`);
+
+        await ensureOrderTables(db);
+        const knownOp = await readOrderOpRecord(db, requestedOpId);
+        if (knownOp) {
+          const cached = safeParseJson(knownOp.response, null);
+          if (cached && typeof cached === 'object') {
+            return json({ ...cached, idempotent: true });
+          }
+        }
 
         const prevTableOrder = await readOrderFromTable(db, id);
         const prevKvOrder = await readOrderFromKvSnapshot(db, id);
@@ -205,7 +412,24 @@ export default {
 
         // Idempotency/stale protection: keep the freshest tombstone.
         if (prevDeleted && (prevV > nextV || (prevV === nextV && prevTs >= deletedAt))) {
-          return json({ ok: true, staleIgnored: true, ackV: prevV, deletedAt: prevTs });
+          const staleResponse = {
+            ok: true,
+            staleIgnored: true,
+            ackV: prevV,
+            deletedAt: prevTs,
+            conflict: { type: 'stale_delete', serverV: prevV, serverTs: prevTs }
+          };
+          await storeOrderOpRecord(db, {
+            opId: requestedOpId,
+            orderId: id,
+            opType: 'delete',
+            reqV: nextV,
+            reqTs: deletedAt,
+            ackV: prevV || nextV,
+            status: 'stale',
+            response: staleResponse
+          });
+          return json(staleResponse);
         }
 
         const tombstone = {
@@ -219,9 +443,56 @@ export default {
           lastOpId: requestedOpId,
           products: []
         };
-        await db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts')
-          .bind(id, deletedAt, JSON.stringify(tombstone)).run();
-        return json({ ok: true, deletedAt, ackV: nextV });
+        const writeRes = await db.prepare(`
+          INSERT INTO orders (id,ts,data) VALUES (?,?,?)
+          ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts
+          WHERE
+            COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) < ?
+            OR (
+              COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) = ?
+              AND COALESCE(
+                CAST(json_extract(orders.data,'$.updatedAt') AS INTEGER),
+                COALESCE(CAST(json_extract(orders.data,'$.ts') AS INTEGER),0)
+              ) <= ?
+            )
+        `).bind(id, deletedAt, JSON.stringify(tombstone), nextV, nextV, deletedAt).run();
+        const changed = Number(writeRes && writeRes.meta && writeRes.meta.changes) || 0;
+        if (!changed) {
+          const latest = pickFresherOrder(await readOrderFromTable(db, id), await readOrderFromKvSnapshot(db, id));
+          const latestV = Number(latest && latest.v) || prevV || nextV;
+          const latestTs = Number(latest && (latest.updatedAt || latest.ts)) || deletedAt;
+          const staleResponse = {
+            ok: true,
+            staleIgnored: true,
+            ackV: latestV,
+            deletedAt: latestTs,
+            conflict: { type: 'concurrent_delete_conflict', serverV: latestV, serverTs: latestTs }
+          };
+          await storeOrderOpRecord(db, {
+            opId: requestedOpId,
+            orderId: id,
+            opType: 'delete',
+            reqV: nextV,
+            reqTs: deletedAt,
+            ackV: latestV,
+            status: 'stale',
+            response: staleResponse
+          });
+          return json(staleResponse);
+        }
+        const successResponse = { ok: true, deletedAt, ackV: nextV };
+        await storeOrderOpRecord(db, {
+          opId: requestedOpId,
+          orderId: id,
+          opType: 'delete',
+          reqV: nextV,
+          reqTs: deletedAt,
+          ackV: nextV,
+          status: 'applied',
+          response: successResponse
+        });
+        await maybePruneOrderOps(db);
+        return json(successResponse);
       }
 
       // Images
@@ -405,19 +676,14 @@ function sanitizeOrderForStorage(order) {
 }
 
 async function saveOrdersBulk(db, body) {
+  const startedAt = Date.now();
   const list = Array.isArray(body && body.orders) ? body.orders : [];
   if (!list.length) return json({ error: 'orders missing' }, 400);
-  await db.prepare("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)").run();
-  const byId = new Map();
-  for (const raw of list) {
-    const clean = sanitizeOrderForStorage(raw);
-    if (!clean) continue;
-    byId.set(clean.id, clean);
+  if (list.length > ORDER_MAX_BULK_ROWS) {
+    return json({ error: 'orders too many', max: ORDER_MAX_BULK_ROWS }, 413);
   }
-  const rows = [...byId.values()];
-  if (!rows.length) return json({ error: 'no_valid_orders' }, 400);
+  await ensureOrderTables(db);
 
-  // Persist non-order backup keys in the same request so reload has complete app state.
   const keyMap = {
     jb_users: body && body.users,
     jb_suppliers: body && body.suppliers,
@@ -428,21 +694,106 @@ async function saveOrdersBulk(db, body) {
   };
   for (const [key, value] of Object.entries(keyMap)) {
     if (value === undefined) continue;
-    await syncKey(db, key, value);
+    await withD1Retry(() => syncKey(db, key, value), { op: 'sync_key_bulk', orderId: key });
   }
 
-  const upsert = db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts');
-  let saved = 0;
-  for (const order of rows) {
-    await upsert.bind(order.id, Number(order.ts) || Number(order.updatedAt) || Date.now(), JSON.stringify(order)).run();
-    saved++;
+  const byId = new Map();
+  for (const raw of list) {
+    const clean = sanitizeOrderForStorage(raw);
+    if (!clean) continue;
+    byId.set(clean.id, clean);
   }
-  // Keep kv snapshot aligned for older read paths / safety-net merges.
+  const rows = [...byId.values()];
+  if (!rows.length) return json({ error: 'no_valid_orders' }, 400);
+
+  const requestId = normalizeOpId(
+    body && (body.requestId || body.opId),
+    `bulk_upsert:${rows.length}:${Date.now()}`
+  );
+  const knownBulk = await readOrderOpRecord(db, requestId);
+  if (knownBulk) {
+    const cached = safeParseJson(knownBulk.response, null);
+    if (cached && typeof cached === 'object') {
+      return json({ ...cached, idempotent: true });
+    }
+  }
+
+  const upsertSql = `
+    INSERT INTO orders (id,ts,data) VALUES (?,?,?)
+    ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts
+    WHERE
+      COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) < ?
+      OR (
+        COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) = ?
+        AND COALESCE(
+          CAST(json_extract(orders.data,'$.updatedAt') AS INTEGER),
+          COALESCE(CAST(json_extract(orders.data,'$.ts') AS INTEGER),0)
+        ) <= ?
+      )
+  `;
+
+  let saved = 0;
+  let staleIgnored = 0;
+  for (let i = 0; i < rows.length; i += ORDER_BULK_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + ORDER_BULK_CHUNK_SIZE);
+    const stmts = chunk.map((order) => {
+      const ts = Number(order.updatedAt || order.ts) || Date.now();
+      const v = Math.max(1, Number(order.v) || 1);
+      const row = {
+        ...order,
+        updatedAt: ts,
+        ts: Number(order.ts) || ts,
+        v
+      };
+      return db.prepare(upsertSql).bind(order.id, row.ts, JSON.stringify(row), v, v, ts);
+    });
+
+    const results = await withD1Retry(
+      () => executeD1Statements(db, stmts),
+      { op: 'bulk_upsert_batch', opId: requestId }
+    );
+
+    for (const r of (Array.isArray(results) ? results : [])) {
+      const changed = Number(r && r.meta && r.meta.changes) || 0;
+      if (changed > 0) saved++;
+      else staleIgnored++;
+    }
+  }
+
   try {
-    await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-      .bind('jb_orders', JSON.stringify(rows)).run();
+    await withD1Retry(
+      () => db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .bind('jb_orders', JSON.stringify(rows)).run(),
+      { op: 'bulk_snapshot_write', opId: requestId }
+    );
   } catch (_e) {}
-  return json({ ok: true, saved, total: rows.length, orders: rows.length });
+
+  const response = {
+    ok: true,
+    saved,
+    total: rows.length,
+    staleIgnored,
+    orders: rows.length
+  };
+  await storeOrderOpRecord(db, {
+    opId: requestId,
+    orderId: '__bulk__',
+    opType: 'bulk_upsert',
+    reqV: rows.length,
+    reqTs: Date.now(),
+    ackV: saved,
+    status: staleIgnored ? 'partial' : 'applied',
+    response
+  });
+  await maybePruneOrderOps(db);
+  logWorker('info', 'bulk_orders_upsert', {
+    requestId,
+    total: rows.length,
+    saved,
+    staleIgnored,
+    latencyMs: Date.now() - startedAt
+  });
+  return json(response);
 }
 
 async function readOrderFromKvSnapshot(db, id) {
@@ -469,10 +820,13 @@ function pickFresherOrder(a, b) {
 }
 
 async function getOrders(db) {
+  const startedAt = Date.now();
   try {
-    // orders tablosundan dene
-    await db.prepare("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)").run();
-    const rows = await db.prepare('SELECT * FROM orders ORDER BY ts DESC').all();
+    await ensureOrderTables(db);
+    const rows = await withD1Retry(
+      () => db.prepare('SELECT * FROM orders ORDER BY ts DESC').all(),
+      { op: 'orders_list_table' }
+    );
     const tableOrders = rows.results
       .map(r => { try { return JSON.parse(r.data); } catch { return null; } })
       .filter(Boolean);
@@ -480,7 +834,10 @@ async function getOrders(db) {
     // Always merge with kv_store snapshot as a safety net. In some legacy/import
     // scenarios orders table can be partial while kv has the full historical set.
     let kvOrders = [];
-    const kv = await db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first();
+    const kv = await withD1Retry(
+      () => db.prepare("SELECT value FROM kv_store WHERE key='jb_orders'").first(),
+      { op: 'orders_list_kv' }
+    );
     if (kv && kv.value) {
       try { kvOrders = JSON.parse(kv.value) || []; } catch { kvOrders = []; }
     }
@@ -509,39 +866,65 @@ async function getOrders(db) {
     const orders = [...byId.values()]
       .filter(order => !(order && order.deletedAt))
       .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+    logWorker('info', 'orders_list_served', {
+      tableCount: tableOrders.length,
+      kvCount: Array.isArray(kvOrders) ? kvOrders.length : 0,
+      mergedCount: orders.length,
+      latencyMs: Date.now() - startedAt
+    });
     return json({ orders });
   } catch(e) {
+    logWorker('error', 'orders_list_failed', {
+      message: String(e && e.message ? e.message : e || 'unknown'),
+      latencyMs: Date.now() - startedAt
+    });
     return json({ orders: [], error: e.message });
   }
 }
 
-async function saveOrder(db, order) {
-  const keepImageRef = (src) => {
-    const v = String(src || '').trim();
-    if (!v) return null;
-    if (/^\/?api\/image\/[a-z0-9_-]+$/i.test(v)) return v.startsWith('/') ? v : '/' + v;
-    return /^(https?:|data:|blob:)/i.test(v) ? v : null;
-  };
-  const clean = {
-    ...order,
-    products: (order.products || []).map((p) => ({
-      ...p,
-      img: keepImageRef(p && p.img),
-      depotPhoto: keepImageRef(p && p.depotPhoto),
-    })),
-  };
+async function saveOrder(db, payload) {
+  const startedAt = Date.now();
+  await ensureOrderTables(db);
+
+  const parsed = parseOrderMutationPayload(payload);
+  const rawOrder = parsed.order;
+  const validationErr = validateOrderPayload(rawOrder);
+  if (validationErr) return json({ error: validationErr }, 400);
+
+  const clean = sanitizeOrderForStorage(rawOrder);
   const id = String(clean && clean.id || '').trim();
   if (!id) return json({ error: 'order id missing' }, 400);
-  const incomingV = Math.max(0, Number(clean && clean.v) || 0);
-  const incomingTs = Number(clean && (clean.updatedAt || clean.ts)) || Date.now();
-  const incomingDeleted = !!(clean && clean.deletedAt);
 
-  const prevTable = await readOrderFromTable(db, id);
-  const prevKv = await readOrderFromKvSnapshot(db, id);
+  const prevTable = await withD1Retry(
+    () => readOrderFromTable(db, id),
+    { op: 'order_prev_table', orderId: id }
+  );
+  const prevKv = await withD1Retry(
+    () => readOrderFromKvSnapshot(db, id),
+    { op: 'order_prev_kv', orderId: id }
+  );
   const prev = pickFresherOrder(prevTable, prevKv);
   const prevV = Math.max(0, Number(prev && prev.v) || 0);
   const prevTs = Number(prev && (prev.updatedAt || prev.ts)) || 0;
   const prevDeleted = !!(prev && prev.deletedAt);
+
+  const requestedV = Math.max(0, Number(parsed.v) || Number(clean && clean.v) || 0);
+  const incomingV = Math.max(1, requestedV || (prevV + 1));
+  const incomingTs = Number(parsed.ts || clean.updatedAt || clean.ts) || Date.now();
+  const incomingDeleted = !!(clean && clean.deletedAt);
+  const opId = normalizeOpId(
+    parsed.opId || parsed.requestId || (clean && (clean.opId || clean.lastOpId)),
+    buildFallbackOpId('upsert', id, incomingV, incomingTs)
+  );
+
+  const knownOp = await readOrderOpRecord(db, opId);
+  if (knownOp) {
+    const cached = safeParseJson(knownOp.response, null);
+    if (cached && typeof cached === 'object') {
+      logWorker('info', 'order_upsert_idempotent_hit', { orderId: id, opId });
+      return json({ ...cached, idempotent: true });
+    }
+  }
 
   const stale = (
     incomingV < prevV ||
@@ -549,12 +932,107 @@ async function saveOrder(db, order) {
     (prevDeleted && !incomingDeleted && incomingV <= prevV)
   );
   if (stale) {
-    return json({ ok: true, staleIgnored: true, ackV: prevV || 1 });
+    const staleResponse = {
+      ok: true,
+      staleIgnored: true,
+      ackV: prevV || incomingV,
+      conflict: { type: 'stale_upsert', serverV: prevV, serverTs: prevTs },
+      shouldRefetch: true
+    };
+    await storeOrderOpRecord(db, {
+      opId,
+      orderId: id,
+      opType: 'upsert',
+      reqV: incomingV,
+      reqTs: incomingTs,
+      ackV: prevV || incomingV,
+      status: 'stale',
+      response: staleResponse
+    });
+    logWorker('warn', 'order_upsert_stale', { orderId: id, opId, incomingV, prevV, incomingTs, prevTs });
+    return json(staleResponse);
   }
 
-  await db.prepare('INSERT INTO orders (id,ts,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts')
-    .bind(id, Number(clean.ts) || incomingTs, JSON.stringify(clean)).run();
-  return json({ ok: true, ackV: Math.max(incomingV, prevV, 1) });
+  const nextOrder = {
+    ...clean,
+    id,
+    updatedAt: incomingTs,
+    ts: Number(clean && clean.ts) || incomingTs,
+    v: incomingV,
+    opId,
+    lastOpId: opId,
+    deletedAt: incomingDeleted ? Number(clean && clean.deletedAt) || incomingTs : undefined,
+    products: incomingDeleted ? [] : (Array.isArray(clean && clean.products) ? clean.products : [])
+  };
+
+  const upsertSql = `
+    INSERT INTO orders (id,ts,data) VALUES (?,?,?)
+    ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts
+    WHERE
+      COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) < ?
+      OR (
+        COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) = ?
+        AND COALESCE(
+          CAST(json_extract(orders.data,'$.updatedAt') AS INTEGER),
+          COALESCE(CAST(json_extract(orders.data,'$.ts') AS INTEGER),0)
+        ) <= ?
+      )
+  `;
+  const writeRes = await withD1Retry(
+    () => db.prepare(upsertSql)
+      .bind(id, Number(nextOrder.ts) || incomingTs, JSON.stringify(nextOrder), incomingV, incomingV, incomingTs)
+      .run(),
+    { op: 'order_upsert_write', orderId: id, opId }
+  );
+  const changed = Number(writeRes && writeRes.meta && writeRes.meta.changes) || 0;
+
+  if (!changed) {
+    const latest = pickFresherOrder(
+      await withD1Retry(() => readOrderFromTable(db, id), { op: 'order_latest_table', orderId: id, opId }),
+      await withD1Retry(() => readOrderFromKvSnapshot(db, id), { op: 'order_latest_kv', orderId: id, opId })
+    );
+    const latestV = Number(latest && latest.v) || prevV || incomingV;
+    const latestTs = Number(latest && (latest.updatedAt || latest.ts)) || prevTs || incomingTs;
+    const conflictResponse = {
+      ok: true,
+      staleIgnored: true,
+      ackV: latestV,
+      conflict: { type: 'concurrent_upsert_conflict', serverV: latestV, serverTs: latestTs },
+      shouldRefetch: true
+    };
+    await storeOrderOpRecord(db, {
+      opId,
+      orderId: id,
+      opType: 'upsert',
+      reqV: incomingV,
+      reqTs: incomingTs,
+      ackV: latestV,
+      status: 'stale',
+      response: conflictResponse
+    });
+    logWorker('warn', 'order_upsert_conflict', { orderId: id, opId, incomingV, latestV, incomingTs, latestTs });
+    return json(conflictResponse);
+  }
+
+  const successResponse = { ok: true, ackV: incomingV, opId };
+  await storeOrderOpRecord(db, {
+    opId,
+    orderId: id,
+    opType: 'upsert',
+    reqV: incomingV,
+    reqTs: incomingTs,
+    ackV: incomingV,
+    status: 'applied',
+    response: successResponse
+  });
+  await maybePruneOrderOps(db);
+  logWorker('info', 'order_upsert_applied', {
+    orderId: id,
+    opId,
+    ackV: incomingV,
+    latencyMs: Date.now() - startedAt
+  });
+  return json(successResponse);
 }
 
 async function saveOrderEvent(db, event) {
