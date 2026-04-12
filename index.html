@@ -8374,6 +8374,7 @@ const _health={
   apiCalls:0,
   apiErrors:0,
   lastError:'',
+  lastErrorAt:0,
   authState:'cloudflare_mode',
   feedRealtime:false,
   ordersRealtime:false,
@@ -8757,6 +8758,7 @@ function markSync(source){
   // Successful sync should clear stale health error noise.
   _health.apiErrors=0;
   _health.lastError='';
+  _health.lastErrorAt=0;
 }
 function markApiCall(){
   _health.apiCalls++;
@@ -8765,6 +8767,7 @@ function resetHealthCounters(){
   _health.apiCalls=0;
   _health.apiErrors=0;
   _health.lastError='';
+  _health.lastErrorAt=0;
 }
 function isFirebasePermissionError(err,msg){
   const code=String(err&&err.code||'').toLowerCase();
@@ -8789,25 +8792,37 @@ function enforceLocalModeOnFirebasePermission(msg){
 function normalizeHealthErrorMessage(err){
   const raw=String(err&&err.message?err.message:err||'unknown');
   const low=raw.toLowerCase();
-  if(low.includes('signal is aborted without reason') || low.includes('aborterror')){
+  if(
+    low.includes('signal is aborted without reason') ||
+    low.includes('aborterror') ||
+    low.includes('request timeout') ||
+    low.includes('timeout') ||
+    low.includes('failed to fetch') ||
+    low.includes('networkerror')
+  ){
     return 'request timeout or connection aborted';
   }
   return raw;
 }
 function markError(err){
-  const code=err&&err.code?` [${err.code}]`:'';
-  const msg=normalizeHealthErrorMessage(err)+code;
+  const normalized=normalizeHealthErrorMessage(err);
+  const codeNum=Number(err&&err.code);
+  const timeoutLike=normalized==='request timeout or connection aborted';
+  const code=(err&&err.code && !timeoutLike && codeNum!==20)?` [${err.code}]`:'';
+  const msg=normalized+code;
   const key=String(msg||'unknown');
   const now=Date.now();
   // Avoid inflating error counter with the same repeating offline/auth error.
   if(key===_lastHealthErrorKey && (now-_lastHealthErrorAt)<15000){
     _health.lastError=msg;
+    _health.lastErrorAt=now;
     return;
   }
   _lastHealthErrorKey=key;
   _lastHealthErrorAt=now;
   _health.apiErrors++;
   _health.lastError=msg;
+  _health.lastErrorAt=now;
   if(isFirebasePermissionError(err,msg)){
     enforceLocalModeOnFirebasePermission(msg);
   }
@@ -8815,6 +8830,16 @@ function markError(err){
 function renderHealthPanel(){
   const el=document.getElementById('sync-health-panel');
   if(!el) return;
+  if(
+    _health.apiErrors>0 &&
+    _health.lastErrorAt>0 &&
+    (Date.now()-_health.lastErrorAt)>90000 &&
+    _health.lastSyncAt>=_health.lastErrorAt
+  ){
+    _health.apiErrors=0;
+    _health.lastError='';
+    _health.lastErrorAt=0;
+  }
   const fmtTs=_health.lastSyncAt?new Date(_health.lastSyncAt).toLocaleString('tr-TR'):'-';
   const cloudMode=!getFirebaseEnabled();
   const cloudFresh=!!(_health.lastSyncAt && (Date.now()-_health.lastSyncAt)<120000);
@@ -10288,6 +10313,24 @@ function setChatMessagesForReseller(resellerId,msgs){
 function isApiPath(pathname){
   return pathname.startsWith('/api/');
 }
+function isHealthTrackedApiPath(pathname){
+  const p=String(pathname||'').trim();
+  return p==='/api/test' ||
+    p==='/api/data' ||
+    p==='/api/orders' ||
+    p==='/api/order' ||
+    p==='/api/sync' ||
+    p==='/api/orders/bulk' ||
+    p==='/api/backup/import';
+}
+function shouldMarkSyncFromApiResponse(pathname,method,res){
+  if(!res||!res.ok) return false;
+  const p=String(pathname||'').trim();
+  const m=String(method||'GET').toUpperCase();
+  if(p==='/api/test' || p==='/api/data' || p==='/api/orders') return true;
+  if((p==='/api/order' || p==='/api/sync' || p==='/api/orders/bulk' || p==='/api/backup/import') && m==='POST') return true;
+  return false;
+}
 function shouldRouteApiToFirebase(url){
   if(!getFirebaseEnabled()) return false;
   try{
@@ -10677,27 +10720,34 @@ window.fetch=async function(input,init){
   const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
   const body=(init&&Object.prototype.hasOwnProperty.call(init,'body'))?init.body:null;
   let isApiFetch=false;
+  let isHealthApiFetch=false;
+  let apiPath='';
   try{
     const u=new URL(rawUrl,location.origin);
-    isApiFetch=isApiPath(u.pathname);
+    apiPath=String(u.pathname||'');
+    isApiFetch=isApiPath(apiPath);
+    isHealthApiFetch=isHealthTrackedApiPath(apiPath);
   }catch(_e){}
-  if(isApiFetch) markApiCall();
+  if(isHealthApiFetch) markApiCall();
   if(shouldRouteApiToFirebase(rawUrl)){
     try{
       const handled=await handleFirebaseApiRequest(rawUrl,method,body);
       if(handled) return handled;
       return jsonApiResponse({error:'Endpoint not available in Firebase mode'},404);
     }catch(e){
-      markError(e);
+      if(isHealthApiFetch) markError(e);
       return jsonApiResponse({error:e&&e.message?e.message:String(e)},500);
     }
   }
   try{
     const res=await _nativeFetch(input,init);
-    if(!res.ok && isApiFetch) markError(new Error('HTTP '+res.status+' '+res.statusText));
+    if(!res.ok && isHealthApiFetch) markError(new Error('HTTP '+res.status+' '+res.statusText));
+    if(isHealthApiFetch && shouldMarkSyncFromApiResponse(apiPath,method,res)){
+      markSync('api:'+apiPath);
+    }
     return res;
   }catch(e){
-    if(isApiFetch) markError(e);
+    if(isHealthApiFetch) markError(e);
     throw e;
   }
 };
