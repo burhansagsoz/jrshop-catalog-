@@ -711,7 +711,7 @@ body.dark .modal-foot{background:#263548;}
             <div class="ftab" onclick="setTab('Sent to Factory',this)">Factory</div>
             <div class="ftab" onclick="setTab('At Depot',this)">Depot</div>
             <div class="ftab" onclick="setTab('Ready',this)">Ready 📦</div>
-            <div class="ftab" onclick="setTab('Sent to Factory',this)">Logistics</div>
+            <div class="ftab" onclick="setTab('Sent to Logistics',this)">Logistics</div>
             <div class="ftab" onclick="setTab('Shipped',this)">Shipped</div>
             <div class="ftab" onclick="setTab('Completed',this)">Done</div>
           </div>
@@ -1717,7 +1717,7 @@ body.dark .modal-foot{background:#263548;}
         <div class="fg"><label class="fl">Status</label>
           <select class="fi" id="e-status">
             <option value="New">🆕 New</option><option value="Sent to Factory">🏭 Sent to Factory</option>
-            <option value="At Depot">🏭 At Depot</option><option value="Sent to Factory">🚛 Sent to Factory</option>
+            <option value="At Depot">🏭 At Depot</option><option value="Sent to Logistics">🚛 Sent to Logistics</option>
             <option value="Shipped">🚚 Shipped</option><option value="Completed">✅ Completed</option>
           </select>
         </div>
@@ -2262,7 +2262,8 @@ const STATUSES=['New','Sent to Factory','At Depot','Sent to Logistics','Shipped'
 const S_LABEL={'New':'New','Sent to Factory':'Sent to Factory','At Depot':'At Depot','Sent to Logistics':'Sent to Logistics','Shipped':'Shipped','Completed':'Completed'};
 function getStatusLabel(s){
   // Normalize old statuses - "Sent to Wechat" shows as "Sent to Factory"
-  if(s==='Sent to WeChat'||s==='Sent to Wechat'||s==='Sent to Logistic') return 'Sent to Factory';
+  if(s==='Sent to WeChat'||s==='Sent to Wechat') return 'Sent to Factory';
+  if(s==='Sent to Logistic') return 'Sent to Logistics';
   return S_LABEL[s]||s;
 }
 const S_EMOJI={New:'🆕','Sent to Factory':'🏭','Sent to Wechat':'🏭','At Depot':'🏭','Sent to Logistics':'🚛',Shipped:'🚚',Completed:'✅'};
@@ -2721,6 +2722,7 @@ async function login(){
     return;
   }
   me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
+  resetCloudDataSnapshotCache();
   const firebaseEmail=String(me.email||em||'').trim().toLowerCase();
   cacheFirebaseLoginCreds(firebaseEmail,pw);
   if(getFirebaseEnabled()){
@@ -2831,8 +2833,16 @@ async function login(){
 async function logout(){
   stopPendingPoll();
   if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}
+  _globalChatPollInFlight=false;
   if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}
+  _chatPollInFlightByReseller.clear();
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+  if(_resMsgPollInterval){clearInterval(_resMsgPollInterval);_resMsgPollInterval=null;}
+  _autoSyncTickInFlight=false;
+  _visibilitySyncInFlight=false;
+  _resUnreadPollInFlight=false;
+  _resChatLoadInFlight=null;
+  resetCloudDataSnapshotCache();
   try{
     if(me && navigator.onLine){
       await withTimeoutPromise(
@@ -3060,7 +3070,7 @@ async function navOrders(status,el){
         const api=await ensureWorkingApiBase({silent:true});
         const headers=getAuthHeaders();
         const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-        const ordRes=await fetch(api+'/api/orders',{headers});
+        const ordRes=await fetchWithTimeout(api+'/api/orders',{headers},12000);
         if(ordRes.ok){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
@@ -3087,7 +3097,7 @@ async function navOrders(status,el){
   document.getElementById('pg-title').textContent=status==='all'?'All Orders':getStatusLabel(status)+' Orders';
   showOrderTop();
   const tabs=document.querySelectorAll('.ftab');
-  const m={all:0,New:1,'Sent to Factory':2,'At Depot':3,Ready:4,'Sent to Factory':5,Shipped:6,Completed:7};
+  const m={all:0,New:1,'Sent to Factory':2,'At Depot':3,Ready:4,'Sent to Logistics':5,Shipped:6,Completed:7};
   tabs.forEach(t=>t.classList.remove('on'));
   if(m[status]!==undefined)tabs[m[status]].classList.add('on');
   render();
@@ -9280,6 +9290,49 @@ async function fetchWithTimeout(url,options={},timeoutMs=UPLOAD_TIMEOUT_MS){
   }
 }
 
+let _cloudDataSnapshotCache={ts:0,data:null};
+let _cloudDataSnapshotInFlight=null;
+function resetCloudDataSnapshotCache(){
+  _cloudDataSnapshotCache={ts:0,data:null};
+  _cloudDataSnapshotInFlight=null;
+}
+async function fetchCloudDataSnapshot(opts={}){
+  const maxAgeMs=Math.max(0,Number(opts&&opts.maxAgeMs)||1000);
+  const staleOkMs=Math.max(maxAgeMs,Number(opts&&opts.staleOkMs)||10000);
+  const timeoutMs=Math.max(1000,Number(opts&&opts.timeoutMs)||12000);
+  const now=Date.now();
+  const cachedTs=Number(_cloudDataSnapshotCache&&_cloudDataSnapshotCache.ts)||0;
+  const cachedData=_cloudDataSnapshotCache&&_cloudDataSnapshotCache.data;
+  if(cachedData&&((now-cachedTs)<=maxAgeMs)){
+    return cachedData;
+  }
+  if(_cloudDataSnapshotInFlight){
+    try{
+      return await _cloudDataSnapshotInFlight;
+    }catch(_e){}
+  }
+  _cloudDataSnapshotInFlight=(async function(){
+    const api=await ensureWorkingApiBase({silent:true});
+    const res=await fetchWithTimeout(api+'/api/data',{headers:getAuthHeaders()},timeoutMs);
+    if(!res.ok) throw new Error('data_sync_http_'+res.status);
+    const payload=await res.json();
+    const data=payload&&payload.data&&typeof payload.data==='object'?payload.data:{};
+    _cloudDataSnapshotCache={ts:Date.now(),data};
+    return data;
+  })();
+  try{
+    return await _cloudDataSnapshotInFlight;
+  }catch(err){
+    const age=Date.now()-(Number(_cloudDataSnapshotCache&&_cloudDataSnapshotCache.ts)||0);
+    if(_cloudDataSnapshotCache&&_cloudDataSnapshotCache.data&&age<=staleOkMs){
+      return _cloudDataSnapshotCache.data;
+    }
+    throw err;
+  }finally{
+    _cloudDataSnapshotInFlight=null;
+  }
+}
+
 function normalizeStatus(s){
   return s==='At Depott' ? 'At Depot' : (s==='Sent to Wechat'||s==='Sent to WeChat' ? 'Sent to Factory' : s);
 }
@@ -11473,7 +11526,7 @@ function buildMsgTemplate(o){
     'New':'Your order has been received and is being processed.',
     'Sent to Factory':'Your order is being processed.',
     'At Depot':'Your order has arrived at our depot and is being prepared.',
-    'Sent to Factory':'Your order has been handed to our logistics partner.',
+    'Sent to Logistics':'Your order has been handed to our logistics partner.',
     'Shipped':`Your order is on its way! Tracking: ${o.ukTracking||'—'}`,
     'Completed':'Your order has been delivered. Thank you!'
   };
@@ -11660,7 +11713,7 @@ function quickAdvance(id){
     const statusMessages={
       'Sent to Factory':'Your order is being processed by the factory 🏭',
       'At Depot':'Your order arrived at our depot 📦',
-      'Sent to Factory':'Your order sent to logistics 🚛',
+      'Sent to Logistics':'Your order sent to logistics 🚛',
       'Shipped':`Your order shipped! Tracking: ${o.ukTracking||'—'} 🚚`,
       'Completed':'Your order has been delivered ✅'
     };
@@ -11805,6 +11858,7 @@ async function dispatchRealtimeNotification(opts={}){
 let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
+let _pendingPollInFlight=false;
 async function startPendingPoll(){
   if(getFirebaseEnabled() && _health.ordersRealtime){
     if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}
@@ -11814,12 +11868,14 @@ async function startPendingPoll(){
   const pendingMs=(getFirebaseEnabled()&&_health.ordersRealtime)?30000:CLOUD_FAST_SYNC_MS;
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
+    if(_pendingPollInFlight)return;
+    _pendingPollInFlight=true;
     try{
       const api=await ensureWorkingApiBase({silent:true});
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
-        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
+        const ordRes=await fetchWithTimeout(api+'/api/orders',{headers:getAuthHeaders()},12000);
         if(ordRes.ok){
           const od=await ordRes.json();
           newOrders=Array.isArray(od&&od.orders)?od.orders:[];
@@ -11922,6 +11978,7 @@ async function startPendingPoll(){
         }
       }
     }catch(e){}
+    finally{_pendingPollInFlight=false;}
   },pendingMs);
 }
 
@@ -11976,6 +12033,7 @@ async function startResellerChatRealtime(){
 }
 
 // Start global poll when admin logs in - checks all reseller chats
+let _globalChatPollInFlight=false;
 function startGlobalChatPoll(){
   if(_globalChatPoll) clearInterval(_globalChatPoll);
   const pollMs=getFirebaseEnabled()?1200:5000;
@@ -11985,11 +12043,10 @@ function startGlobalChatPoll(){
 
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
+  if(_globalChatPollInFlight) return;
+  _globalChatPollInFlight=true;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
+    const data=await fetchCloudDataSnapshot({maxAgeMs:900,timeoutMs:12000,staleOkMs:6000});
     // Check each reseller's chat key
     const resellers=users.filter(u=>u.role==='Reseller');
     let totalUnread=0;
@@ -12061,10 +12118,15 @@ async function pollAllChats(){
     if(document.getElementById('pg-chat')?.classList.contains('on')){
       renderChatList();
     }
-  }catch(e){}
+  }catch(e){
+    console.warn('[pollAllChats]',e&&e.message?e.message:e);
+  }finally{
+    _globalChatPollInFlight=false;
+  }
 }
 let _chatPollInterval = null;
 let _messages = {}; // {resellerId: [{id, from, text, ts}]}
+let _chatPollInFlightByReseller = new Set();
 
 function renderChatList(filter=''){
   const el = document.getElementById('chat-list');
@@ -12098,22 +12160,26 @@ function renderChatList(filter=''){
 
 // ── CHAT POLLING ──
 async function pollMessages(resellerId){
-  if(!resellerId) return;
+  const rid=String(resellerId||'').trim();
+  if(!rid) return;
+  if(_chatPollInFlightByReseller.has(rid)) return;
+  _chatPollInFlightByReseller.add(rid);
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
-    const chatKey='jb_chat_'+resellerId;
-    const prevMsgs=Array.isArray(_messages[resellerId])?_messages[resellerId]:readChatMessagesFromCache(chatKey);
+    const data=await fetchCloudDataSnapshot({maxAgeMs:900,timeoutMs:12000,staleOkMs:6000});
+    const chatKey='jb_chat_'+rid;
+    const prevMsgs=Array.isArray(_messages[rid])?_messages[rid]:readChatMessagesFromCache(chatKey);
     const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
     if(JSON.stringify(mergedMsgs)!==JSON.stringify(prevMsgs)){
-      _messages[resellerId]=mergedMsgs;
-      if(_chatReseller===resellerId) renderMessages();
+      _messages[rid]=mergedMsgs;
+      if(_chatReseller===rid) renderMessages();
       renderChatList();
       updateChatBadge();
     }
-  }catch(e){ console.warn('[pollMessages]',e); }
+  }catch(e){
+    console.warn('[pollMessages]',e&&e.message?e.message:e);
+  }finally{
+    _chatPollInFlightByReseller.delete(rid);
+  }
 }
 
 
@@ -12290,6 +12356,8 @@ function refreshDashboardCounters(){
 let _resChatInterval = null;
 let _resMsgPollInterval = null;
 let _lastResUnreadCount = 0;
+let _resUnreadPollInFlight=false;
+let _resChatLoadInFlight=null;
 
 function startResellerMessagePoll(){
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
@@ -12301,11 +12369,10 @@ function startResellerMessagePoll(){
 
 async function checkResellerUnreadMessages(){
   if(!me) return;
+  if(_resUnreadPollInFlight) return;
+  _resUnreadPollInFlight=true;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
+    const data=await fetchCloudDataSnapshot({maxAgeMs:800,timeoutMs:12000,staleOkMs:5000});
     const chatKey='jb_chat_'+me.id;
     const msgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],_messages[String(me.id)]||[]);
     _messages[String(me.id)]=msgs;
@@ -12350,6 +12417,8 @@ async function checkResellerUnreadMessages(){
     }
   }catch(e){
     console.warn('[checkResellerUnreadMessages]', e);
+  }finally{
+    _resUnreadPollInFlight=false;
   }
 }
 
@@ -12376,20 +12445,19 @@ function closeResellerChat(){
   _resChatRealtimeBound=false;
   stopActiveChatRealtime();
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+  _resChatLoadInFlight=null;
 }
 
 async function loadResellerMessages(){
   if(!me) return;
-  try{
+  if(_resChatLoadInFlight) return _resChatLoadInFlight;
+  _resChatLoadInFlight=(async function(){
+    try{
     const chatKey='jb_chat_'+me.id;
     let msgs=readChatMessagesFromCache(chatKey);
     try{
-      const api=await ensureWorkingApiBase({silent:true});
-      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-      if(res.ok){
-        const {data}=await res.json();
-        msgs=mergeChatMessagesWithCache(chatKey,data&&data[chatKey]?data[chatKey]:[],msgs);
-      }
+      const data=await fetchCloudDataSnapshot({maxAgeMs:800,timeoutMs:12000,staleOkMs:5000});
+      msgs=mergeChatMessagesWithCache(chatKey,data&&data[chatKey]?data[chatKey]:[],msgs);
     }catch(_e){}
     _messages[String(me.id)]=msgs;
     
@@ -12421,7 +12489,11 @@ async function loadResellerMessages(){
     renderResellerMessages(msgs);
   }catch(e){
     console.error('[loadResellerMessages]', e);
+  }finally{
+    _resChatLoadInFlight=null;
   }
+  })();
+  return _resChatLoadInFlight;
 }
 
 function renderResellerMessages(msgs){
@@ -12778,6 +12850,8 @@ function initOfflineIndicator(){
 let _autoSyncInterval = null;
 let _autoSyncVisibilityBound=false;
 let _silentLoadInFlight=null;
+let _autoSyncTickInFlight=false;
+let _visibilitySyncInFlight=false;
 
 function runSilentLoadWithLock(){
   if(_silentLoadInFlight) return _silentLoadInFlight;
@@ -12798,21 +12872,32 @@ function startAutoSync(){
   const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:CLOUD_FAST_SYNC_MS;
   // Sync interval adapts when realtime is active.
   _autoSyncInterval = setInterval(async() => {
-    if(me && navigator.onLine){
-      await ensureWorkingApiBase({silent:true}).catch(()=>{});
-      await flushLocalSyncFallback().catch(()=>{});
-      await runSilentLoadWithLock().catch(()=>{});
+    if(!me || !navigator.onLine || _autoSyncTickInFlight) return;
+    _autoSyncTickInFlight=true;
+    try{
+      await withTimeoutPromise(ensureWorkingApiBase({silent:true}).catch(()=>{}),5000,'autosync base');
+      await withTimeoutPromise(flushLocalSyncFallback().catch(()=>{}),8000,'autosync flush');
+      await withTimeoutPromise(runSilentLoadWithLock().catch(()=>{}),15000,'autosync load');
       if(isFirebaseEnabled()){
-        initFirebaseRealtime({silent:true}).catch(()=>{});
+        await withTimeoutPromise(initFirebaseRealtime({silent:true}).catch(()=>{}),5000,'autosync realtime');
       }
+    }catch(e){
+      console.warn('[autoSync_tick]',e&&e.message?e.message:e);
+    }finally{
+      _autoSyncTickInFlight=false;
     }
   }, syncMs);
   
   // Also sync when tab becomes visible
   if(!_autoSyncVisibilityBound){
-    document.addEventListener('visibilitychange', () => {
-      if(document.visibilityState === 'visible' && me && navigator.onLine){
-        loadFromCloud().catch(()=>{});
+    document.addEventListener('visibilitychange', async () => {
+      if(document.visibilityState === 'visible' && me && navigator.onLine && !_visibilitySyncInFlight){
+        _visibilitySyncInFlight=true;
+        try{
+          await withTimeoutPromise(loadFromCloud().catch(()=>{}),20000,'visibility load');
+        }finally{
+          _visibilitySyncInFlight=false;
+        }
       }
     });
     _autoSyncVisibilityBound=true;
@@ -13413,7 +13498,8 @@ function renderResLB(){
 
 function fmtStatus(s){
   if(!s) return 'New';
-  if(s==='Sent to WeChat'||s==='Sent to Logistic') return 'Sent to Factory';
+  if(s==='Sent to WeChat'||s==='Sent to Wechat') return 'Sent to Factory';
+  if(s==='Sent to Logistic') return 'Sent to Logistics';
   return s;
 }
 
@@ -13423,7 +13509,7 @@ function renderResOrders(){
   let myOrders=orders.filter(o=>o.resellerId===me.id);
   
   if(filter==='pending') myOrders=myOrders.filter(o=>o.pendingApproval);
-  else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>o.status==='Sent to Factory'||o.status==='Sent to Factory');
+  else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>o.status==='Sent to Factory'||o.status==='Sent to Wechat');
   else if(filter!=='all') myOrders=myOrders.filter(o=>o.status===filter);
   
   myOrders=myOrders.sort((a,b)=>b.ts-a.ts);
@@ -14912,7 +14998,7 @@ function checkAutoBackup(){
     }).catch(()=>{});
   }
 }
-function stopPendingPoll(){if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}}
+function stopPendingPoll(){if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}_pendingPollInFlight=false;}
 
 function resetSessionTimer(){
   clearTimeout(_sessionTimer);
