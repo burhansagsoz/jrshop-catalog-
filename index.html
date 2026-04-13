@@ -2338,26 +2338,61 @@ function getShelfStatus(o){
 }
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
 let _ordersStorageWarnAt=0;
-function compactOrdersForStorage(list){
+function compactOrdersForStorage(list,opts={}){
   const arr=Array.isArray(list)?list:[];
+  const aggressive=!!(opts&&opts.aggressive);
   const keepRemoteable=function(v){
     if(typeof v!=='string') return null;
     const s=v.trim();
     if(!s) return null;
-    if(/^(https?:|blob:|data:)/i.test(s)) return s;
+    // Never keep blob/data URLs in localStorage compaction; they are quota-heavy
+    // and are a common cause of "saved then disappeared after refresh" regressions.
+    if(/^https?:/i.test(s)) return s;
     if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
     return null;
   };
   return arr.map(function(o){
+    const products=(o&&o.products||[]).map(function(p){
+      const base={
+        ...p,
+        img:keepRemoteable(p&&p.img),
+        depotPhoto:keepRemoteable(p&&p.depotPhoto)
+      };
+      if(!aggressive) return base;
+      return {
+        name:base&&base.name?String(base.name):'',
+        qty:Math.max(1,Number(base&&base.qty)||1),
+        arrived:!!(base&&base.arrived),
+        cnTracking:base&&base.cnTracking?String(base.cnTracking):'',
+        ukTracking:base&&base.ukTracking?String(base.ukTracking):'',
+        img:base&&base.img?base.img:null,
+        depotPhoto:base&&base.depotPhoto?base.depotPhoto:null
+      };
+    });
+    if(!aggressive){
+      return {
+        ...o,
+        products
+      };
+    }
     return {
-      ...o,
-      products:(o&&o.products||[]).map(function(p){
-        return {
-          ...p,
-          img:keepRemoteable(p&&p.img),
-          depotPhoto:keepRemoteable(p&&p.depotPhoto)
-        };
-      })
+      id:o&&o.id?String(o.id):'',
+      ref:o&&o.ref?String(o.ref):'',
+      name:o&&o.name?String(o.name):'',
+      resellerId:o&&o.resellerId?String(o.resellerId):'',
+      supplierId:o&&o.supplierId?String(o.supplierId):'',
+      status:normalizeStatus(o&&o.status),
+      pendingApproval:!!(o&&o.pendingApproval),
+      rejected:!!(o&&o.rejected),
+      rejectNote:o&&o.rejectNote?String(o.rejectNote):'',
+      cnTracking:o&&o.cnTracking?String(o.cnTracking):'',
+      ukTracking:o&&o.ukTracking?String(o.ukTracking):'',
+      ts:Number(o&&o.ts)||Date.now(),
+      updatedAt:Number(o&&o.updatedAt||o&&o.ts)||Date.now(),
+      v:Math.max(1,Number(o&&o.v)||1),
+      opId:o&&o.opId?String(o.opId):'',
+      lastOpId:o&&o.lastOpId?String(o.lastOpId):'',
+      products
     };
   });
 }
@@ -2368,7 +2403,7 @@ function persistOrdersLocalSafe(list){
     return true;
   }catch(_e){
     try{
-      const compact=compactOrdersForStorage(arr);
+      const compact=compactOrdersForStorage(arr,{aggressive:false});
       localStorage.setItem('jb_orders',JSON.stringify(compact));
       const now=Date.now();
       if(now-_ordersStorageWarnAt>20000){
@@ -2377,8 +2412,19 @@ function persistOrdersLocalSafe(list){
       }
       return true;
     }catch(err2){
-      console.error('[persistOrdersLocalSafe]',err2&&err2.message?err2.message:err2);
-      return false;
+      try{
+        const compactAggressive=compactOrdersForStorage(arr,{aggressive:true});
+        localStorage.setItem('jb_orders',JSON.stringify(compactAggressive));
+        const now=Date.now();
+        if(now-_ordersStorageWarnAt>20000){
+          _ordersStorageWarnAt=now;
+          toast('⚠️ Storage was full; compacted order cache to protect changes','info');
+        }
+        return true;
+      }catch(err3){
+        console.error('[persistOrdersLocalSafe]',err3&&err3.message?err3.message:err3);
+        return false;
+      }
     }
   }
 }
@@ -7943,6 +7989,10 @@ function readLocalOrders(){
 }
 function writeLocalJson(key,value){
   if(!key) return;
+  if(key==='jb_orders'){
+    persistOrdersLocalSafe(Array.isArray(value)?value:[]);
+    return;
+  }
   try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
 }
 function cloudSave(key,value){
@@ -10446,6 +10496,10 @@ function parseLocalJson(key,fallback){
   }
 }
 function writeLocalJson(key,value){
+  if(String(key||'')==='jb_orders'){
+    persistOrdersLocalSafe(Array.isArray(value)?value:[]);
+    return;
+  }
   try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
 }
 function readLocalDataMap(){
