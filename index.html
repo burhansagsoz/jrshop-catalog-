@@ -2353,7 +2353,6 @@ function getApiBaseEarly(){
             }
           });
           users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
-        scheduleFirebaseAutoConnect('boot');
           const savedEm=localStorage.getItem('jb_saved_email');
           const savedPwRaw=localStorage.getItem('jb_saved_pw');const savedPw=savedPwRaw?decodeURIComponent(atob(savedPwRaw)):'';
           const emEl=document.getElementById('l-em');
@@ -2507,18 +2506,6 @@ function shouldAcceptRemoteOrders(remoteOrders){
     return true;
   }
 }
-function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
-  // In Cloudflare mode, /api/orders is the only authoritative source for orders.
-  // /api/data may contain stale jb_orders snapshots and can reintroduce old states
-  // such as pendingApproval after approve/reject actions.
-  if(!getFirebaseEnabled()) return false;
-  const remoteCount=Array.isArray(fallbackOrders)?fallbackOrders.length:0;
-  const localCount=Array.isArray(localOrders)?localOrders.length:0;
-  if(remoteCount<=0) return false;
-  if(localCount===0) return true;
-  if(localCount<30 && remoteCount>=localCount) return true;
-  return false;
-}
 function persistOrdersState(nextOrders){
   const arr=Array.isArray(nextOrders)?nextOrders:[];
   orders=arr;
@@ -2598,22 +2585,6 @@ function restoreMissingOrderImagesInOrders(orderList,opts={}){
     return {...order,products};
   });
   return {orders:next,changedIds:changedIds.filter(Boolean)};
-}
-function scheduleRecoveredImageSync(orderIds){
-  const ids=(Array.isArray(orderIds)?orderIds:[]).filter(Boolean);
-  if(!ids.length) return;
-  ids.forEach(function(id){_recoveredImageOrderIds.add(String(id));});
-  if(_recoveredImageSyncTimer) return;
-  _recoveredImageSyncTimer=setTimeout(async function(){
-    _recoveredImageSyncTimer=null;
-    const pending=[..._recoveredImageOrderIds];
-    _recoveredImageOrderIds.clear();
-    if(!pending.length) return;
-    if(!getFirebaseEnabled()||!_health.firebaseConnected) return;
-    try{
-      await saveOrders(pending);
-    }catch(_e){}
-  },1800);
 }
 function mergeArrayByTs(localArr,remoteArr){
   const local=Array.isArray(localArr)?localArr:[];
@@ -2769,20 +2740,6 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
 function safeApplyRemoteOrders(remoteOrders,opts={}){
   return !!applyAuthoritativeOrdersSnapshot(remoteOrders,opts).applied;
 }
-function scheduleFirebaseAutoConnect(reason){
-  if(!getFirebaseEnabled()) return;
-  if(!me) return;
-  const delayMs=reason==='boot'?180:80;
-  setTimeout(function(){
-    initFirebaseRealtime({silent:true,force:true}).then(function(ok){
-      if(ok) flushLocalSyncFallback().catch(()=>{});
-    }).catch(()=>{});
-  },delayMs);
-}
-function warmFirebaseConnect(){
-  scheduleFirebaseAutoConnect('warm');
-}
-
 // ── AUTH ──
 async function login(){
   const em=document.getElementById('l-em').value.trim().toLowerCase();
@@ -2815,22 +2772,6 @@ async function login(){
   me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
   const firebaseEmail=String(me.email||em||'').trim().toLowerCase();
   cacheFirebaseLoginCreds(firebaseEmail,pw);
-  if(getFirebaseEnabled()){
-    try{
-      await initFirebaseRealtime({silent:true,force:true});
-      if(!isFirebaseAuthIdentityMatchingEmail(firebaseEmail) && _firebaseAuth && _firebaseAuth.currentUser){
-        try{await _firebaseAuth.signOut();}catch(_e){}
-      }
-      const fbUser=await firebaseSignInForSession(firebaseEmail,pw);
-      if(fbUser){
-        await initFirebaseRealtime({silent:true,force:true});
-        flushLocalSyncFallback().catch(()=>{});
-      }
-      if(isFirebaseAuthIdentityMatchingEmail(firebaseEmail)){
-        await applyFirebaseRoleMapping(me,firebaseEmail);
-      }
-    }catch(_e){}
-  }
   // Remember me
   const remCb=document.getElementById('l-remember');
   if(remCb&&remCb.checked){
@@ -2865,7 +2806,6 @@ async function login(){
   else if(me.role==='Staff') goDepotStaff();
   else{document.getElementById('topbar-right').style.display='none';goDash(document.querySelector('.ni'));startPendingPoll();
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
-  scheduleFirebaseAutoConnect('login');
   bootstrapAuthoritativeOrders().catch(()=>{});
   setTimeout(async function(){
     fetch(getApiBase()+'/api/data')
@@ -8993,7 +8933,6 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
-const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=30*60*1000;
@@ -9054,8 +8993,6 @@ const _health={
 };
 let _realtimeRenderTimer=null;
 let _realtimeMetricsTimer=null;
-let _recoveredImageSyncTimer=null;
-const _recoveredImageOrderIds=new Set();
 let _lastOrdersSaveAuditAt=0;
 const _nativeFetch=window.fetch.bind(window);
 
@@ -9065,10 +9002,6 @@ function ensureFirebaseConfigDefaults(){
   }
   if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
     localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
-  }
-  // Signed-in transport auth only (no anonymous fallback).
-  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
-    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'1');
   }
 }
 ensureFirebaseConfigDefaults();
@@ -9782,9 +9715,6 @@ async function fetchWithTimeout(url,options={},timeoutMs=UPLOAD_TIMEOUT_MS){
 
 function getFirebaseEnabled(){
   return false;
-}
-function isFirebaseEnabled(){
-  return getFirebaseEnabled();
 }
 
 function getFirebaseConfig(){
@@ -11527,11 +11457,6 @@ async function handleFirebaseApiRequest(url,method,body){
   }
   return null;
 }
-function shouldUseFirebaseApiRouting(){
-  // Phase-A target architecture: server API is the authoritative source.
-  // Keep firebase helper code in place for now, but disable API interception.
-  return false;
-}
 window.fetch=async function(input,init){
   const rawUrl=typeof input==='string'?input:(input&&input.url?input.url:String(input||''));
   const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
@@ -11546,16 +11471,6 @@ window.fetch=async function(input,init){
     isHealthApiFetch=isHealthTrackedApiPath(apiPath);
   }catch(_e){}
   if(isHealthApiFetch) markApiCall();
-  if(shouldUseFirebaseApiRouting() && shouldRouteApiToFirebase(rawUrl)){
-    try{
-      const handled=await handleFirebaseApiRequest(rawUrl,method,body);
-      if(handled) return handled;
-      return jsonApiResponse({error:'Endpoint not available in Firebase mode'},404);
-    }catch(e){
-      if(isHealthApiFetch) markError(e);
-      return jsonApiResponse({error:e&&e.message?e.message:String(e)},500);
-    }
-  }
   try{
     const res=await _nativeFetch(input,init);
     if(!res.ok && isHealthApiFetch) markError(new Error('HTTP '+res.status+' '+res.statusText));
@@ -13257,9 +13172,6 @@ function initOfflineIndicator(){
     try{
       await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
-      if(getFirebaseEnabled()){
-        await initFirebaseRealtime({silent:true,force:true});
-      }
       await loadFromCloudSilent().catch(()=>{});
       await loadFromCloud().catch(()=>{});
     }finally{
@@ -13297,9 +13209,8 @@ function runSilentLoadWithLock(){
 
 function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
-  warmFirebaseConnect();
   
-  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:CLOUD_FAST_SYNC_MS;
+  const syncMs=CLOUD_FAST_SYNC_MS;
   // Sync interval adapts when realtime is active.
   _autoSyncInterval = setInterval(async() => {
     if(me && navigator.onLine){
@@ -13308,9 +13219,6 @@ function startAutoSync(){
       await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
       await runSilentLoadWithLock().catch(()=>{});
       await maybeSelfHealOrderDrift({reason:'auto_sync'}).catch(()=>{});
-      if(isFirebaseEnabled()){
-        initFirebaseRealtime({silent:true}).catch(()=>{});
-      }
     }
   }, syncMs);
   
