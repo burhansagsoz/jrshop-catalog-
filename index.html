@@ -2728,10 +2728,12 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
     return {applied:false,changed:false,count:Array.isArray(orders)?orders.length:0};
   }
   if(forceRemote && !opts.ignorePendingGuards){
-    if(hasActiveUpsertOrderMutation() || pendingFallbackIds.size){
+    const hasRecentMutationBlock=hasRecentUpsertOrderMutation();
+    if(hasRecentMutationBlock || pendingFallbackIds.size){
       console.warn('[OrderSync] Skip authoritative replace due to pending local mutations', {
         source,
-        pendingMutations:getActiveLocalOrderMutationIds().length,
+        recentPendingMutations:getRecentUpsertOrderMutationCount(),
+        pendingMutationsTotal:getActiveLocalOrderMutationIds().length,
         pendingFallbackOps:pendingFallbackIds.size
       });
       return {applied:false,changed:false,count:Array.isArray(orders)?orders.length:0};
@@ -7971,7 +7973,7 @@ async function maybeSelfHealOrderDrift(opts={}){
   }
   if(_orderDriftHealInFlight) return _orderDriftHealInFlight;
   const pendingFallbackIds=getPendingFallbackOrderIds();
-  if(hasActiveUpsertOrderMutation() || pendingFallbackIds.size){
+  if(hasRecentUpsertOrderMutation() || pendingFallbackIds.size){
     return false;
   }
   _lastOrderDriftCheckAt=now;
@@ -8983,8 +8985,9 @@ const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
-const LOCAL_ORDER_MUTATION_KEEP_MS=6*60*60*1000;
+const LOCAL_ORDER_MUTATION_KEEP_MS=30*60*1000;
 const LOCAL_ORDER_CONVERGENCE_GRACE_MS=20*60*1000;
+const FORCE_REMOTE_MUTATION_BLOCK_MS=90*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
 const LOCAL_DATA_META_KEY='jb_data_meta';
 const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
@@ -9113,6 +9116,31 @@ function hasActiveUpsertOrderMutation(){
   return pendingOps.some(function(op){
     return String(op&&op.op||'upsert')!=='delete';
   });
+}
+function hasRecentUpsertOrderMutation(maxAgeMs){
+  const map=cleanupLocalOrderMutations();
+  const now=Date.now();
+  const ageLimit=Math.max(1000,Number(maxAgeMs)||FORCE_REMOTE_MUTATION_BLOCK_MS);
+  return Object.keys(map).some(function(id){
+    const row=map[id]||{};
+    if(String(row.type||'upsert')==='delete') return false;
+    const ts=Number(row.ts)||0;
+    if(!ts) return true;
+    return (now-ts)<ageLimit;
+  });
+}
+function getRecentUpsertOrderMutationCount(maxAgeMs){
+  const map=cleanupLocalOrderMutations();
+  const now=Date.now();
+  const ageLimit=Math.max(1000,Number(maxAgeMs)||FORCE_REMOTE_MUTATION_BLOCK_MS);
+  let count=0;
+  Object.keys(map).forEach(function(id){
+    const row=map[id]||{};
+    if(String(row.type||'upsert')==='delete') return;
+    const ts=Number(row.ts)||0;
+    if(!ts || (now-ts)<ageLimit) count++;
+  });
+  return count;
 }
 function getActiveLocalOrderMutationIds(){
   const map=cleanupLocalOrderMutations();
