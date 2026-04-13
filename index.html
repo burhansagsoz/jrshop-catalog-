@@ -12428,6 +12428,16 @@ let _globalChatPoll = null;
 let _firebaseUnsubActiveChat = null;
 let _firebaseActiveChatKey = '';
 let _resChatRealtimeBound=false;
+async function fetchDataMapByKeys(keys){
+  const list=Array.isArray(keys)?keys.map(function(k){return String(k||'').trim();}).filter(Boolean):[];
+  if(!list.length) return {};
+  const api=await ensureWorkingApiBase({silent:true});
+  const query='?keys='+encodeURIComponent(list.join(','));
+  const res=await fetch(api+'/api/data'+query,{headers:getAuthHeaders()});
+  if(!res.ok) return null;
+  const payload=await res.json().catch(function(){return {};});
+  return payload&&payload.data&&typeof payload.data==='object'?payload.data:{};
+}
 
 function stopActiveChatRealtime(){
   if(_firebaseUnsubActiveChat){
@@ -12482,12 +12492,11 @@ function startGlobalChatPoll(){
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
     // Check each reseller's chat key
     const resellers=users.filter(u=>u.role==='Reseller');
+    const keys=resellers.map(function(u){return 'jb_chat_'+u.id;});
+    const data=await fetchDataMapByKeys(keys);
+    if(!data) return;
     let totalUnread=0;
     let hasNewMessages = false;
     let newMessageFrom = '';
@@ -12607,11 +12616,9 @@ function renderChatList(filter=''){
 async function pollMessages(resellerId){
   if(!resellerId) return;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
     const chatKey='jb_chat_'+resellerId;
+    const data=await fetchDataMapByKeys([chatKey]);
+    if(!data) return;
     const prevMsgs=Array.isArray(_messages[resellerId])?_messages[resellerId]:readChatMessagesFromCache(chatKey);
     const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
     if(JSON.stringify(mergedMsgs)!==JSON.stringify(prevMsgs)){
@@ -12692,7 +12699,7 @@ async function openChatWith(resellerId){
   });
   // Start polling
   if(_chatPollInterval) clearInterval(_chatPollInterval);
-  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?12000:5000);
+  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?4000:5000);
   document.getElementById('chat-input')?.focus();
 }
 
@@ -12809,11 +12816,9 @@ function startResellerMessagePoll(){
 async function checkResellerUnreadMessages(){
   if(!me) return;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
     const chatKey='jb_chat_'+me.id;
+    const data=await fetchDataMapByKeys([chatKey]);
+    if(!data) return;
     const msgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],_messages[String(me.id)]||[]);
     _messages[String(me.id)]=msgs;
     const unreadCount = msgs.filter(function(m){return isInboundUnreadForReseller(m);}).length;
@@ -12888,10 +12893,8 @@ async function loadResellerMessages(){
     const chatKey='jb_chat_'+me.id;
     let msgs=readChatMessagesFromCache(chatKey);
     try{
-      const api=await ensureWorkingApiBase({silent:true});
-      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-      if(res.ok){
-        const {data}=await res.json();
+      const data=await fetchDataMapByKeys([chatKey]);
+      if(data){
         msgs=mergeChatMessagesWithCache(chatKey,data&&data[chatKey]?data[chatKey]:[],msgs);
       }
     }catch(_e){}
@@ -12987,16 +12990,14 @@ async function sendChatMsg(){
   const text = inp?.value.trim();
   if(!text) return;
   inp.value = '';
-  const api=await ensureWorkingApiBase({silent:true});
   const chatKey='jb_chat_'+_chatReseller;
   let msgs=mergeChatByVersion(
     Array.isArray(_messages[_chatReseller])?_messages[_chatReseller]:[],
     readChatMessagesFromCache(chatKey)
   );
   try{
-    const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(dataRes.ok){
-      const {data}=await dataRes.json();
+    const data=await fetchDataMapByKeys([chatKey]);
+    if(data){
       msgs=mergeChatByVersion(msgs,normalizeChatMessages(data&&data[chatKey]?data[chatKey]:[],chatKey));
     }
   }catch(_e){}
@@ -13035,12 +13036,10 @@ async function sendResellerChatMsg(){
   inp.value='';
   const chatKey='jb_chat_'+me.id;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
     let msgs=readChatMessagesFromCache(chatKey);
     try{
-      const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-      if(dataRes.ok){
-        const {data}=await dataRes.json();
+      const data=await fetchDataMapByKeys([chatKey]);
+      if(data){
         msgs=mergeChatByVersion(msgs,normalizeChatMessages(data&&data[chatKey]?data[chatKey]:[],chatKey));
       }
     }catch(_e){}
