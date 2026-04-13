@@ -2774,6 +2774,7 @@ async function login(){
   else{document.getElementById('topbar-right').style.display='none';goDash(document.querySelector('.ni'));startPendingPoll();
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
   scheduleFirebaseAutoConnect('login');
+  bootstrapAuthoritativeOrders().catch(()=>{});
   setTimeout(async function(){
     fetch(getApiBase()+'/api/data')
     .then(function(r){return r.json();})
@@ -7575,6 +7576,7 @@ let _syncTimeouts={};
 let _apiBaseCheckInFlight=null;
 let _apiBaseCheckedAt=0;
 const API_BASE_CHECK_COOLDOWN_MS=60*1000;
+const LOCAL_REPLICA_SYNC_STATE_KEY='jb_replica_sync_state';
 // Production mode: order mutations are considered successful only after cloud ACK.
 const STRICT_ORDER_CLOUD_COMMIT=true;
 function getApiBase(){
@@ -7643,6 +7645,291 @@ function apiUrl(path){
 function createClientRequestId(prefix){
   const p=String(prefix||'rq').replace(/[^a-z0-9_-]/gi,'').slice(0,8)||'rq';
   return `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,10)}`;
+}
+function readReplicaSyncState(){
+  try{
+    const raw=localStorage.getItem(LOCAL_REPLICA_SYNC_STATE_KEY);
+    const parsed=raw?JSON.parse(raw):{};
+    if(!parsed||typeof parsed!=='object') return {lastAckCursor:''};
+    return {
+      lastAckCursor:String(parsed.lastAckCursor||'').trim()
+    };
+  }catch(_e){
+    return {lastAckCursor:''};
+  }
+}
+function writeReplicaSyncState(next){
+  const src=next&&typeof next==='object'?next:{};
+  const payload={
+    lastAckCursor:String(src.lastAckCursor||'').trim()
+  };
+  try{localStorage.setItem(LOCAL_REPLICA_SYNC_STATE_KEY,JSON.stringify(payload));}catch(_e){}
+  return payload;
+}
+function getReplicaCursor(){
+  const state=readReplicaSyncState();
+  if(state.lastAckCursor) return state.lastAckCursor;
+  const c=buildSyncCursor();
+  return `${Number(c.ts)||0}:${Number(c.v)||0}`;
+}
+function setReplicaCursor(cursor){
+  const normalized=String(cursor||'').trim();
+  if(!normalized) return;
+  const state=readReplicaSyncState();
+  if(state.lastAckCursor===normalized) return;
+  writeReplicaSyncState({...state,lastAckCursor:normalized});
+}
+function parseReplicaCursor(cursor){
+  const text=String(cursor||'').trim();
+  if(!text) return {ts:0,v:0};
+  const normalized=text.includes('|')?text.replace('|',':'):text;
+  const parts=normalized.split(':');
+  return {
+    ts:Math.max(0,Number(parts[0])||0),
+    v:Math.max(0,Number(parts[1])||0)
+  };
+}
+function compareReplicaCursor(a,b){
+  const ca=parseReplicaCursor(a);
+  const cb=parseReplicaCursor(b);
+  if(ca.ts!==cb.ts) return ca.ts-cb.ts;
+  return ca.v-cb.v;
+}
+function chooseNewerCursor(a,b){
+  return compareReplicaCursor(a,b)>=0?String(a||''):String(b||'');
+}
+async function syncBootstrapReplicaState(){
+  try{
+    const api=await ensureWorkingApiBase({silent:true});
+    const res=await fetch(api+'/api/bootstrap',{headers:getAuthHeaders()});
+    if(!res.ok) return false;
+    const payload=await res.json().catch(()=>({}));
+    const initialCursor=String(payload&&payload.initialCursor||'').trim();
+    if(initialCursor) setReplicaCursor(chooseNewerCursor(initialCursor,getReplicaCursor()));
+    return true;
+  }catch(_e){
+    return false;
+  }
+}
+function buildOperationFromOrder(order,prev){
+  if(!order||!order.id) return null;
+  const baseVersion=Math.max(0,Number(prev&&prev.v)||0);
+  const payloadOrder=sanitizeOrderForRemote({
+    ...order,
+    id:String(order.id),
+    status:normalizeStatus(order.status),
+    updatedAt:Number(order.updatedAt||order.ts)||Date.now(),
+    ts:Number(order.ts)||Number(order.updatedAt)||Date.now()
+  });
+  return {
+    opId:String(order.opId||order.lastOpId||createLocalMutationOpId('upsert')),
+    type:'UPSERT_ORDER',
+    entityId:String(order.id),
+    payload:{order:payloadOrder},
+    baseVersion,
+    createdAt:Number(order.updatedAt||order.ts)||Date.now()
+  };
+}
+function buildDeleteOperationFromId(orderId,prev,deletedAt){
+  const id=String(orderId||'').trim();
+  if(!id) return null;
+  const ts=Number(deletedAt)||Date.now();
+  return {
+    opId:createLocalMutationOpId('delete'),
+    type:'DELETE_ORDER',
+    entityId:id,
+    payload:{id,deletedAt:ts},
+    baseVersion:Math.max(0,Number(prev&&prev.v)||0),
+    createdAt:ts
+  };
+}
+function mapOperationResultByEntityId(result,operations){
+  const byEntity=new Map();
+  const opsById=new Map((Array.isArray(operations)?operations:[]).map(function(op){
+    return [String(op&&op.opId||''),op];
+  }));
+  const pushRow=function(status,row){
+    const opId=String(row&&row.opId||'');
+    const op=opsById.get(opId);
+    if(!op||!op.entityId) return;
+    const key=String(op.entityId);
+    if(!byEntity.has(key)){
+      byEntity.set(key,{entityId:key,status,rows:[]});
+    }
+    const entry=byEntity.get(key);
+    entry.status=status==='acked'?'acked':entry.status==='acked'?entry.status:status;
+    entry.rows.push(row);
+  };
+  (result&&result.acked||[]).forEach(function(row){pushRow('acked',row);});
+  (result&&result.rejected||[]).forEach(function(row){pushRow('rejected',row);});
+  (result&&result.failed||[]).forEach(function(row){pushRow('failed',row);});
+  return byEntity;
+}
+function applyOrderEventsFromUpdates(events){
+  const incomingOrders=[];
+  (Array.isArray(events)?events:[]).forEach(function(ev){
+    if(!ev||typeof ev!=='object') return;
+    const type=String(ev.type||'').toUpperCase();
+    if(type==='ORDER_SNAPSHOT'){
+      const data=ev.data&&typeof ev.data==='object'?ev.data:null;
+      if(data&&data.id) incomingOrders.push(data);
+      return;
+    }
+    if(type.indexOf('TOMBSTONE')>=0 || type.indexOf('DELETE')>=0){
+      const orderId=String(ev.entityId||ev.orderId||'').trim();
+      if(orderId){
+        const ts=Number(ev.ts)||Date.now();
+        applyOrderDeleteLocally(orderId,ts);
+      }
+    }
+  });
+  if(incomingOrders.length){
+    ackLocalMutationsFromIncoming(incomingOrders);
+    orders=mergeOrdersByFreshness(Array.isArray(orders)?orders:[],incomingOrders,{source:'ops_updates'});
+    persistOrdersLocalSafe(orders);
+  }else{
+    persistOrdersLocalSafe(orders);
+  }
+}
+async function fetchOrderUpdatesWithCursor(opts={}){
+  const maxBatches=Math.max(1,Math.min(5,Number(opts&&opts.maxBatches)||2));
+  const limit=Math.max(20,Math.min(300,Number(opts&&opts.limit)||120));
+  const api=await ensureWorkingApiBase({silent:true});
+  let cursor=getReplicaCursor();
+  let changed=false;
+  for(let i=0;i<maxBatches;i++){
+    const url=api+'/api/updates?cursor='+encodeURIComponent(cursor)+'&limit='+encodeURIComponent(String(limit));
+    const res=await fetch(url,{headers:getAuthHeaders()});
+    if(!res.ok) break;
+    const payload=await res.json().catch(()=>({}));
+    const events=Array.isArray(payload&&payload.events)?payload.events:[];
+    if(!events.length){
+      const remoteCursor=String(payload&&payload.nextCursor||cursor||'').trim();
+      if(remoteCursor) setReplicaCursor(chooseNewerCursor(remoteCursor,cursor));
+      break;
+    }
+    applyOrderEventsFromUpdates(events);
+    changed=true;
+    const nextCursor=String(payload&&payload.nextCursor||'').trim();
+    if(!nextCursor) break;
+    if(nextCursor===cursor){
+      setReplicaCursor(nextCursor);
+      break;
+    }
+    setReplicaCursor(nextCursor);
+    cursor=nextCursor;
+  }
+  if(changed){
+    updateBadges();
+    render();
+  }
+  return changed;
+}
+async function sendOrderOperationsBatch(operations){
+  const list=Array.isArray(operations)?operations.filter(Boolean):[];
+  if(!list.length) return {ok:true,acked:[],rejected:[],failed:[]};
+  const api=await ensureWorkingApiBase({silent:true});
+  const res=await fetch(api+'/api/ops',{
+    method:'POST',
+    headers:getAuthHeaders({'Content-Type':'application/json'}),
+    body:JSON.stringify({operations:list})
+  });
+  let payload={};
+  try{payload=await res.json();}catch(_e){payload={};}
+  if(res.ok){
+    const nextCursor=String(payload&&payload.nextCursor||'').trim();
+    if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
+  }
+  return {
+    ok:!!res.ok,
+    status:Number(res.status)||0,
+    acked:Array.isArray(payload&&payload.acked)?payload.acked:[],
+    rejected:Array.isArray(payload&&payload.rejected)?payload.rejected:[],
+    failed:Array.isArray(payload&&payload.failed)?payload.failed:[],
+    nextCursor:String(payload&&payload.nextCursor||'').trim()
+  };
+}
+async function syncOrdersViaOpsProtocol(items){
+  const list=Array.isArray(items)?items.filter(function(o){return o&&o.id;}):[];
+  if(!list.length) return {ok:true,ackedIds:new Set(),conflictIds:new Set(),failedIds:new Set()};
+  const operations=list.map(function(item){
+    const opType=String(item.__opType||'upsert').toLowerCase();
+    return buildOperationFromOrder(item,opType);
+  }).filter(function(op){return op&&op.opId&&op.entityId;});
+  const result=await sendOrderOperationsBatch(operations);
+  const ackedIds=new Set();
+  const failedIds=new Set();
+  const conflictIds=new Set();
+  const opById=new Map(operations.map(function(op){return [String(op.opId),op];}));
+  const markByOp=function(collection,row){
+    const opId=String(row&&row.opId||'');
+    const op=opById.get(opId);
+    if(!op) return;
+    const entityId=String(op.entityId||'');
+    if(entityId) collection.add(entityId);
+  };
+  (result.acked||[]).forEach(function(row){markByOp(ackedIds,row);});
+  (result.failed||[]).forEach(function(row){markByOp(failedIds,row);});
+  (result.rejected||[]).forEach(function(row){
+    const reason=String(row&&row.reason||'');
+    if(reason==='VERSION_CONFLICT') markByOp(conflictIds,row);
+    else markByOp(failedIds,row);
+  });
+  if(result.ok){
+    await fetchOrderUpdatesWithCursor({silent:true}).catch(function(){});
+  }
+  return {ok:!!result.ok,ackedIds,conflictIds,failedIds,error:result.error||''};
+}
+function applyOpsSyncResultToLocalState(byEntity,strictFailedOrderIds,strictFailureReasons){
+  if(!(byEntity instanceof Map)) return {queuedFallback:false};
+  let queuedFallback=false;
+  byEntity.forEach(function(entry,entityId){
+    if(entry&&entry.status==='acked'){
+      markLocalOrderMutation(entityId,'upsert',{opId:'',v:0});
+      return;
+    }
+    clearLocalOrderMutation(entityId);
+    const firstRow=(entry&&entry.rows&&entry.rows[0])||{};
+    const reason=String(firstRow&&firstRow.reason||'ops_failed');
+    if(STRICT_ORDER_CLOUD_COMMIT){
+      strictFailedOrderIds.add(String(entityId));
+      strictFailureReasons.push(reason);
+      return;
+    }
+    queuedFallback=true;
+  });
+  return {queuedFallback};
+}
+function buildOrderOpsPayload(targetOrders,prevById,deletedOrderIds,nowTs){
+  const operations=[];
+  const orderByOpId=new Map();
+  const deletedIds=Array.isArray(deletedOrderIds)?deletedOrderIds:[];
+  (Array.isArray(targetOrders)?targetOrders:[]).forEach(function(order){
+    if(!order||!order.id) return;
+    const live=(orders||[]).find(function(x){return x&&x.id===order.id;})||order;
+    const opId=createLocalMutationOpId('upsert');
+    const prev=prevById&&typeof prevById.get==='function'?prevById.get(live.id):null;
+    const v=Math.max(1,Number(live.v)||nextOrderVersion(live,prev||null));
+    live.v=v;
+    live.opId=opId;
+    live.lastOpId=opId;
+    live.updatedAt=Number(live.updatedAt)||nowTs;
+    markLocalOrderMutation(live.id,'upsert',{opId,v});
+    const operation=buildOperationFromOrder(live,prev||null);
+    if(!operation) return;
+    operation.opId=opId;
+    operations.push(operation);
+    orderByOpId.set(opId,{entityId:String(live.id),opType:'upsert'});
+  });
+  deletedIds.forEach(function(deletedId){
+    const prev=prevById&&typeof prevById.get==='function'?prevById.get(deletedId):null;
+    const operation=buildDeleteOperationFromId(deletedId,prev||null,nowTs);
+    if(!operation) return;
+    operations.push(operation);
+    markLocalOrderMutation(deletedId,'delete',{opId:operation.opId,v:Math.max(1,Number(prev&&prev.v)||0)});
+    orderByOpId.set(operation.opId,{entityId:String(deletedId),opType:'delete'});
+  });
+  return {operations,orderByOpId};
 }
 function buildSyncCursor(){
   const list=Array.isArray(orders)?orders:[];
@@ -8004,6 +8291,20 @@ function cloudSave(key,value){
     markKeyLocalMutation(key,{v:1});
     clearTimeout(_syncTimeouts[key]);
     _syncTimeouts[key]=setTimeout(function(){syncToCloud(key,value);},500);
+  }
+}
+
+async function bootstrapAuthoritativeOrders(){
+  try{
+    await syncBootstrapReplicaState().catch(()=>{});
+    const changed=await fetchOrderUpdatesWithCursor({silent:true,maxBatches:4,limit:250}).catch(()=>false);
+    if(changed){
+      updateBadges();
+      render();
+    }
+    return true;
+  }catch(_e){
+    return false;
   }
 }
 function normalizeGenericVersion(v){
@@ -11028,6 +11329,11 @@ async function handleFirebaseApiRequest(url,method,body){
   }
   return null;
 }
+function shouldUseFirebaseApiRouting(){
+  // Phase-A target architecture: server API is the authoritative source.
+  // Keep firebase helper code in place for now, but disable API interception.
+  return false;
+}
 window.fetch=async function(input,init){
   const rawUrl=typeof input==='string'?input:(input&&input.url?input.url:String(input||''));
   const method=((init&&init.method)||((typeof input!=='string'&&input&&input.method)||'GET')).toUpperCase();
@@ -11042,7 +11348,7 @@ window.fetch=async function(input,init){
     isHealthApiFetch=isHealthTrackedApiPath(apiPath);
   }catch(_e){}
   if(isHealthApiFetch) markApiCall();
-  if(shouldRouteApiToFirebase(rawUrl)){
+  if(shouldUseFirebaseApiRouting() && shouldRouteApiToFirebase(rawUrl)){
     try{
       const handled=await handleFirebaseApiRequest(rawUrl,method,body);
       if(handled) return handled;
@@ -12801,6 +13107,7 @@ function startAutoSync(){
     if(me && navigator.onLine){
       await ensureWorkingApiBase({silent:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
+      await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
       await runSilentLoadWithLock().catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
@@ -12812,6 +13119,7 @@ function startAutoSync(){
   if(!_autoSyncVisibilityBound){
     document.addEventListener('visibilitychange', () => {
       if(document.visibilityState === 'visible' && me && navigator.onLine){
+        fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
         loadFromCloud().catch(()=>{});
       }
     });
@@ -15680,154 +15988,44 @@ async function saveOrders(changedOrderIds,opts={}){
       console.warn('[saveOrders] local persist failed before sync', {count:Array.isArray(orders)?orders.length:0});
     }
 
-    const api=await ensureWorkingApiBase({silent:true});
+    await syncBootstrapReplicaState().catch(()=>{});
     let queuedFallback=false;
     const strictFailedOrderIds=new Set();
     const strictFailureReasons=[];
-
-    for(const o of targetOrders){
-      const live=(orders||[]).find(x=>x&&x.id===o.id);
-      if(!live) continue;
-      const opId=createLocalMutationOpId('upsert');
-      live.opId=opId;
-      live.lastOpId=opId;
-      const v=Math.max(1,Number(live.v)||nextOrderVersion(live,prevById.get(live.id)||null));
-      live.v=v;
-      markLocalOrderMutation(live.id,'upsert',{opId,v});
-      const event=buildOrderEvent('upsert',live.id,{opId,v,ts:Number(live.updatedAt)||nowTs,source:'client'});
-      const clean=sanitizeOrderForRemote({
-        ...live,
-        id:String(live.id),
-        updatedAt:Number(live.updatedAt)||nowTs,
-        ts:Number(live.ts)||Number(live.updatedAt)||nowTs,
-        v,
-        opId,
-        lastOpId:opId
-      });
+    const opsPayload=buildOrderOpsPayload(targetOrders,prevById,deletedOrderIds,nowTs);
+    if(opsPayload.operations.length){
+      let opsResult={ok:false,error:'ops_not_sent',acked:[],rejected:[],failed:[]};
       try{
-        const _sr=await fetch(api+'/api/order',{method:'POST',
-          headers:getAuthHeaders({'Content-Type':'application/json'}),
-          body:JSON.stringify({order:clean,opId,v,event})
-        });
-        let _payload={};
-        try{_payload=await _sr.json();}catch(_e){_payload={};}
-        if(_payload&&Number(_payload.ackV)>v){
-          live.v=Number(_payload.ackV);
-        }
-        if(_payload&&_payload.staleIgnored){
-          clearLocalOrderMutation(live.id);
-          // Server says local write was stale: immediately refetch authoritative state
-          // to prevent UI from sticking to a reverted local snapshot.
-          if(_payload&&_payload.shouldRefetch){
-            await loadFromCloudSilent().catch(()=>{});
-          }
-          continue;
-        }
-        if(!_sr.ok || (_payload&&_payload.localOnly)){
-          if(STRICT_ORDER_CLOUD_COMMIT){
-            strictFailedOrderIds.add(String(live.id));
-            strictFailureReasons.push(String(_payload&&(_payload.error||_payload.message)||('order_upsert_http_'+_sr.status)));
-            clearLocalOrderMutation(live.id);
-          }else{
-            queuedFallback=true;
-            queueOrderOpFallback({
-              op:'upsert',
-              orderId:live.id,
-              opId,
-              v,
-              ts:Number(clean.updatedAt)||nowTs,
-              order:clean,
-              event
-            });
-            queueOrderEventFallback(event);
-          }
-        }else{
-          // Do not clear mutation immediately on 200 OK.
-          // Keep protection active until an authoritative /api/orders read contains this op/version.
-          markLocalOrderMutation(live.id,'upsert',{opId,v});
-        }
+        opsResult=await sendOrderOperationsBatch(opsPayload.operations);
       }catch(_e){
-        if(STRICT_ORDER_CLOUD_COMMIT){
-          strictFailedOrderIds.add(String(live.id));
-          strictFailureReasons.push(String((_e&&_e.message)||'order_upsert_exception'));
-          clearLocalOrderMutation(live.id);
-        }else{
-          queuedFallback=true;
-          queueOrderOpFallback({
-            op:'upsert',
-            orderId:live.id,
-            opId,
-            v,
-            ts:Number(clean.updatedAt)||nowTs,
-            order:clean,
-            event
-          });
-          queueOrderEventFallback(event);
-        }
+        opsResult={ok:false,error:String((_e&&_e.message)||'ops_transport_error'),acked:[],rejected:[],failed:[]};
       }
-    }
-
-    for(const deletedId of deletedOrderIds){
-      const prev=prevById.get(deletedId)||null;
-      const opId=createLocalMutationOpId('delete');
-      const v=Math.max(1,nextOrderVersion(null,prev));
-      const deletedAt=nowTs;
-      markLocalOrderMutation(deletedId,'delete',{opId,v});
-      const event=buildOrderEvent('delete',deletedId,{opId,v,ts:deletedAt,source:'client'});
-      try{
-        const _dr=await fetch(api+'/api/order/'+encodeURIComponent(deletedId),{
-          method:'DELETE',
-          headers:getAuthHeaders({'Content-Type':'application/json'}),
-          body:JSON.stringify({opId,v,deletedAt,event})
-        });
-        let _payload={};
-        try{_payload=await _dr.json();}catch(_e){_payload={};}
-        if(_payload&&_payload.staleIgnored){
-          clearLocalOrderMutation(deletedId);
-          if(_payload&&_payload.shouldRefetch){
-            await loadFromCloudSilent().catch(()=>{});
-          }
-          continue;
+      const byEntity=mapOperationResultByEntityId(opsResult,opsPayload.operations);
+      byEntity.forEach(function(entry,entityId){
+        if(entry.status==='acked'){
+          markLocalOrderMutation(entityId,'upsert',{opId:'',v:0});
+          return;
         }
-        if(!_dr.ok || (_payload&&_payload.localOnly)){
-          if(STRICT_ORDER_CLOUD_COMMIT){
-            strictFailedOrderIds.add(String(deletedId));
-            strictFailureReasons.push(String(_payload&&(_payload.error||_payload.message)||('order_delete_http_'+_dr.status)));
-            clearLocalOrderMutation(deletedId);
-          }else{
-            queuedFallback=true;
-            queueOrderOpFallback({
-              op:'delete',
-              orderId:deletedId,
-              opId,
-              v,
-              ts:deletedAt,
-              deletedAt,
-              event
-            });
-            queueOrderEventFallback(event);
-          }
-        }else{
-          clearLocalOrderMutation(deletedId);
-        }
-      }catch(_e){
+        clearLocalOrderMutation(entityId);
+        const firstRow=(entry.rows&&entry.rows[0])||{};
+        const reason=String(firstRow&&firstRow.reason||opsResult.error||'ops_failed');
         if(STRICT_ORDER_CLOUD_COMMIT){
-          strictFailedOrderIds.add(String(deletedId));
-          strictFailureReasons.push(String((_e&&_e.message)||'order_delete_exception'));
-          clearLocalOrderMutation(deletedId);
-        }else{
-          queuedFallback=true;
-          queueOrderOpFallback({
-            op:'delete',
-            orderId:deletedId,
-            opId,
-            v,
-            ts:deletedAt,
-            deletedAt,
-            event
-          });
-          queueOrderEventFallback(event);
+          strictFailedOrderIds.add(String(entityId));
+          strictFailureReasons.push(reason);
+          return;
         }
+        queuedFallback=true;
+      });
+      if(opsResult.ok){
+        await fetchOrderUpdatesWithCursor({silent:true,maxBatches:3,limit:200}).catch(()=>{});
+      }else if(STRICT_ORDER_CLOUD_COMMIT){
+        (opsPayload.operations||[]).forEach(function(op){
+          if(!op||!op.entityId) return;
+          strictFailedOrderIds.add(String(op.entityId));
+        });
+        strictFailureReasons.push(String(opsResult.error||'ops_failed'));
+      }else{
+        queuedFallback=true;
       }
     }
     if(STRICT_ORDER_CLOUD_COMMIT && strictFailedOrderIds.size){
