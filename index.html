@@ -7575,8 +7575,6 @@ let _syncTimeouts={};
 let _apiBaseCheckInFlight=null;
 let _apiBaseCheckedAt=0;
 const API_BASE_CHECK_COOLDOWN_MS=60*1000;
-// Production mode: order mutations are considered successful only after cloud ACK.
-const STRICT_ORDER_CLOUD_COMMIT=true;
 function getApiBase(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
   if(getFirebaseEnabled()) return location.origin;
@@ -8786,15 +8784,6 @@ function buildOrderEvent(op,orderId,meta={}){
     source:meta.source||'client'
   };
 }
-function queueOrderEventFallback(event){
-  if(!event||!event.orderId) return;
-  const q=readLocalSyncFallback();
-  const arr=Array.isArray((q['jb_order_events']&&q['jb_order_events'].value))?q['jb_order_events'].value:[];
-  const key=String(event.opId||event.id||'');
-  const dedup=arr.filter(ev=>String(ev&& (ev.opId||ev.id||''))!==key);
-  dedup.push(event);
-  persistLocalSyncFallback('jb_order_events',dedup);
-}
 function queueGenericSyncEventFallback(eventDoc){
   if(!eventDoc||!eventDoc.key) return;
   const q=readLocalSyncFallback();
@@ -8936,15 +8925,6 @@ function normalizeFeedPost(post,prev){
     imgs:listImgs,
     img:listImgs[0]||null
   };
-}
-function queueOrderOpFallback(op){
-  if(!op||!op.orderId) return;
-  const q=readLocalSyncFallback();
-  const arr=Array.isArray((q['jb_order_ops']&&q['jb_order_ops'].value))?q['jb_order_ops'].value:[];
-  const opId=String(op.opId||'');
-  const dedup=opId?arr.filter(function(row){return String(row&&row.opId||'')!==opId;}):arr.slice();
-  dedup.push(op);
-  persistLocalSyncFallback('jb_order_ops',dedup);
 }
 function ackLocalMutationsFromIncoming(incomingOrders){
   const map=cleanupLocalOrderMutations();
@@ -9398,34 +9378,22 @@ async function deleteOrderWithTombstone(orderId,meta={}){
   if(acked||staleIgnored){
     clearLocalOrderMutation(id);
   }else{
-    if(STRICT_ORDER_CLOUD_COMMIT){
-      // Strict mode: do not keep local-only deletes. Revert immediately.
-      if(previous){
-        const next=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
-        next.push(previous);
-        orders=next
-          .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
-          .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
-      }else{
-        orders=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
-      }
-      clearLocalOrderMutation(id);
-      persistOrdersLocalSafe(orders);
-      updateBadges();
-      render();
-      toast('❌ Cloud delete failed — reverted local change','err');
-      return false;
+    // Strict mode: do not keep local-only deletes. Revert immediately.
+    if(previous){
+      const next=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
+      next.push(previous);
+      orders=next
+        .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
+        .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
+    }else{
+      orders=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
     }
-    queueOrderOpFallback({
-      op:'delete',
-      orderId:id,
-      opId,
-      v,
-      ts,
-      deletedAt:ts,
-      event
-    });
-    queueOrderEventFallback(event);
+    clearLocalOrderMutation(id);
+    persistOrdersLocalSafe(orders);
+    updateBadges();
+    render();
+    toast('❌ Cloud delete failed — reverted local change','err');
+    return false;
   }
   return true;
 }
@@ -15681,7 +15649,6 @@ async function saveOrders(changedOrderIds,opts={}){
     }
 
     const api=await ensureWorkingApiBase({silent:true});
-    let queuedFallback=false;
     const strictFailedOrderIds=new Set();
     const strictFailureReasons=[];
 
@@ -15724,46 +15691,18 @@ async function saveOrders(changedOrderIds,opts={}){
           continue;
         }
         if(!_sr.ok || (_payload&&_payload.localOnly)){
-          if(STRICT_ORDER_CLOUD_COMMIT){
-            strictFailedOrderIds.add(String(live.id));
-            strictFailureReasons.push(String(_payload&&(_payload.error||_payload.message)||('order_upsert_http_'+_sr.status)));
-            clearLocalOrderMutation(live.id);
-          }else{
-            queuedFallback=true;
-            queueOrderOpFallback({
-              op:'upsert',
-              orderId:live.id,
-              opId,
-              v,
-              ts:Number(clean.updatedAt)||nowTs,
-              order:clean,
-              event
-            });
-            queueOrderEventFallback(event);
-          }
+          strictFailedOrderIds.add(String(live.id));
+          strictFailureReasons.push(String(_payload&&(_payload.error||_payload.message)||('order_upsert_http_'+_sr.status)));
+          clearLocalOrderMutation(live.id);
         }else{
           // Do not clear mutation immediately on 200 OK.
           // Keep protection active until an authoritative /api/orders read contains this op/version.
           markLocalOrderMutation(live.id,'upsert',{opId,v});
         }
       }catch(_e){
-        if(STRICT_ORDER_CLOUD_COMMIT){
-          strictFailedOrderIds.add(String(live.id));
-          strictFailureReasons.push(String((_e&&_e.message)||'order_upsert_exception'));
-          clearLocalOrderMutation(live.id);
-        }else{
-          queuedFallback=true;
-          queueOrderOpFallback({
-            op:'upsert',
-            orderId:live.id,
-            opId,
-            v,
-            ts:Number(clean.updatedAt)||nowTs,
-            order:clean,
-            event
-          });
-          queueOrderEventFallback(event);
-        }
+        strictFailedOrderIds.add(String(live.id));
+        strictFailureReasons.push(String((_e&&_e.message)||'order_upsert_exception'));
+        clearLocalOrderMutation(live.id);
       }
     }
 
@@ -15790,47 +15729,19 @@ async function saveOrders(changedOrderIds,opts={}){
           continue;
         }
         if(!_dr.ok || (_payload&&_payload.localOnly)){
-          if(STRICT_ORDER_CLOUD_COMMIT){
-            strictFailedOrderIds.add(String(deletedId));
-            strictFailureReasons.push(String(_payload&&(_payload.error||_payload.message)||('order_delete_http_'+_dr.status)));
-            clearLocalOrderMutation(deletedId);
-          }else{
-            queuedFallback=true;
-            queueOrderOpFallback({
-              op:'delete',
-              orderId:deletedId,
-              opId,
-              v,
-              ts:deletedAt,
-              deletedAt,
-              event
-            });
-            queueOrderEventFallback(event);
-          }
+          strictFailedOrderIds.add(String(deletedId));
+          strictFailureReasons.push(String(_payload&&(_payload.error||_payload.message)||('order_delete_http_'+_dr.status)));
+          clearLocalOrderMutation(deletedId);
         }else{
           clearLocalOrderMutation(deletedId);
         }
       }catch(_e){
-        if(STRICT_ORDER_CLOUD_COMMIT){
-          strictFailedOrderIds.add(String(deletedId));
-          strictFailureReasons.push(String((_e&&_e.message)||'order_delete_exception'));
-          clearLocalOrderMutation(deletedId);
-        }else{
-          queuedFallback=true;
-          queueOrderOpFallback({
-            op:'delete',
-            orderId:deletedId,
-            opId,
-            v,
-            ts:deletedAt,
-            deletedAt,
-            event
-          });
-          queueOrderEventFallback(event);
-        }
+        strictFailedOrderIds.add(String(deletedId));
+        strictFailureReasons.push(String((_e&&_e.message)||'order_delete_exception'));
+        clearLocalOrderMutation(deletedId);
       }
     }
-    if(STRICT_ORDER_CLOUD_COMMIT && strictFailedOrderIds.size){
+    if(strictFailedOrderIds.size){
       const failedIds=Array.from(strictFailedOrderIds);
       const failedSet=new Set(failedIds);
       const nextMap=new Map((orders||[]).filter(function(o){return o&&o.id;}).map(function(o){return [String(o.id),o];}));
@@ -15855,16 +15766,13 @@ async function saveOrders(changedOrderIds,opts={}){
       }).catch(()=>{});
       return {ok:false,failedOrderIds:failedIds,reason:firstReason,reverted:true};
     }
-    if(queuedFallback){
-      console.warn('[saveOrders] queued order events for retry');
-    }
     const persistedAfterSync=persistOrdersLocalSafe(orders);
     if(!persistedAfterSync){
       console.warn('[saveOrders] local persist failed after sync', {count:Array.isArray(orders)?orders.length:0});
     }
     markSync('orders_save');
-    writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
-    return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:!!queuedFallback};
+    writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback:false}).catch(()=>{});
+    return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:false};
   } catch(e) {
     console.error('[saveOrders]', e);
     return {ok:false,error:String(e&&e.message||e||'save_orders_failed')};
