@@ -25,10 +25,12 @@ const ORDER_COMMAND_MAX_RETRIES = 8;
 const ORDER_COMMAND_DRAIN_LIMIT = 8;
 const ORDER_COMMAND_WAIT_TIMEOUT_MS = 4500;
 const ORDER_COMMAND_WAIT_STEP_MS = 90;
+const ORDER_COMMAND_DLQ_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_ADMIN_EMAIL = 'joobuyadmin@gmail.com';
 let _orderTablesEnsuredAt = 0;
 let _lastOrderOpsPruneAt = 0;
 let _lastOrderCommandsPruneAt = 0;
+let _lastOrderCommandDlqPruneAt = 0;
 let _securityWarnedMissingAuthToken = false;
 let _securityTablesEnsuredAt = 0;
 let _lastSecurityMemoryPruneAt = 0;
@@ -236,6 +238,19 @@ async function maybePruneOrderCommands(db) {
   } catch (_e) {}
 }
 
+async function maybePruneOrderCommandDeadLetters(db) {
+  const now = Date.now();
+  if ((now - _lastOrderCommandDlqPruneAt) < ORDER_COMMAND_PRUNE_INTERVAL_MS) return;
+  _lastOrderCommandDlqPruneAt = now;
+  try {
+    await db.prepare(`
+      DELETE FROM kv_store
+      WHERE key LIKE 'order_deadletter:%'
+        AND COALESCE(CAST(json_extract(value,'$.failedAt') AS INTEGER),0) < ?
+    `).bind(now - ORDER_COMMAND_DLQ_RETENTION_MS).run();
+  } catch (_e) {}
+}
+
 function getOrderCommandRetryDelayMs(attempts) {
   const n = Math.max(1, Number(attempts) || 1);
   const cappedExponent = Math.min(6, n - 1);
@@ -269,6 +284,67 @@ function parseOrderCommandResult(row, fallback = null) {
   if (!row || !row.result) return fallback;
   const parsed = safeParseJson(row.result, fallback);
   return parsed && typeof parsed === 'object' ? parsed : fallback;
+}
+
+function toOrderCommandView(row) {
+  if (!row || typeof row !== 'object') return null;
+  return {
+    commandId: normalizeOpId(row.command_id || row.commandId),
+    opId: normalizeOpId(row.op_id || row.opId),
+    orderId: String(row.order_id || row.orderId || ''),
+    commandType: String(row.command_type || row.commandType || ''),
+    status: String(row.status || ''),
+    error: String(row.error || ''),
+    attempts: Number(row.attempts) || 0,
+    availableAt: Number(row.available_at) || 0,
+    leaseUntil: Number(row.lease_until) || 0,
+    createdAt: Number(row.created_at) || 0,
+    updatedAt: Number(row.updated_at) || 0,
+    result: parseOrderCommandResult(row, null)
+  };
+}
+
+function parseOrderCommandPayload(row) {
+  const parsed = safeParseJson(row && row.payload, {});
+  return parsed && typeof parsed === 'object' ? parsed : {};
+}
+
+async function recordOrderCommandDeadLetter(db, row, reason, detail = '') {
+  if (!db || !row) return;
+  const commandId = normalizeOpId(row.command_id || row.commandId);
+  if (!commandId) return;
+  const now = Date.now();
+  const payload = parseOrderCommandPayload(row);
+  const deadLetter = {
+    commandId,
+    opId: normalizeOpId(row.op_id || commandId),
+    orderId: String(row.order_id || ''),
+    commandType: String(row.command_type || ''),
+    attempts: Number(row.attempts) || 0,
+    status: String(row.status || ''),
+    reason: String(reason || 'command_failed'),
+    detail: String(detail || '').slice(0, 1000),
+    payload,
+    failedAt: now
+  };
+  await db.prepare(
+    'INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
+  ).bind(`order_deadletter:${commandId}`, JSON.stringify(deadLetter)).run();
+}
+
+async function listOrderCommandDeadLetters(db, limit = 50) {
+  const capped = Math.max(1, Math.min(200, Number(limit) || 50));
+  const rows = await db.prepare(`
+    SELECT key, value,
+           COALESCE(CAST(json_extract(value,'$.failedAt') AS INTEGER),0) AS failed_at
+    FROM kv_store
+    WHERE key LIKE 'order_deadletter:%'
+    ORDER BY failed_at DESC
+    LIMIT ?
+  `).bind(capped).all();
+  return (rows.results || [])
+    .map((row) => safeParseJson(row && row.value, null))
+    .filter((item) => item && typeof item === 'object');
 }
 
 async function enqueueOrderCommand(db, command) {
@@ -359,6 +435,8 @@ async function retryOrFailOrderCommand(db, row, err) {
       now,
       id
     ).run();
+    const failedRow = await readOrderCommandRecord(db, id);
+    await recordOrderCommandDeadLetter(db, failedRow || row, 'non_retryable_or_retry_exhausted', message);
     return await readOrderCommandRecord(db, id);
   }
   const delayMs = getOrderCommandRetryDelayMs(attempts);
@@ -421,7 +499,20 @@ async function drainOrderCommandQueue(db, authContext = null, opts = {}) {
   if (processed) {
     await maybePruneOrderCommands(db);
   }
+  await maybePruneOrderCommandDeadLetters(db);
   return processed;
+}
+
+async function runOrderCommandDrainCycle(db, authContext = null, opts = {}) {
+  await ensureOrderTables(db);
+  const limit = Math.max(1, Math.min(100, Number(opts && opts.limit) || ORDER_COMMAND_DRAIN_LIMIT));
+  return await drainOrderCommandQueue(db, authContext, { limit });
+}
+
+async function getOrderCommandStatus(db, commandId) {
+  await ensureOrderTables(db);
+  const row = await readOrderCommandRecord(db, commandId);
+  return toOrderCommandView(row);
 }
 
 async function processOrderCommandById(db, commandId, authContext = null, opts = {}) {
@@ -1197,8 +1288,20 @@ export default {
       if (path === '/api/orders' && method === 'GET') {
         const sinceTs = Math.max(0, Number(url.searchParams.get('sinceTs')) || 0);
         const sinceV = Math.max(0, Number(url.searchParams.get('sinceV')) || 0);
-        await drainOrderCommandQueue(db, authContext, { limit: 6 });
+        await runOrderCommandDrainCycle(db, authContext, { limit: 6 });
         return await getOrders(db, authContext, { sinceTs, sinceV });
+      }
+      if (path.startsWith('/api/order-command/') && method === 'GET') {
+        const commandId = decodeURIComponent(path.split('/').pop() || '').trim();
+        if (!commandId) return json({ error: 'command_id missing' }, 400);
+        const command = await getOrderCommandStatus(db, commandId);
+        if (!command) return json({ error: 'not_found' }, 404);
+        return json({ ok: true, command });
+      }
+      if (path === '/api/order-deadletters' && method === 'GET') {
+        const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
+        const deadletters = await listOrderCommandDeadLetters(db, limit);
+        return json({ ok: true, count: deadletters.length, deadletters });
       }
       if ((path === '/api/backup/import' || path === '/api/orders/bulk') && method === 'POST') {
         const body = await request.json();
@@ -1278,6 +1381,20 @@ export default {
           FROM order_commands
           WHERE status IN ('pending','retry','processing')
         `).first();
+        const commandFailed = await db.prepare(`
+          SELECT
+            COUNT(*) AS failed_count,
+            MIN(updated_at) AS oldest_failed_at
+          FROM order_commands
+          WHERE status='failed'
+        `).first();
+        const deadLetters = await db.prepare(`
+          SELECT
+            COUNT(*) AS deadletter_count,
+            MAX(COALESCE(CAST(json_extract(value,'$.failedAt') AS INTEGER),0)) AS latest_failed_at
+          FROM kv_store
+          WHERE key LIKE 'order_deadletter:%'
+        `).first();
         const lastAudit = await db.prepare(`
           SELECT event_type,order_id,actor_role,created_at
           FROM order_audit_events
@@ -1304,7 +1421,13 @@ export default {
           },
           commandQueue: {
             pending: Number(commandQueue && commandQueue.pending_count) || 0,
-            oldestCreatedAt: Number(commandQueue && commandQueue.oldest_created_at) || 0
+            oldestCreatedAt: Number(commandQueue && commandQueue.oldest_created_at) || 0,
+            failed: Number(commandFailed && commandFailed.failed_count) || 0,
+            oldestFailedAt: Number(commandFailed && commandFailed.oldest_failed_at) || 0
+          },
+          deadLetters: {
+            total: Number(deadLetters && deadLetters.deadletter_count) || 0,
+            latestFailedAt: Number(deadLetters && deadLetters.latest_failed_at) || 0
           },
           audit: lastAudit || null
         });
@@ -1405,6 +1528,14 @@ export default {
     } catch(e) {
       return json({ error: e.message }, 500);
     }
+  }
+  ,
+  async scheduled(_event, env, _ctx) {
+    const db = env && env.DB ? env.DB : null;
+    if (!db) return;
+    try {
+      await runOrderCommandDrainCycle(db, null, { limit: 25 });
+    } catch (_e) {}
   }
 };
 
