@@ -2152,8 +2152,7 @@ console.error = function(...args){
 // ── STATE ──
 let orders    = (()=>{
   const raw = JSON.parse(localStorage.getItem('jb_orders') || '[]');
-  // Migrate old "At Depott" typo to "At Depot"
-  return raw.map(o=>({...o, status: o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status}));
+  return normalizeOrderSnapshotList(Array.isArray(raw)?raw:[]);
 })();
 let settings  = JSON.parse(localStorage.getItem('jb_settings')  || '{}');
 const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
@@ -2258,21 +2257,68 @@ const SCAN_DETECT_INTERVAL_MS=650;
 let _selectMode=false, _selected=new Set();
 let _singleScanGuard=null;
 
+const ORDER_STATUS_ALIASES=Object.freeze({
+  '':'New',
+  'At Depott':'At Depot',
+  'Sent to Wechat':'Sent to Factory',
+  'Sent to WeChat':'Sent to Factory',
+  'Sent to Logistic':'Sent to Logistics'
+});
+function normalizeStatus(s){
+  const raw=String(s===undefined||s===null?'':s).trim();
+  if(!raw) return 'New';
+  return ORDER_STATUS_ALIASES[raw]||raw;
+}
+function normalizeOrderSnapshotRow(order){
+  if(!order||!order.id) return null;
+  const ts=Number(order.ts)||Number(order.updatedAt)||Date.now();
+  const updatedAt=Number(order.updatedAt)||ts;
+  return {
+    ...order,
+    id:String(order.id),
+    status:normalizeStatus(order.status),
+    ts,
+    updatedAt
+  };
+}
+function normalizeOrderSnapshotList(list){
+  const byId=new Map();
+  (Array.isArray(list)?list:[]).forEach(function(row){
+    const normalized=normalizeOrderSnapshotRow(row);
+    if(!normalized) return;
+    const id=String(normalized.id);
+    const current=byId.get(id);
+    if(!current){
+      byId.set(id,normalized);
+      return;
+    }
+    const normalizedV=Math.max(0,Number(normalized.v)||0);
+    const currentV=Math.max(0,Number(current.v)||0);
+    const normalizedTs=Number(normalized.updatedAt||normalized.ts||0);
+    const currentTs=Number(current.updatedAt||current.ts||0);
+    const normalizedWins=normalizedV>currentV || (normalizedV===currentV && normalizedTs>=currentTs);
+    if(normalizedWins){
+      byId.set(id,normalized);
+    }
+  });
+  return [...byId.values()]
+    .filter(function(order){return order&&order.id&&!isOrderDeleted(order);})
+    .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
+}
+
 const STATUSES=['New','Sent to Factory','At Depot','Sent to Logistics','Shipped','Completed'];
 const S_LABEL={'New':'New','Sent to Factory':'Sent to Factory','At Depot':'At Depot','Sent to Logistics':'Sent to Logistics','Shipped':'Shipped','Completed':'Completed'};
 function getStatusLabel(s){
-  // Normalize old statuses - "Sent to Wechat" shows as "Sent to Factory"
-  if(s==='Sent to WeChat'||s==='Sent to Wechat'||s==='Sent to Logistic') return 'Sent to Factory';
-  return S_LABEL[s]||s;
+  const normalized=normalizeStatus(s);
+  return S_LABEL[normalized]||normalized;
 }
-const S_EMOJI={New:'🆕','Sent to Factory':'🏭','Sent to Wechat':'🏭','At Depot':'🏭','Sent to Logistics':'🚛',Shipped:'🚚',Completed:'✅'};
-const S_CLASS={New:'p-new','Sent to Factory':'p-factory','Sent to Wechat':'p-factory','At Depot':'p-depot','Sent to Logistics':'p-logistics',Shipped:'p-shipped',Completed:'p-completed'};
-const S_NEXT={New:'Sent to Factory','Sent to Factory':'At Depot','Sent to Wechat':'At Depot','At Depot':'Sent to Logistics','Sent to Logistics':'Shipped',Shipped:'Completed'};
-const S_BTN={New:'🏭 Send to Factory','Sent to Factory':'🏭 Mark At Depot','Sent to Wechat':'🏭 Mark At Depot','At Depot':'🚛 Send to Logistics','Sent to Logistics':'🚚 Mark Shipped',Shipped:'✅ Mark Completed'};
+const S_EMOJI={New:'🆕','Sent to Factory':'🏭','At Depot':'🏭','Sent to Logistics':'🚛',Shipped:'🚚',Completed:'✅'};
+const S_CLASS={New:'p-new','Sent to Factory':'p-factory','At Depot':'p-depot','Sent to Logistics':'p-logistics',Shipped:'p-shipped',Completed:'p-completed'};
+const S_NEXT={New:'Sent to Factory','Sent to Factory':'At Depot','At Depot':'Sent to Logistics','Sent to Logistics':'Shipped',Shipped:'Completed'};
+const S_BTN={New:'🏭 Send to Factory','Sent to Factory':'🏭 Mark At Depot','At Depot':'🚛 Send to Logistics','Sent to Logistics':'🚚 Mark Shipped',Shipped:'✅ Mark Completed'};
 
-// Display status - "Sent to Wechat" gösterilmez, "Sent to Factory" olarak görünür
 function displayStatus(s){
-  return s==='Sent to Wechat'?'Sent to Factory':s;
+  return getStatusLabel(s);
 }
 
 // ── DARK MODE ──
@@ -2672,10 +2718,47 @@ function mergeFeedByTs(localFeed,remoteFeed){
   return mergeArrayByTs(Array.isArray(localFeed)?localFeed:[],Array.isArray(remoteFeed)?remoteFeed:[])
     .sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
 }
-function safeApplyRemoteOrders(remoteOrders){
-  if(!shouldAcceptRemoteOrders(remoteOrders)) return false;
-  persistOrdersState(Array.isArray(remoteOrders)?remoteOrders:[]);
-  return true;
+function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
+  const source=String(opts&&opts.source||'remote_snapshot');
+  const forceRemote=!!(opts&&opts.forceRemote);
+  const preservePendingLocalIds=new Set(Array.isArray(opts&&opts.preservePendingLocalIds)?opts.preservePendingLocalIds:[]);
+  const remoteList=Array.isArray(remoteOrders)?remoteOrders:[];
+  const pendingFallbackIds=getPendingFallbackOrderIds();
+  if(!forceRemote && !shouldAcceptRemoteOrders(remoteList)){
+    return {applied:false,changed:false,count:Array.isArray(orders)?orders.length:0};
+  }
+  if(forceRemote && !opts.ignorePendingGuards){
+    if(hasActiveUpsertOrderMutation() || pendingFallbackIds.size){
+      console.warn('[OrderSync] Skip authoritative replace due to pending local mutations', {
+        source,
+        pendingMutations:getActiveLocalOrderMutationIds().length,
+        pendingFallbackOps:pendingFallbackIds.size
+      });
+      return {applied:false,changed:false,count:Array.isArray(orders)?orders.length:0};
+    }
+  }
+  const normalizedRemote=normalizeOrderSnapshotList(remoteList);
+  ackLocalMutationsFromIncoming(normalizedRemote);
+  const currentOrders=normalizeOrderSnapshotList(Array.isArray(orders)?orders:[]);
+  let nextOrders=normalizedRemote.slice();
+  if(preservePendingLocalIds.size){
+    const byId=new Map(nextOrders.map(function(order){return [String(order.id),order];}));
+    currentOrders.forEach(function(order){
+      const id=String(order&&order.id||'');
+      if(!id || byId.has(id)) return;
+      if(!preservePendingLocalIds.has(id)) return;
+      if(!(order.pendingApproval && !order.rejected)) return;
+      byId.set(id,order);
+    });
+    nextOrders=[...byId.values()].sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
+  }
+  const changed=JSON.stringify(currentOrders)!==JSON.stringify(nextOrders);
+  orders=nextOrders;
+  persistOrdersLocalSafe(orders);
+  return {applied:true,changed,count:orders.length,source};
+}
+function safeApplyRemoteOrders(remoteOrders,opts={}){
+  return !!applyAuthoritativeOrdersSnapshot(remoteOrders,opts).applied;
 }
 function scheduleFirebaseAutoConnect(reason){
   if(!getFirebaseEnabled()) return;
@@ -2805,19 +2888,11 @@ async function login(){
           cloudOrders=[];
         }
         // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
-        if(cloudOrders.length){
-          ackLocalMutationsFromIncoming(cloudOrders);
-          const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
-          orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
-            return {
-              ...o,
-              status:o.status==='At Depott'?'At Depot':o.status==='Sent to Wechat'||o.status==='Sent to WeChat'?'Sent to Factory':o.status
-            };
-          });
-        }else{
-          orders=Array.isArray(localOrders)?localOrders:[];
+        const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'login',forceRemote:true});
+        if(!applied.applied){
+          orders=normalizeOrderSnapshotList(Array.isArray(localOrders)?localOrders:[]);
+          persistOrdersLocalSafe(orders);
         }
-        persistOrdersLocalSafe(orders);
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
         users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
@@ -3060,20 +3135,15 @@ async function navOrders(status,el){
       try{
         const api=await ensureWorkingApiBase({silent:true});
         const headers=getAuthHeaders();
-        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         const ordRes=await fetch(api+'/api/orders',{headers});
         if(ordRes.ok){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
-            if(shouldAcceptRemoteOrders(od.orders)){
-              ackLocalMutationsFromIncoming(od.orders);
-              const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
-              orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
-              persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
+            const applied=applyAuthoritativeOrdersSnapshot(od.orders,{source:'pending_nav',forceRemote:true});
+            if(applied.applied){
               updateBadges();
             }else{
-              // Guard: ignore empty/partial remote snapshot when local has data.
-              console.warn('[Pending] Ignoring remote orders snapshot to protect local data');
+              console.warn('[Pending] Authoritative replace skipped due to local mutation guard');
             }
           }
         }else{
@@ -7785,9 +7855,12 @@ function applyOrderEventsFromUpdates(events){
   });
   if(incomingOrders.length){
     ackLocalMutationsFromIncoming(incomingOrders);
-    orders=mergeOrdersByFreshness(Array.isArray(orders)?orders:[],incomingOrders,{source:'ops_updates'});
+    orders=normalizeOrderSnapshotList(
+      mergeOrdersByFreshness(Array.isArray(orders)?orders:[],incomingOrders,{source:'ops_updates'})
+    );
     persistOrdersLocalSafe(orders);
   }else{
+    orders=normalizeOrderSnapshotList(Array.isArray(orders)?orders:[]);
     persistOrdersLocalSafe(orders);
   }
 }
@@ -7848,6 +7921,96 @@ async function sendOrderOperationsBatch(operations){
     failed:Array.isArray(payload&&payload.failed)?payload.failed:[],
     nextCursor:String(payload&&payload.nextCursor||'').trim()
   };
+}
+
+const ORDER_DRIFT_CHECK_INTERVAL_MS=45000;
+let _lastOrderDriftCheckAt=0;
+let _orderDriftHealInFlight=null;
+function buildOrderStatusDigest(orderList){
+  const normalized=normalizeOrderSnapshotList(orderList);
+  const counts={New:0,'Sent to Factory':0,'At Depot':0,'Sent to Logistics':0,Shipped:0,Completed:0,pendingApproval:0,rejected:0};
+  const rows=[];
+  normalized.forEach(function(order){
+    const status=normalizeStatus(order&&order.status);
+    if(counts[status]===undefined) counts[status]=0;
+    counts[status]+=1;
+    if(order&&order.pendingApproval) counts.pendingApproval+=1;
+    if(order&&order.rejected) counts.rejected+=1;
+    rows.push([
+      String(order&&order.id||''),
+      String(Number(order&&order.v)||0),
+      String(Number(order&&order.updatedAt||order&&order.ts)||0),
+      status,
+      order&&order.pendingApproval?'1':'0',
+      order&&order.rejected?'1':'0'
+    ].join(':'));
+  });
+  rows.sort();
+  return {
+    total:normalized.length,
+    counts,
+    fingerprint:hashStringFast(rows.join('|'))
+  };
+}
+function hasOrderSnapshotDrift(localOrders,remoteOrders){
+  const localDigest=buildOrderStatusDigest(localOrders);
+  const remoteDigest=buildOrderStatusDigest(remoteOrders);
+  if(localDigest.total!==remoteDigest.total) return true;
+  const keys=[...new Set(Object.keys(localDigest.counts).concat(Object.keys(remoteDigest.counts)))];
+  for(const key of keys){
+    if(Number(localDigest.counts[key]||0)!==Number(remoteDigest.counts[key]||0)) return true;
+  }
+  return localDigest.fingerprint!==remoteDigest.fingerprint;
+}
+async function maybeSelfHealOrderDrift(opts={}){
+  const force=!!opts.force;
+  if(!me||!navigator.onLine) return false;
+  const now=Date.now();
+  if(!force && (now-_lastOrderDriftCheckAt)<ORDER_DRIFT_CHECK_INTERVAL_MS){
+    return false;
+  }
+  if(_orderDriftHealInFlight) return _orderDriftHealInFlight;
+  const pendingFallbackIds=getPendingFallbackOrderIds();
+  if(hasActiveUpsertOrderMutation() || pendingFallbackIds.size){
+    return false;
+  }
+  _lastOrderDriftCheckAt=now;
+  const reason=String(opts.reason||'periodic');
+  _orderDriftHealInFlight=(async function(){
+    try{
+      const beforeCount=Array.isArray(orders)?orders.length:0;
+      const api=await ensureWorkingApiBase({silent:true});
+      const res=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
+      if(!res.ok) return false;
+      const payload=await res.json().catch(()=>({}));
+      if(payload&&payload.localOnly) return false;
+      const remoteOrders=Array.isArray(payload&&payload.orders)?payload.orders:[];
+      const nextCursor=String(payload&&payload.nextCursor||'').trim();
+      if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
+      if(!force && !hasOrderSnapshotDrift(orders,remoteOrders)){
+        return false;
+      }
+      const applied=applyAuthoritativeOrdersSnapshot(remoteOrders,{
+        source:'self_heal_'+reason,
+        forceRemote:true
+      });
+      if(applied.applied && applied.changed){
+        console.warn('[OrderSync][self_heal_applied]',{
+          reason,
+          beforeCount,
+          afterCount:applied.count,
+          remoteCount:Array.isArray(remoteOrders)?remoteOrders.length:0
+        });
+        updateBadges();
+        render();
+        return true;
+      }
+    }catch(_e){}
+    return false;
+  })().finally(function(){
+    _orderDriftHealInFlight=null;
+  });
+  return _orderDriftHealInFlight;
 }
 async function syncOrdersViaOpsProtocol(items){
   const list=Array.isArray(items)?items.filter(function(o){return o&&o.id;}):[];
@@ -8299,21 +8462,21 @@ async function bootstrapAuthoritativeOrders(){
     showLoading('Syncing orders...');
     await syncBootstrapReplicaState().catch(()=>{});
     const api=await ensureWorkingApiBase({silent:true});
+    let changed=false;
     const fullRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()}).catch(()=>null);
     if(fullRes&&fullRes.ok){
       const fullPayload=await fullRes.json().catch(()=>({}));
-      const cloudOrders=Array.isArray(fullPayload&&fullPayload.orders)?fullPayload.orders:[];
-      if(cloudOrders.length){
-        ackLocalMutationsFromIncoming(cloudOrders);
-        orders=mergeOrdersByFreshness(Array.isArray(orders)?orders:[],cloudOrders,{source:'bootstrap_full',pruneMissing:true});
-        orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
-        persistOrdersLocalSafe(orders);
-        const nextCursor=String(fullPayload&&fullPayload.nextCursor||'').trim();
-        if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
+      if(!(fullPayload&&fullPayload.localOnly)){
+        const cloudOrders=Array.isArray(fullPayload&&fullPayload.orders)?fullPayload.orders:[];
+        const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'bootstrap_full',forceRemote:true});
+        changed=changed||!!applied.changed;
       }
+      const nextCursor=String(fullPayload&&fullPayload.nextCursor||'').trim();
+      if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
     }
-    const changed=await fetchOrderUpdatesWithCursor({silent:true,maxBatches:4,limit:250}).catch(()=>false);
-    if(changed){
+    const updatesChanged=await fetchOrderUpdatesWithCursor({silent:true,maxBatches:4,limit:250}).catch(()=>false);
+    const healed=await maybeSelfHealOrderDrift({force:true,reason:'bootstrap'}).catch(()=>false);
+    if(changed||updatesChanged||healed){
       updateBadges();
       render();
     }
@@ -8640,24 +8803,11 @@ async function loadFromCloudSilent(){
     if(ordPayload&&ordPayload.localOnly){
       return false;
     }
-    if(!shouldAcceptRemoteOrders(cloudOrders)){
-      // Guard: do not let empty remote snapshots wipe existing local orders.
-      return false;
-    }
-    ackLocalMutationsFromIncoming(cloudOrders);
-
-    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    const merged=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'silent',pruneMissing:true});
-    const finalOrders=pruneLocalOrdersAgainstRemote(merged,cloudOrders);
-    const before=JSON.stringify(Array.isArray(localOrders)?localOrders:[]);
-    const after=JSON.stringify(finalOrders);
-    if(before!==after){
-      orders=finalOrders;
-      restoreOrderImagesFromLocalSources(orders,{source:'load_silent'});
-      persistOrdersLocalSafe(orders);
+    const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load_silent',forceRemote:true});
+    if(applied.applied&&applied.changed){
       render();
     }
-    return true;
+    return !!applied.applied;
   }catch(e){
     const fallbackMetrics=getLocalSyncFallbackMetrics();
     let storageOrdersCount=0;
@@ -8734,22 +8884,15 @@ async function loadFromCloud(){
             console.warn('[Remote] Skipping merge from localOnly orders payload');
             return false;
           }
-          if(!shouldAcceptRemoteOrders(cloudOrders)){
-            // Guard: ignore empty/partial remote snapshot when local has data.
-            console.warn('[Remote] Ignoring remote orders snapshot to protect local data');
-            return false;
-          }
-          ackLocalMutationsFromIncoming(cloudOrders);
         } else {
           // Deterministic behavior: never ingest jb_orders from /api/data fallback.
           return false;
         }
-        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-        // Server-authoritative merge: prune missing remote IDs except recent local mutations.
-        orders=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'load',pruneMissing:true});
-        orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
-        restoreOrderImagesFromLocalSources(orders,{source:'load'});
-        persistOrdersLocalSafe(orders);
+        const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load',forceRemote:true});
+        if(!applied.applied){
+          console.warn('[Remote] Authoritative replace skipped due to local mutation guard');
+          return false;
+        }
         // Reload variables from localStorage
         suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
@@ -8757,7 +8900,7 @@ async function loadFromCloud(){
         notifSettings=JSON.parse(localStorage.getItem('jb_notif')||'{"shipped":true}');
         loadSettings();loadTemplates();loadNotifSettings();
         updateBadges();render();
-        console.log(`[Remote] Loaded ${orders.length} orders`);
+        console.log(`[Remote] Loaded ${applied.count} orders`);
         return true;
       }catch(e){
         console.error('[Remote] Error:', e);
@@ -9596,10 +9739,6 @@ async function fetchWithTimeout(url,options={},timeoutMs=UPLOAD_TIMEOUT_MS){
   }finally{
     clearTimeout(timer);
   }
-}
-
-function normalizeStatus(s){
-  return s==='At Depott' ? 'At Depot' : (s==='Sent to Wechat'||s==='Sent to WeChat' ? 'Sent to Factory' : s);
 }
 
 function getFirebaseEnabled(){
@@ -12155,14 +12294,9 @@ async function startPendingPoll(){
       }catch{
         return;
       }
-      if(!shouldAcceptRemoteOrders(newOrders)){
-        return;
-      }
       if(Array.isArray(newOrders)){
-        ackLocalMutationsFromIncoming(newOrders);
+        const prevOrders=normalizeOrderSnapshotList(Array.isArray(orders)?orders:[]);
         if(me.role==='Reseller'){
-          // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
-          const prevOrders=Array.isArray(orders)?orders:[];
           const myOld=prevOrders.filter(o=>o.resellerId===me.id);
           const nowTs=Date.now();
           const recentLocalPending=myOld.filter(o=>
@@ -12171,13 +12305,12 @@ async function startPendingPoll(){
             (nowTs-((o.updatedAt||o.ts||0)))<RESELLER_PENDING_LOCAL_GRACE_MS
           );
           const preserveIds=recentLocalPending.map(o=>String(o.id));
-          const mergedOrders=mergeOrdersByFreshness(prevOrders,newOrders,{
+          const applied=applyAuthoritativeOrdersSnapshot(newOrders,{
             source:'poll_reseller',
-            pruneMissing:true,
+            forceRemote:true,
             preservePendingLocalIds:preserveIds
           });
-          orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
-          persistOrdersLocalSafe(orders);
+          if(!applied.applied) return;
           const myNew=orders.filter(o=>o.resellerId===me.id);
           // Detect status changes
           myNew.forEach(o=>{
@@ -12207,7 +12340,7 @@ async function startPendingPoll(){
                 vibratePattern:[260,80,260]
               }).catch(()=>{});
               renderResellerView();
-            } else if(old.status!==o.status){
+            } else if(normalizeStatus(old.status)!==normalizeStatus(o.status)){
               dispatchRealtimeNotification({
                 kind:'reseller_order_status',
                 eventId:String(o.id)+'_status_'+String(o.status),
@@ -12222,12 +12355,10 @@ async function startPendingPoll(){
             }
           });
         } else {
-          // For admin/staff use server-authoritative merge with local-mutation grace.
-          const oldPending=orders.filter(o=>o.pendingApproval).length;
+          const oldPending=prevOrders.filter(o=>o.pendingApproval).length;
           const newPending=newOrders.filter(o=>o.pendingApproval).length;
-          const mergedOrders=mergeOrdersByFreshness(orders,newOrders,{source:'poll_admin',pruneMissing:true});
-          orders=pruneLocalOrdersAgainstRemote(mergedOrders,newOrders);
-          persistOrdersLocalSafe(orders);
+          const applied=applyAuthoritativeOrdersSnapshot(newOrders,{source:'poll_admin',forceRemote:true});
+          if(!applied.applied) return;
           updateBadges();
           if(newPending>oldPending){
             const latestPending=newOrders.filter(function(o){return o&&o.pendingApproval;}).sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0];
@@ -13126,6 +13257,7 @@ function startAutoSync(){
       await flushLocalSyncFallback().catch(()=>{});
       await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
       await runSilentLoadWithLock().catch(()=>{});
+      await maybeSelfHealOrderDrift({reason:'auto_sync'}).catch(()=>{});
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
       }
@@ -13138,6 +13270,7 @@ function startAutoSync(){
       if(document.visibilityState === 'visible' && me && navigator.onLine){
         fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
         loadFromCloud().catch(()=>{});
+        maybeSelfHealOrderDrift({reason:'visibility'}).catch(()=>{});
       }
     });
     _autoSyncVisibilityBound=true;
@@ -13736,9 +13869,7 @@ function renderResLB(){
 // ── ORDERS PAGE ──
 
 function fmtStatus(s){
-  if(!s) return 'New';
-  if(s==='Sent to WeChat'||s==='Sent to Logistic') return 'Sent to Factory';
-  return s;
+  return normalizeStatus(s||'New');
 }
 
 function renderResOrders(){
@@ -13747,8 +13878,8 @@ function renderResOrders(){
   let myOrders=orders.filter(o=>o.resellerId===me.id);
   
   if(filter==='pending') myOrders=myOrders.filter(o=>o.pendingApproval);
-  else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>o.status==='Sent to Factory'||o.status==='Sent to Factory');
-  else if(filter!=='all') myOrders=myOrders.filter(o=>o.status===filter);
+  else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>normalizeStatus(o.status)==='Sent to Factory');
+  else if(filter!=='all') myOrders=myOrders.filter(o=>normalizeStatus(o.status)===filter);
   
   myOrders=myOrders.sort((a,b)=>b.ts-a.ts);
   
@@ -13758,9 +13889,9 @@ function renderResOrders(){
   if(!myOrders.length){el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">No orders found</div>';return;}
   
   const statusSteps=['New','Sent to Factory','At Depot','Shipped','Completed'];
-  const normSt=s=>s==='Sent to Factory'||s==='Sent to Wechat'?'Sent to Factory':s;
-  const normStatus=o=>o.status==='Sent to Factory'||o.status==='Sent to Wechat'?'Sent to Factory':o.status;
-  const statusIcons={'New':'⏳','Sent to Factory':'🏭','Sent to Wechat':'🏭','At Depot':'📦','Shipped':'🚚','Completed':'✅','Sent to Logistics':'🚛'};
+  const normSt=s=>normalizeStatus(s);
+  const normStatus=o=>normalizeStatus(o&&o.status);
+  const statusIcons={'New':'⏳','Sent to Factory':'🏭','At Depot':'📦','Shipped':'🚚','Completed':'✅','Sent to Logistics':'🚛'};
   
   el.innerHTML=myOrders.map(o=>{
     const stepIdx=statusSteps.indexOf(normStatus(o));
@@ -15907,12 +16038,13 @@ function showCNProductModal(orderId,tracking){
 
 // ── HELPERS ──
 function updateBadges(){
-  const cnt=s=>orders.filter(o=>o.status===s).length;
-  const cntFactory=()=>orders.filter(o=>o.status==='Sent to Factory'||o.status==='Sent to Wechat').length;
-  const cntLogistics=()=>orders.filter(o=>o.status==='Sent to Logistics').length;
-  const readyCount=orders.filter(o=>o.status==='At Depot'&&getShelfStatus(o).ready).length;
+  const normalizedOrders=Array.isArray(orders)?orders:[];
+  const cnt=s=>normalizedOrders.filter(o=>normalizeStatus(o&&o.status)===s).length;
+  const cntFactory=()=>normalizedOrders.filter(o=>normalizeStatus(o&&o.status)==='Sent to Factory').length;
+  const cntLogistics=()=>normalizedOrders.filter(o=>normalizeStatus(o&&o.status)==='Sent to Logistics').length;
+  const readyCount=normalizedOrders.filter(o=>normalizeStatus(o&&o.status)==='At Depot'&&getShelfStatus(o).ready).length;
   const nb=id=>document.getElementById(id);
-  if(nb('nb-all'))nb('nb-all').textContent=orders.length;
+  if(nb('nb-all'))nb('nb-all').textContent=normalizedOrders.length;
   if(nb('nb-new'))nb('nb-new').textContent=cnt('New');
   if(nb('nb-factory'))nb('nb-factory').textContent=cntFactory();
   if(nb('nb-depot'))nb('nb-depot').textContent=cnt('At Depot');
@@ -15921,7 +16053,7 @@ function updateBadges(){
   if(nb('nb-ship'))nb('nb-ship').textContent=cnt('Shipped');
   if(nb('nb-done'))nb('nb-done').textContent=cnt('Completed');
   const od=getOverdue().filter(o=>!_acknowledgedAlerts.has(o.id)).length;const nba=nb('nb-alert');if(nba){nba.textContent=od;nba.style.display=od?'inline':'none';}
-  const pendingCount=orders.filter(o=>o.pendingApproval).length;
+  const pendingCount=normalizedOrders.filter(o=>o.pendingApproval).length;
   const nbPending=nb('nb-pending');if(nbPending)nbPending.textContent=pendingCount;
   const navPending=document.getElementById('nav-pending');
   if(navPending)navPending.style.display=(me&&me.role!=='Reseller'&&pendingCount>0)?'flex':'none';
