@@ -37,6 +37,9 @@ const ORDER_QUEUE_AUTO_REDRIVE_HISTORY_LIMIT = 60;
 const ORDER_QUEUE_FORCE_DRAIN_LIMIT_MAX = 120;
 const ORDER_QUEUE_STUCK_PROCESSING_MAX_AGE_MS = 90 * 1000;
 const ORDER_QUEUE_STUCK_RECOVER_LIMIT = 12;
+const ORDER_OPS_BATCH_MAX = 50;
+const ORDER_UPDATES_LIMIT_DEFAULT = 200;
+const ORDER_UPDATES_LIMIT_MAX = 500;
 const DEFAULT_ADMIN_EMAIL = 'joobuyadmin@gmail.com';
 let _orderTablesEnsuredAt = 0;
 let _lastOrderOpsPruneAt = 0;
@@ -1971,6 +1974,21 @@ export default {
         const { key, value, event } = await request.json();
         return await syncKey(db, key, value, event);
       }
+      if (path === '/api/bootstrap' && method === 'GET') {
+        return json(await getSyncBootstrapPayload(db, authContext, env));
+      }
+      if (path === '/api/ops' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const response = await processOrderOpsBatch(db, body, authContext, env);
+        return json(response);
+      }
+      if (path === '/api/updates' && method === 'GET') {
+        const cursor = String(url.searchParams.get('cursor') || '').trim();
+        const limit = Number(url.searchParams.get('limit')) || ORDER_UPDATES_LIMIT_DEFAULT;
+        await runOrderCommandDrainCycle(db, authContext, { limit: 6, env });
+        const response = await getOrderUpdates(db, cursor, limit);
+        return json(response);
+      }
 
       // Orders
       if (path === '/api/orders' && method === 'GET') {
@@ -2824,11 +2842,13 @@ async function getOrders(db, authContext = null, opts = {}) {
       latencyMs: Date.now() - startedAt
     });
     await bumpSecurityMetric(db, 'orders_list_served', 1);
+    const nextCursor = await getLatestSyncCursor(db);
     return json({
       orders: filteredOrders,
       incremental,
       sinceTs,
-      sinceV
+      sinceV,
+      nextCursor
     });
   } catch(e) {
     logWorker('error', 'orders_list_failed', {
@@ -2837,6 +2857,366 @@ async function getOrders(db, authContext = null, opts = {}) {
     });
     return json({ orders: [], error: e.message });
   }
+}
+
+function toSyncCursor(ts, v) {
+  return `${Math.max(0, Number(ts) || 0)}:${Math.max(0, Number(v) || 0)}`;
+}
+
+function parseSyncCursor(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { ts: 0, v: 0 };
+  const normalized = text.includes('|') ? text.replace('|', ':') : text;
+  const [tsPart, vPart] = normalized.split(':');
+  return {
+    ts: Math.max(0, Number(tsPart) || 0),
+    v: Math.max(0, Number(vPart) || 0)
+  };
+}
+
+async function getLatestSyncCursor(db) {
+  await ensureOrderTables(db);
+  await ensureSecurityTables(db);
+  const orderRow = await db.prepare(`
+    SELECT
+      MAX(
+        COALESCE(
+          CAST(json_extract(data,'$.updatedAt') AS INTEGER),
+          COALESCE(CAST(json_extract(data,'$.ts') AS INTEGER),0),
+          ts
+        )
+      ) AS max_ts,
+      MAX(COALESCE(CAST(json_extract(data,'$.v') AS INTEGER),0)) AS max_v
+    FROM orders
+  `).first();
+  const auditRow = await db.prepare('SELECT MAX(created_at) AS max_audit_ts FROM order_audit_events').first();
+  const maxTs = Math.max(
+    Number(orderRow && orderRow.max_ts) || 0,
+    Number(auditRow && auditRow.max_audit_ts) || 0
+  );
+  const maxV = Math.max(0, Number(orderRow && orderRow.max_v) || 0);
+  return toSyncCursor(maxTs, maxV);
+}
+
+async function getSyncBootstrapPayload(db, authContext = null, env = {}) {
+  const runtime = await getOrderQueueRuntimeHealth(db, env);
+  const nextCursor = await getLatestSyncCursor(db);
+  return {
+    ok: true,
+    ts: Date.now(),
+    session: {
+      actorId: String(authContext && authContext.actorId || 'anonymous'),
+      role: String(authContext && authContext.role || 'Guest'),
+      isAuthenticated: !!(authContext && authContext.isAuthenticated),
+      authMode: String(authContext && authContext.authMode || 'open')
+    },
+    config: {
+      opsBatchMax: toBoundedInt(env.ORDER_OPS_BATCH_MAX, ORDER_OPS_BATCH_MAX, 1, 200),
+      updatesLimitDefault: toBoundedInt(env.ORDER_UPDATES_LIMIT_DEFAULT, ORDER_UPDATES_LIMIT_DEFAULT, 20, ORDER_UPDATES_LIMIT_MAX),
+      updatesLimitMax: toBoundedInt(env.ORDER_UPDATES_LIMIT_MAX, ORDER_UPDATES_LIMIT_MAX, 50, 2000)
+    },
+    features: {
+      orderOpsV1: true,
+      orderUpdatesV1: true
+    },
+    queue: {
+      pressure: runtime && runtime.pressure ? runtime.pressure : null,
+      circuitBreaker: runtime && runtime.breaker ? runtime.breaker : null
+    },
+    initialCursor: nextCursor
+  };
+}
+
+function normalizeOperationType(op) {
+  const text = String(op && op.type || '').trim().toUpperCase();
+  if (text === 'CREATE_ORDER' || text === 'UPDATE_ORDER' || text === 'UPSERT_ORDER') return 'upsert';
+  if (text === 'DELETE_ORDER' || text === 'REMOVE_ORDER') return 'delete';
+  return '';
+}
+
+async function readJsonResponseSafe(res) {
+  if (!res || typeof res !== 'object') return { status: 500, body: { ok: false, error: 'invalid_response' } };
+  let body = {};
+  try {
+    body = await res.json();
+  } catch {
+    body = {};
+  }
+  return {
+    status: Number(res.status) || 500,
+    body: body && typeof body === 'object' ? body : {}
+  };
+}
+
+function buildUpsertPayloadFromOperation(opEnvelope) {
+  const payload = opEnvelope && opEnvelope.payload && typeof opEnvelope.payload === 'object'
+    ? opEnvelope.payload
+    : {};
+  const orderSource = payload.order && typeof payload.order === 'object' ? payload.order : payload;
+  const entityId = String(opEnvelope.entityId || orderSource.id || '').trim();
+  if (!entityId) return null;
+  const baseVersion = Math.max(0, Number(opEnvelope.baseVersion) || 0);
+  const incomingTs = Number(payload.updatedAt || payload.ts || orderSource.updatedAt || orderSource.ts) || Date.now();
+  const requestedV = Math.max(1, Number(orderSource.v) || 0, baseVersion + 1);
+  return {
+    order: {
+      ...orderSource,
+      id: entityId,
+      v: requestedV,
+      updatedAt: incomingTs,
+      ts: Number(orderSource.ts) || incomingTs,
+      opId: opEnvelope.opId,
+      lastOpId: opEnvelope.opId
+    },
+    opId: opEnvelope.opId,
+    requestId: opEnvelope.opId,
+    v: requestedV,
+    ts: incomingTs
+  };
+}
+
+function buildDeletePayloadFromOperation(opEnvelope) {
+  const payload = opEnvelope && opEnvelope.payload && typeof opEnvelope.payload === 'object'
+    ? opEnvelope.payload
+    : {};
+  const entityId = String(opEnvelope.entityId || payload.entityId || payload.id || '').trim();
+  if (!entityId) return null;
+  const baseVersion = Math.max(0, Number(opEnvelope.baseVersion) || 0);
+  const deletedAt = Number(payload.deletedAt || payload.ts) || Date.now();
+  const nextV = Math.max(1, Number(payload.v) || 0, baseVersion + 1);
+  return {
+    id: entityId,
+    req: {
+      opId: opEnvelope.opId,
+      requestId: opEnvelope.opId,
+      v: nextV,
+      deletedAt
+    }
+  };
+}
+
+async function applyOrderOperationEnvelope(db, opEnvelope, authContext = null) {
+  const opType = normalizeOperationType(opEnvelope);
+  if (!opType) {
+    return { kind: 'rejected', rejected: { opId: opEnvelope.opId, reason: 'UNSUPPORTED_OPERATION' } };
+  }
+  if (opType === 'upsert') {
+    const payload = buildUpsertPayloadFromOperation(opEnvelope);
+    if (!payload || !payload.order || !payload.order.id) {
+      return { kind: 'rejected', rejected: { opId: opEnvelope.opId, reason: 'INVALID_PAYLOAD' } };
+    }
+    const response = await saveOrder(db, payload, authContext);
+    const parsed = await readJsonResponseSafe(response);
+    const body = parsed.body || {};
+    if (parsed.status >= 500 || body.ok === false) {
+      return {
+        kind: 'failed',
+        failed: {
+          opId: opEnvelope.opId,
+          reason: String(body.error || 'TRANSIENT_ERROR'),
+          retryable: true
+        }
+      };
+    }
+    if (body.staleIgnored || (body.conflict && typeof body.conflict === 'object')) {
+      return {
+        kind: 'rejected',
+        rejected: {
+          opId: opEnvelope.opId,
+          reason: 'VERSION_CONFLICT',
+          serverVersion: Math.max(0, Number(body.ackV) || 0)
+        }
+      };
+    }
+    return { kind: 'acked', acked: { opId: opEnvelope.opId } };
+  }
+  const payload = buildDeletePayloadFromOperation(opEnvelope);
+  if (!payload || !payload.id) {
+    return { kind: 'rejected', rejected: { opId: opEnvelope.opId, reason: 'INVALID_PAYLOAD' } };
+  }
+  const response = await saveOrderDelete(db, payload.id, payload.req, authContext);
+  const parsed = await readJsonResponseSafe(response);
+  const body = parsed.body || {};
+  if (parsed.status >= 500 || body.ok === false) {
+    return {
+      kind: 'failed',
+      failed: {
+        opId: opEnvelope.opId,
+        reason: String(body.error || 'TRANSIENT_ERROR'),
+        retryable: true
+      }
+    };
+  }
+  if (body.staleIgnored || (body.conflict && typeof body.conflict === 'object')) {
+    return {
+      kind: 'rejected',
+      rejected: {
+        opId: opEnvelope.opId,
+        reason: 'VERSION_CONFLICT',
+        serverVersion: Math.max(0, Number(body.ackV) || 0)
+      }
+    };
+  }
+  return { kind: 'acked', acked: { opId: opEnvelope.opId } };
+}
+
+async function processOrderOpsBatch(db, body, authContext = null, env = {}) {
+  const maxBatch = toBoundedInt(env.ORDER_OPS_BATCH_MAX, ORDER_OPS_BATCH_MAX, 1, 200);
+  const input = Array.isArray(body && body.operations) ? body.operations : [];
+  const operations = input.slice(0, maxBatch);
+  const acked = [];
+  const rejected = [];
+  const failed = [];
+  for (const raw of operations) {
+    const normalized = normalizeOperationInput(raw);
+    const opId = normalizeOpId(normalized && normalized.opId);
+    if (!opId) {
+      rejected.push({ opId: '', reason: 'OP_ID_MISSING' });
+      continue;
+    }
+    const opEnvelope = {
+      opId,
+      type: String(normalized.type || '').trim(),
+      entityId: String(normalized.entityId || '').trim(),
+      payload: normalized.payload && typeof normalized.payload === 'object' ? normalized.payload : {},
+      baseVersion: Math.max(0, Number(normalized.baseVersion) || 0),
+      createdAt: Math.max(0, Number(normalized.createdAt) || Date.now())
+    };
+    const known = await readOrderOpRecord(db, opId);
+    if (known) {
+      const cached = safeParseJson(known.response, {});
+      if (cached && (cached.staleIgnored || cached.conflict)) {
+        rejected.push({
+          opId,
+          reason: 'VERSION_CONFLICT',
+          serverVersion: Math.max(0, Number(cached.ackV) || 0)
+        });
+      } else {
+        acked.push({ opId });
+      }
+      continue;
+    }
+    const applied = await applyOrderOperationEnvelope(db, opEnvelope, authContext);
+    if (applied.kind === 'acked') acked.push(applied.acked);
+    else if (applied.kind === 'rejected') rejected.push(applied.rejected);
+    else failed.push(applied.failed);
+  }
+  const nextCursor = await getLatestSyncCursor(db);
+  return {
+    ok: true,
+    received: input.length,
+    processed: operations.length,
+    acked,
+    rejected,
+    failed,
+    nextCursor
+  };
+}
+
+function normalizeOperationInput(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    opId: normalizeOpId(src.opId || src.id || src.requestId),
+    type: String(src.type || src.action || '').trim(),
+    entityId: String(src.entityId || src.orderId || src.id || '').trim(),
+    payload: src.payload && typeof src.payload === 'object'
+      ? src.payload
+      : (src.order && typeof src.order === 'object' ? { order: src.order } : {}),
+    baseVersion: Math.max(0, Number(src.baseVersion || src.v || src.version) || 0),
+    createdAt: Math.max(0, Number(src.createdAt || src.ts) || Date.now())
+  };
+}
+
+async function getOrderUpdates(db, cursorRaw, limitRaw) {
+  await ensureOrderTables(db);
+  await ensureSecurityTables(db);
+  const cursor = parseSyncCursor(cursorRaw);
+  const limit = Math.max(
+    1,
+    Math.min(
+      ORDER_UPDATES_LIMIT_MAX,
+      Number(limitRaw) || ORDER_UPDATES_LIMIT_DEFAULT
+    )
+  );
+  const orderLimit = Math.max(1, Math.floor(limit * 0.7));
+  const auditLimit = Math.max(1, limit - orderLimit);
+  const rows = await db.prepare(`
+    SELECT
+      data,
+      COALESCE(
+        CAST(json_extract(data,'$.updatedAt') AS INTEGER),
+        COALESCE(CAST(json_extract(data,'$.ts') AS INTEGER),0),
+        ts
+      ) AS updated_at,
+      COALESCE(CAST(json_extract(data,'$.v') AS INTEGER),0) AS version
+    FROM orders
+    WHERE
+      COALESCE(
+        CAST(json_extract(data,'$.updatedAt') AS INTEGER),
+        COALESCE(CAST(json_extract(data,'$.ts') AS INTEGER),0),
+        ts
+      ) > ?
+      OR COALESCE(CAST(json_extract(data,'$.v') AS INTEGER),0) > ?
+    ORDER BY updated_at ASC, version ASC
+    LIMIT ?
+  `).bind(cursor.ts, cursor.v, orderLimit).all();
+  const orderEvents = (rows.results || [])
+    .map((row) => {
+      const order = safeParseJson(row && row.data, null);
+      if (!order || typeof order !== 'object') return null;
+      return {
+        eventId: normalizeOpId(
+          `order_${String(order.id || '').slice(0, 80)}_${Number(row && row.version) || 0}_${Number(row && row.updated_at) || 0}`,
+          `order_evt_${Date.now()}`
+        ),
+        type: 'ORDER_SNAPSHOT',
+        entity: 'order',
+        entityId: String(order.id || ''),
+        ts: Number(row && row.updated_at) || 0,
+        version: Number(row && row.version) || 0,
+        data: order
+      };
+    })
+    .filter(Boolean);
+  const auditRows = await db.prepare(`
+    SELECT event_id, order_id, event_type, payload, created_at, request_id, actor_id, actor_role
+    FROM order_audit_events
+    WHERE created_at > ?
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).bind(cursor.ts, auditLimit).all();
+  const auditEvents = (auditRows.results || [])
+    .map((row) => ({
+      eventId: String(row && row.event_id || ''),
+      type: String(row && row.event_type || 'ORDER_EVENT'),
+      entity: 'order',
+      entityId: String(row && row.order_id || ''),
+      ts: Number(row && row.created_at) || 0,
+      version: 0,
+      payload: safeParseJson(row && row.payload, {}),
+      requestId: String(row && row.request_id || ''),
+      actorId: String(row && row.actor_id || ''),
+      actorRole: String(row && row.actor_role || '')
+    }))
+    .filter((item) => item.eventId);
+  const events = [...orderEvents, ...auditEvents]
+    .sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0))
+    .slice(0, limit);
+  let maxTs = cursor.ts;
+  let maxV = cursor.v;
+  for (const event of events) {
+    maxTs = Math.max(maxTs, Number(event && event.ts) || 0);
+    maxV = Math.max(maxV, Number(event && event.version) || 0);
+  }
+  const nextCursor = toSyncCursor(maxTs, maxV);
+  return {
+    ok: true,
+    cursor: toSyncCursor(cursor.ts, cursor.v),
+    nextCursor,
+    count: events.length,
+    limit,
+    events
+  };
 }
 
 function buildDeleteCommandPayload(id, req = {}) {
