@@ -8296,14 +8296,31 @@ function cloudSave(key,value){
 
 async function bootstrapAuthoritativeOrders(){
   try{
+    showLoading('Syncing orders...');
     await syncBootstrapReplicaState().catch(()=>{});
+    const api=await ensureWorkingApiBase({silent:true});
+    const fullRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()}).catch(()=>null);
+    if(fullRes&&fullRes.ok){
+      const fullPayload=await fullRes.json().catch(()=>({}));
+      const cloudOrders=Array.isArray(fullPayload&&fullPayload.orders)?fullPayload.orders:[];
+      if(cloudOrders.length){
+        ackLocalMutationsFromIncoming(cloudOrders);
+        orders=mergeOrdersByFreshness(Array.isArray(orders)?orders:[],cloudOrders,{source:'bootstrap_full',pruneMissing:true});
+        orders=pruneLocalOrdersAgainstRemote(orders,cloudOrders);
+        persistOrdersLocalSafe(orders);
+        const nextCursor=String(fullPayload&&fullPayload.nextCursor||'').trim();
+        if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
+      }
+    }
     const changed=await fetchOrderUpdatesWithCursor({silent:true,maxBatches:4,limit:250}).catch(()=>false);
     if(changed){
       updateBadges();
       render();
     }
+    hideLoading();
     return true;
   }catch(_e){
+    hideLoading();
     return false;
   }
 }
@@ -13126,7 +13143,6 @@ function startAutoSync(){
     _autoSyncVisibilityBound=true;
   }
 }
-
 // ── CONFETTI ──
 function resConfetti(){
   const c=document.getElementById('res-confetti');
@@ -16149,6 +16165,14 @@ function showOrderSkeleton(containerId, count = 5){
       <div class="skeleton skeleton-text" style="width:60%;"></div>
     </div>
   `).join('');
+}
+
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',function(){
+    bootstrapAuthoritativeOrders().catch(()=>{});
+  },{once:true});
+}else{
+  bootstrapAuthoritativeOrders().catch(()=>{});
 }
 
 function fillFromCatalog(idx,sel){
