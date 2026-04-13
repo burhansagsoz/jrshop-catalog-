@@ -1366,6 +1366,7 @@ function roleAllowed(requiredRoles, role) {
 function shouldApplyReplayGuard(path, method) {
   if (!isWriteMethod(method)) return false;
   if (path === '/api/order' || path.startsWith('/api/order/')) return false;
+  if (path === '/api/sync') return false;
   return path.startsWith('/api/');
 }
 
@@ -1960,7 +1961,7 @@ export default {
       const db = env.DB;
 
       // Data
-      if (path === '/api/data' && method === 'GET') return await getData(db);
+      if (path === '/api/data' && method === 'GET') return await getData(db, url);
       if (path === '/api/data' && method === 'POST') {
         const body = await request.json();
         const keys = Object.keys(body);
@@ -2449,14 +2450,39 @@ export default {
   }
 };
 
-async function getData(db) {
-  const rows = await db.prepare('SELECT key, value FROM kv_store').all();
+async function getData(db, requestUrl = null) {
+  const keyFilterRaw = String(
+    requestUrl && requestUrl.searchParams ? (requestUrl.searchParams.get('keys') || '') : ''
+  ).trim();
+  const requestedKeys = keyFilterRaw
+    ? Array.from(new Set(
+        keyFilterRaw
+          .split(',')
+          .map((key) => String(key || '').trim())
+          .filter(Boolean)
+      )).slice(0, 120)
+    : [];
+  let rows = null;
+  if (requestedKeys.length) {
+    const placeholders = requestedKeys.map(() => '?').join(',');
+    rows = await db
+      .prepare(`SELECT key, value FROM kv_store WHERE key IN (${placeholders})`)
+      .bind(...requestedKeys)
+      .all();
+  } else {
+    rows = await db.prepare('SELECT key, value FROM kv_store').all();
+  }
   const data = {};
   for (const row of rows.results) {
     try { data[row.key] = JSON.parse(row.value); } catch { data[row.key] = row.value; }
   }
   // If jb_users was accidentally overwritten by a tiny snapshot, recover from backup key.
-  if (Array.isArray(data.jb_users_backup) && data.jb_users_backup.length > (Array.isArray(data.jb_users) ? data.jb_users.length : 0)) {
+  const shouldCheckUsersBackup = !requestedKeys.length || requestedKeys.includes('jb_users') || requestedKeys.includes('jb_users_backup');
+  if (
+    shouldCheckUsersBackup &&
+    Array.isArray(data.jb_users_backup) &&
+    data.jb_users_backup.length > (Array.isArray(data.jb_users) ? data.jb_users.length : 0)
+  ) {
     data.jb_users = data.jb_users_backup;
   }
   return json({ data });
@@ -2866,7 +2892,7 @@ function toSyncCursor(ts, v) {
 function parseSyncCursor(raw) {
   const text = String(raw || '').trim();
   if (!text) return { ts: 0, v: 0 };
-  const normalized = text.includes('|') ? text.replace('|', ':') : text;
+  const normalized = text.includes('|') ? text.replace(/\|/g, ':') : text;
   const [tsPart, vPart] = normalized.split(':');
   return {
     ts: Math.max(0, Number(tsPart) || 0),
@@ -2889,11 +2915,7 @@ async function getLatestSyncCursor(db) {
       MAX(COALESCE(CAST(json_extract(data,'$.v') AS INTEGER),0)) AS max_v
     FROM orders
   `).first();
-  const auditRow = await db.prepare('SELECT MAX(created_at) AS max_audit_ts FROM order_audit_events').first();
-  const maxTs = Math.max(
-    Number(orderRow && orderRow.max_ts) || 0,
-    Number(auditRow && auditRow.max_audit_ts) || 0
-  );
+  const maxTs = Math.max(0, Number(orderRow && orderRow.max_ts) || 0);
   const maxV = Math.max(0, Number(orderRow && orderRow.max_v) || 0);
   return toSyncCursor(maxTs, maxV);
 }
@@ -3156,10 +3178,17 @@ async function getOrderUpdates(db, cursorRaw, limitRaw) {
         COALESCE(CAST(json_extract(data,'$.ts') AS INTEGER),0),
         ts
       ) > ?
-      OR COALESCE(CAST(json_extract(data,'$.v') AS INTEGER),0) > ?
+      OR (
+        COALESCE(
+          CAST(json_extract(data,'$.updatedAt') AS INTEGER),
+          COALESCE(CAST(json_extract(data,'$.ts') AS INTEGER),0),
+          ts
+        ) = ?
+        AND COALESCE(CAST(json_extract(data,'$.v') AS INTEGER),0) > ?
+      )
     ORDER BY updated_at ASC, version ASC
     LIMIT ?
-  `).bind(cursor.ts, cursor.v, orderLimit).all();
+  `).bind(cursor.ts, cursor.ts, cursor.v, orderLimit).all();
   const orderEvents = (rows.results || [])
     .map((row) => {
       const order = safeParseJson(row && row.data, null);
@@ -3200,13 +3229,25 @@ async function getOrderUpdates(db, cursorRaw, limitRaw) {
     }))
     .filter((item) => item.eventId);
   const events = [...orderEvents, ...auditEvents]
-    .sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0))
+    .sort((a, b) => {
+      const tsDiff = (Number(a.ts) || 0) - (Number(b.ts) || 0);
+      if (tsDiff !== 0) return tsDiff;
+      return (Number(a.version) || 0) - (Number(b.version) || 0);
+    })
     .slice(0, limit);
   let maxTs = cursor.ts;
   let maxV = cursor.v;
   for (const event of events) {
-    maxTs = Math.max(maxTs, Number(event && event.ts) || 0);
-    maxV = Math.max(maxV, Number(event && event.version) || 0);
+    const ts = Number(event && event.ts) || 0;
+    const v = Math.max(0, Number(event && event.version) || 0);
+    if (ts > maxTs) {
+      maxTs = ts;
+      maxV = v;
+      continue;
+    }
+    if (ts === maxTs && v > maxV) {
+      maxV = v;
+    }
   }
   const nextCursor = toSyncCursor(maxTs, maxV);
   return {
