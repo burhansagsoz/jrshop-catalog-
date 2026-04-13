@@ -33,6 +33,8 @@ const ORDER_QUEUE_CIRCUIT_COOLDOWN_MS = 30 * 1000;
 const ORDER_QUEUE_CIRCUIT_FAIL_THRESHOLD = 20;
 const ORDER_QUEUE_AUTO_REDRIVE_LIMIT = 3;
 const ORDER_QUEUE_AUTO_REDRIVE_COOLDOWN_MS = 30 * 1000;
+const ORDER_QUEUE_AUTO_REDRIVE_HISTORY_LIMIT = 60;
+const ORDER_QUEUE_FORCE_DRAIN_LIMIT_MAX = 120;
 const DEFAULT_ADMIN_EMAIL = 'joobuyadmin@gmail.com';
 let _orderTablesEnsuredAt = 0;
 let _lastOrderOpsPruneAt = 0;
@@ -401,7 +403,24 @@ function getOrderQueueLimitConfig(env = {}) {
     breakerCooldownMs: toBoundedInt(env.ORDER_QUEUE_BREAKER_COOLDOWN_MS, ORDER_QUEUE_CIRCUIT_COOLDOWN_MS, 1000, 10 * 60 * 1000),
     autoRedriveBatchLimit: toBoundedInt(env.ORDER_AUTO_REDRIVE_BATCH_LIMIT, ORDER_QUEUE_AUTO_REDRIVE_LIMIT, 0, 100),
     autoRedriveDelayMs: toBoundedInt(env.ORDER_AUTO_REDRIVE_DELAY_MS, 0, 0, 60 * 1000),
-    autoRedriveCooldownMs: toBoundedInt(env.ORDER_AUTO_REDRIVE_COOLDOWN_MS, ORDER_QUEUE_AUTO_REDRIVE_COOLDOWN_MS, 1000, 10 * 60 * 1000)
+    autoRedriveCooldownMs: toBoundedInt(env.ORDER_AUTO_REDRIVE_COOLDOWN_MS, ORDER_QUEUE_AUTO_REDRIVE_COOLDOWN_MS, 1000, 10 * 60 * 1000),
+    forceDrainMaxLimit: toBoundedInt(env.ORDER_QUEUE_FORCE_DRAIN_MAX_LIMIT, ORDER_QUEUE_FORCE_DRAIN_LIMIT_MAX, 5, 500)
+  };
+}
+
+function normalizeOrderQueueAutoRedriveReport(report = {}) {
+  const src = report && typeof report === 'object' ? report : {};
+  const blocked = String(src.blocked || '').trim();
+  return {
+    ts: Math.max(0, Number(src.ts) || Date.now()),
+    limit: Math.max(0, Number(src.limit) || 0),
+    attempted: Math.max(0, Number(src.attempted) || 0),
+    redriven: Math.max(0, Number(src.redriven) || 0),
+    skipped: Math.max(0, Number(src.skipped) || 0),
+    failed: Math.max(0, Number(src.failed) || 0),
+    throttled: src.throttled === true,
+    blocked: blocked ? blocked.slice(0, 80) : '',
+    durationMs: Math.max(0, Number(src.durationMs) || 0)
   };
 }
 
@@ -413,6 +432,7 @@ async function readOrderQueueRuntimeState(db) {
       breakerOpenUntil: 0,
       errorEvents: [],
       lastAutoRedriveAt: 0,
+      autoRedriveHistory: [],
       updatedAt: 0
     };
   }
@@ -420,6 +440,9 @@ async function readOrderQueueRuntimeState(db) {
     breakerOpenUntil: Math.max(0, Number(parsed.breakerOpenUntil) || 0),
     errorEvents: Array.isArray(parsed.errorEvents) ? parsed.errorEvents.map((ts) => Number(ts) || 0).filter((ts) => ts > 0) : [],
     lastAutoRedriveAt: Math.max(0, Number(parsed.lastAutoRedriveAt) || 0),
+    autoRedriveHistory: Array.isArray(parsed.autoRedriveHistory)
+      ? parsed.autoRedriveHistory.map((item) => normalizeOrderQueueAutoRedriveReport(item)).slice(-ORDER_QUEUE_AUTO_REDRIVE_HISTORY_LIMIT)
+      : [],
     updatedAt: Math.max(0, Number(parsed.updatedAt) || 0)
   };
 }
@@ -430,12 +453,29 @@ async function writeOrderQueueRuntimeState(db, state) {
     breakerOpenUntil: Math.max(0, Number(state && state.breakerOpenUntil) || 0),
     errorEvents: Array.isArray(state && state.errorEvents) ? state.errorEvents.map((ts) => Number(ts) || 0).filter((ts) => ts > 0).slice(-500) : [],
     lastAutoRedriveAt: Math.max(0, Number(state && state.lastAutoRedriveAt) || 0),
+    autoRedriveHistory: Array.isArray(state && state.autoRedriveHistory)
+      ? state.autoRedriveHistory.map((item) => normalizeOrderQueueAutoRedriveReport(item)).slice(-ORDER_QUEUE_AUTO_REDRIVE_HISTORY_LIMIT)
+      : [],
     updatedAt: now
   };
   await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
     .bind('order_queue_runtime_state', JSON.stringify(next))
     .run();
   return next;
+}
+
+async function appendOrderQueueAutoRedriveReport(db, state, report, opts = {}) {
+  const runtime = state && typeof state === 'object' ? state : await readOrderQueueRuntimeState(db);
+  const normalized = normalizeOrderQueueAutoRedriveReport(report);
+  const history = Array.isArray(runtime.autoRedriveHistory) ? runtime.autoRedriveHistory : [];
+  const nextPayload = {
+    ...runtime,
+    autoRedriveHistory: [...history, normalized].slice(-ORDER_QUEUE_AUTO_REDRIVE_HISTORY_LIMIT)
+  };
+  if (opts && opts.touchLastAutoRedriveAt) {
+    nextPayload.lastAutoRedriveAt = normalized.ts;
+  }
+  return await writeOrderQueueRuntimeState(db, nextPayload);
 }
 
 function pruneBreakerErrorEvents(events, now, windowMs) {
@@ -517,6 +557,9 @@ async function getOrderQueueRuntimeHealth(db, env = {}) {
   const state = await readOrderQueueRuntimeState(db);
   const events = pruneBreakerErrorEvents(state.errorEvents, now, cfg.breakerWindowMs);
   const pressure = await getOrderQueuePressureSnapshot(db);
+  const latestAutoRedrive = Array.isArray(state.autoRedriveHistory) && state.autoRedriveHistory.length
+    ? state.autoRedriveHistory[state.autoRedriveHistory.length - 1]
+    : null;
   return {
     breaker: {
       open: Number(state.breakerOpenUntil || 0) > now,
@@ -536,8 +579,61 @@ async function getOrderQueueRuntimeHealth(db, env = {}) {
     autoRedrive: {
       batchLimit: cfg.autoRedriveBatchLimit,
       delayMs: cfg.autoRedriveDelayMs,
-      lastAt: Number(state.lastAutoRedriveAt || 0)
+      cooldownMs: cfg.autoRedriveCooldownMs,
+      lastAt: Number(state.lastAutoRedriveAt || 0),
+      latestResult: latestAutoRedrive
     }
+  };
+}
+
+async function getOrderQueueBreakerState(db, env = {}) {
+  const cfg = getOrderQueueLimitConfig(env);
+  const now = Date.now();
+  const state = await readOrderQueueRuntimeState(db);
+  const events = pruneBreakerErrorEvents(state.errorEvents, now, cfg.breakerWindowMs);
+  const pressure = await getOrderQueuePressureSnapshot(db);
+  return {
+    ts: now,
+    breaker: {
+      open: Number(state.breakerOpenUntil || 0) > now,
+      openUntil: Number(state.breakerOpenUntil || 0),
+      errorCountInWindow: events.length,
+      threshold: cfg.breakerErrorThreshold,
+      windowMs: cfg.breakerWindowMs,
+      cooldownMs: cfg.breakerCooldownMs,
+      remainingOpenMs: Math.max(0, Number(state.breakerOpenUntil || 0) - now)
+    },
+    pressure: {
+      pending: pressure.pending,
+      failed: pressure.failed,
+      pendingMax: cfg.pendingMax,
+      failedMax: cfg.failedMax,
+      writeSaturated: pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax
+    },
+    recentErrorEvents: events.slice(-20),
+    runtimeUpdatedAt: Number(state.updatedAt || 0)
+  };
+}
+
+async function getOrderQueueAutoRedriveReport(db, limit = 20) {
+  const capped = Math.max(1, Math.min(100, Number(limit) || 20));
+  const state = await readOrderQueueRuntimeState(db);
+  const history = Array.isArray(state.autoRedriveHistory) ? state.autoRedriveHistory : [];
+  const items = history.slice(-capped).reverse();
+  const summary = items.reduce((acc, item) => {
+    acc.attempted += Number(item && item.attempted) || 0;
+    acc.redriven += Number(item && item.redriven) || 0;
+    acc.skipped += Number(item && item.skipped) || 0;
+    acc.failed += Number(item && item.failed) || 0;
+    if (item && item.blocked) acc.blocked += 1;
+    if (item && item.throttled) acc.throttled += 1;
+    return acc;
+  }, { attempted: 0, redriven: 0, skipped: 0, failed: 0, blocked: 0, throttled: 0 });
+  return {
+    items,
+    summary,
+    lastAt: Number(state.lastAutoRedriveAt || 0),
+    runtimeUpdatedAt: Number(state.updatedAt || 0)
   };
 }
 
@@ -555,19 +651,28 @@ async function getOrderQueueWriteGuard(db, env = {}) {
 async function maybeAutoRedriveDeadLetters(db, authContext = null, env = {}, opts = {}) {
   const cfg = getOrderQueueLimitConfig(env);
   const limit = Math.max(0, Math.min(cfg.autoRedriveBatchLimit, Number(opts.limit) || cfg.autoRedriveBatchLimit));
-  if (limit <= 0) return { attempted: 0, redriven: 0, skipped: 0, failed: 0 };
+  if (limit <= 0) return { attempted: 0, redriven: 0, skipped: 0, failed: 0, limit: 0 };
   const now = Date.now();
+  const startedAt = now;
   const runtime = await readOrderQueueRuntimeState(db);
   const minGapMs = cfg.autoRedriveCooldownMs;
   if (Number(runtime.breakerOpenUntil || 0) > now) {
-    return { attempted: 0, redriven: 0, skipped: 0, failed: 0, blocked: 'circuit_open' };
+    const blockedReport = {
+      ts: now, limit, attempted: 0, redriven: 0, skipped: 0, failed: 0, blocked: 'circuit_open', durationMs: 0
+    };
+    await appendOrderQueueAutoRedriveReport(db, runtime, blockedReport);
+    return blockedReport;
   }
   const pressure = await getOrderQueuePressureSnapshot(db);
   if (pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax) {
-    return { attempted: 0, redriven: 0, skipped: 0, failed: 0, blocked: 'queue_saturated' };
+    const blockedReport = {
+      ts: now, limit, attempted: 0, redriven: 0, skipped: 0, failed: 0, blocked: 'queue_saturated', durationMs: 0
+    };
+    await appendOrderQueueAutoRedriveReport(db, runtime, blockedReport);
+    return blockedReport;
   }
   if ((now - Number(runtime.lastAutoRedriveAt || 0)) < minGapMs) {
-    return { attempted: 0, redriven: 0, skipped: 0, failed: 0, throttled: true };
+    return { ts: now, limit, attempted: 0, redriven: 0, skipped: 0, failed: 0, throttled: true, durationMs: 0 };
   }
   const deadletters = await listOrderCommandDeadLetters(db, limit);
   const results = [];
@@ -580,16 +685,17 @@ async function maybeAutoRedriveDeadLetters(db, authContext = null, env = {}, opt
     });
     results.push(result);
   }
-  await writeOrderQueueRuntimeState(db, {
-    ...runtime,
-    lastAutoRedriveAt: now
-  });
-  return {
+  const report = {
+    ts: now,
+    limit,
     attempted: results.length,
     redriven: results.filter((r) => r && r.redriven).length,
     skipped: results.filter((r) => r && r.skipped).length,
-    failed: results.filter((r) => !r || r.ok === false).length
+    failed: results.filter((r) => !r || r.ok === false).length,
+    durationMs: Math.max(0, Date.now() - startedAt)
   };
+  await appendOrderQueueAutoRedriveReport(db, runtime, report, { touchLastAutoRedriveAt: true });
+  return report;
 }
 
 async function recordOrderCommandDeadLetter(db, row, reason, detail = '') {
@@ -894,20 +1000,23 @@ async function executeClaimedOrderCommand(db, row, authContext = null) {
 async function drainOrderCommandQueue(db, authContext = null, opts = {}) {
   const env = opts && opts.env && typeof opts.env === 'object' ? opts.env : {};
   const cfg = getOrderQueueLimitConfig(env);
+  const bypassGuards = !!(opts && opts.bypassGuards);
   const now = Date.now();
   const runtime = await readOrderQueueRuntimeState(db);
-  if (Number(runtime.breakerOpenUntil || 0) > now) {
-    return 0;
-  }
-  const pressure = await getOrderQueuePressureSnapshot(db);
-  if (pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax) {
-    logWorker('warn', 'order_queue_saturated', {
-      pending: pressure.pending,
-      failed: pressure.failed,
-      pendingMax: cfg.pendingMax,
-      failedMax: cfg.failedMax
-    });
-    return 0;
+  if (!bypassGuards) {
+    if (Number(runtime.breakerOpenUntil || 0) > now) {
+      return 0;
+    }
+    const pressure = await getOrderQueuePressureSnapshot(db);
+    if (pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax) {
+      logWorker('warn', 'order_queue_saturated', {
+        pending: pressure.pending,
+        failed: pressure.failed,
+        pendingMax: cfg.pendingMax,
+        failedMax: cfg.failedMax
+      });
+      return 0;
+    }
   }
 
   const limit = Math.max(1, Math.min(30, Number(opts.limit) || ORDER_COMMAND_DRAIN_LIMIT));
@@ -956,11 +1065,13 @@ async function runOrderCommandDrainCycle(db, authContext = null, opts = {}) {
   const limit = Math.max(1, Math.min(100, Number(opts && opts.limit) || ORDER_COMMAND_DRAIN_LIMIT));
   const autoRedrive = opts && opts.autoRedrive !== undefined ? !!opts.autoRedrive : true;
   const autoRedriveLimit = Math.max(0, Math.min(20, Number(opts && opts.autoRedriveLimit) || ORDER_QUEUE_AUTO_REDRIVE_LIMIT));
+  const bypassGuards = !!(opts && opts.bypassGuards);
   const processed = await drainOrderCommandQueue(db, authContext, {
     limit,
     env: opts && opts.env ? opts.env : {},
     autoRedrive,
-    autoRedriveLimit
+    autoRedriveLimit,
+    bypassGuards
   });
   await maybePruneOrderRecoveryOps(db);
   return processed;
@@ -1123,6 +1234,9 @@ function getRequiredRolesForRoute(path, method) {
   const m = String(method || '').toUpperCase();
   if (path === '/api/setup' && m === 'GET') return ['Admin'];
   if (path === '/api/ops/health' && m === 'GET') return ['Admin'];
+  if (path === '/api/order-queue/runtime' && m === 'GET') return ['Admin'];
+  if (path === '/api/order-queue/auto-redrive-report' && m === 'GET') return ['Admin'];
+  if (path === '/api/order-queue/drain' && m === 'POST') return ['Admin'];
   if (path === '/api/backup' && m === 'GET') return ['Admin'];
   if (path === '/api/backup/import' && m === 'POST') return ['Admin'];
   if (path.startsWith('/api/order-command/') && m === 'GET') return ['Admin'];
@@ -1773,6 +1887,60 @@ export default {
         const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
         const deadletters = await listOrderCommandDeadLetters(db, limit);
         return json({ ok: true, count: deadletters.length, deadletters });
+      }
+      if (path === '/api/order-queue/runtime' && method === 'GET') {
+        const breaker = await getOrderQueueBreakerState(db, env);
+        const runtimeHealth = await getOrderQueueRuntimeHealth(db, env);
+        return json({
+          ok: true,
+          ts: Date.now(),
+          breaker,
+          autoRedrive: runtimeHealth && runtimeHealth.autoRedrive ? runtimeHealth.autoRedrive : null
+        });
+      }
+      if (path === '/api/order-queue/auto-redrive-report' && method === 'GET') {
+        const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 20));
+        const report = await getOrderQueueAutoRedriveReport(db, limit);
+        return json({ ok: true, limit, ...report, count: Array.isArray(report.items) ? report.items.length : 0 });
+      }
+      if (path === '/api/order-queue/drain' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const requestId = normalizeOpId(
+          body && body.requestId,
+          (authContext && authContext.requestId) || getRequestIdFromRequest(request)
+        );
+        const known = await readOrderRecoveryOpResult(db, 'force_drain', requestId);
+        if (known && known.response && typeof known.response === 'object') {
+          return json({ ...known.response, idempotent: true, requestId }, Number(known.statusCode) || 200);
+        }
+        const cfg = getOrderQueueLimitConfig(env);
+        const limit = Math.max(1, Math.min(cfg.forceDrainMaxLimit, Number(body && body.limit) || ORDER_COMMAND_DRAIN_LIMIT));
+        const force = body && body.force === true;
+        const autoRedrive = body && body.autoRedrive === true;
+        const autoRedriveLimit = Math.max(0, Math.min(cfg.autoRedriveBatchLimit, Number(body && body.autoRedriveLimit) || cfg.autoRedriveBatchLimit));
+        const startedAt = Date.now();
+        const processed = await runOrderCommandDrainCycle(db, authContext, {
+          limit,
+          env,
+          autoRedrive,
+          autoRedriveLimit,
+          bypassGuards: force
+        });
+        const queueRuntime = await getOrderQueueRuntimeHealth(db, env);
+        const response = {
+          ok: true,
+          requestId,
+          processed,
+          limit,
+          force,
+          autoRedrive,
+          autoRedriveLimit,
+          durationMs: Math.max(0, Date.now() - startedAt),
+          queueRuntime
+        };
+        await storeOrderRecoveryOpResult(db, 'force_drain', requestId, 200, response);
+        await maybePruneOrderRecoveryOps(db);
+        return json(response);
       }
       if (path.startsWith('/api/order-command/') && method === 'POST') {
         const commandId = decodeURIComponent(path.split('/').pop() || '').trim();
