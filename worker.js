@@ -17,9 +17,18 @@ const ORDER_OP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const ORDER_BULK_CHUNK_SIZE = 80;
 const ORDER_MAX_BULK_ROWS = 500;
 const ORDER_OP_PRUNE_INTERVAL_MS = 5 * 60 * 1000;
+const ORDER_COMMAND_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const ORDER_COMMAND_PRUNE_INTERVAL_MS = 5 * 60 * 1000;
+const ORDER_COMMAND_LEASE_MS = 15 * 1000;
+const ORDER_COMMAND_RETRY_BASE_MS = 250;
+const ORDER_COMMAND_MAX_RETRIES = 8;
+const ORDER_COMMAND_DRAIN_LIMIT = 8;
+const ORDER_COMMAND_WAIT_TIMEOUT_MS = 4500;
+const ORDER_COMMAND_WAIT_STEP_MS = 90;
 const DEFAULT_ADMIN_EMAIL = 'joobuyadmin@gmail.com';
 let _orderTablesEnsuredAt = 0;
 let _lastOrderOpsPruneAt = 0;
+let _lastOrderCommandsPruneAt = 0;
 let _securityWarnedMissingAuthToken = false;
 let _securityTablesEnsuredAt = 0;
 let _lastSecurityMemoryPruneAt = 0;
@@ -150,6 +159,25 @@ async function ensureOrderTables(db) {
       created_at INTEGER NOT NULL
     )
   `).run();
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS order_commands (
+      command_id TEXT PRIMARY KEY,
+      op_id TEXT NOT NULL,
+      order_id TEXT NOT NULL,
+      command_type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL,
+      result TEXT,
+      error TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      lease_until INTEGER NOT NULL DEFAULT 0,
+      available_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `).run();
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_order_commands_status_available ON order_commands(status,available_at,created_at)').run();
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_order_commands_op_id ON order_commands(op_id)').run();
   _orderTablesEnsuredAt = now;
 }
 
@@ -195,6 +223,227 @@ async function maybePruneOrderOps(db) {
   try {
     await db.prepare('DELETE FROM order_ops WHERE created_at < ?').bind(now - ORDER_OP_RETENTION_MS).run();
   } catch (_e) {}
+}
+
+async function maybePruneOrderCommands(db) {
+  const now = Date.now();
+  if ((now - _lastOrderCommandsPruneAt) < ORDER_COMMAND_PRUNE_INTERVAL_MS) return;
+  _lastOrderCommandsPruneAt = now;
+  try {
+    await db.prepare('DELETE FROM order_commands WHERE updated_at < ? AND status IN (\'applied\',\'failed\')')
+      .bind(now - ORDER_COMMAND_RETENTION_MS)
+      .run();
+  } catch (_e) {}
+}
+
+function getOrderCommandRetryDelayMs(attempts) {
+  const n = Math.max(1, Number(attempts) || 1);
+  const cappedExponent = Math.min(6, n - 1);
+  return Math.min(10_000, ORDER_COMMAND_RETRY_BASE_MS * Math.pow(2, cappedExponent));
+}
+
+function toOrderCommandEnvelope(source = {}) {
+  const now = Date.now();
+  const opId = normalizeOpId(source.opId || source.commandId, `cmd_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`);
+  return {
+    commandId: opId,
+    opId,
+    orderId: String(source.orderId || '').trim(),
+    commandType: String(source.commandType || 'upsert').trim().toLowerCase(),
+    payload: source.payload && typeof source.payload === 'object' ? source.payload : {},
+    availableAt: Math.max(0, Number(source.availableAt) || now),
+  };
+}
+
+async function readOrderCommandRecord(db, commandId) {
+  const id = normalizeOpId(commandId);
+  if (!id) return null;
+  try {
+    return await db.prepare('SELECT * FROM order_commands WHERE command_id=?').bind(id).first();
+  } catch (_e) {
+    return null;
+  }
+}
+
+function parseOrderCommandResult(row, fallback = null) {
+  if (!row || !row.result) return fallback;
+  const parsed = safeParseJson(row.result, fallback);
+  return parsed && typeof parsed === 'object' ? parsed : fallback;
+}
+
+async function enqueueOrderCommand(db, command) {
+  const env = toOrderCommandEnvelope(command);
+  const now = Date.now();
+  await db.prepare(`
+    INSERT INTO order_commands (
+      command_id,op_id,order_id,command_type,payload,status,result,error,attempts,lease_until,available_at,created_at,updated_at
+    ) VALUES (?,?,?,?,?,'pending',NULL,'',0,0,?,?,?)
+    ON CONFLICT(command_id) DO NOTHING
+  `).bind(
+    env.commandId,
+    env.opId,
+    env.orderId,
+    env.commandType,
+    JSON.stringify(env.payload || {}),
+    env.availableAt,
+    now,
+    now
+  ).run();
+  return await readOrderCommandRecord(db, env.commandId);
+}
+
+async function tryClaimOrderCommand(db, commandId, leaseMs = ORDER_COMMAND_LEASE_MS) {
+  const id = normalizeOpId(commandId);
+  if (!id) return null;
+  const now = Date.now();
+  const leaseUntil = now + Math.max(1000, Number(leaseMs) || ORDER_COMMAND_LEASE_MS);
+  const claimRes = await db.prepare(`
+    UPDATE order_commands
+    SET status='processing',
+        attempts=attempts+1,
+        lease_until=?,
+        updated_at=?
+    WHERE command_id=?
+      AND available_at<=?
+      AND (
+        status IN ('pending','retry')
+        OR (status='processing' AND lease_until<=?)
+      )
+  `).bind(leaseUntil, now, id, now, now).run();
+  const changed = Number(claimRes && claimRes.meta && claimRes.meta.changes) || 0;
+  if (!changed) return null;
+  return await readOrderCommandRecord(db, id);
+}
+
+async function completeOrderCommand(db, commandId, result, status = 'applied', errorText = '') {
+  const id = normalizeOpId(commandId);
+  if (!id) return null;
+  const now = Date.now();
+  await db.prepare(`
+    UPDATE order_commands
+    SET status=?,
+        result=?,
+        error=?,
+        lease_until=0,
+        updated_at=?
+    WHERE command_id=?
+  `).bind(
+    status,
+    JSON.stringify(result && typeof result === 'object' ? result : {}),
+    String(errorText || '').slice(0, 800),
+    now,
+    id
+  ).run();
+  return await readOrderCommandRecord(db, id);
+}
+
+async function retryOrFailOrderCommand(db, row, err) {
+  const now = Date.now();
+  const id = normalizeOpId(row && row.command_id);
+  if (!id) return null;
+  const attempts = Math.max(1, Number(row && row.attempts) || 1);
+  const message = String(err && err.message ? err.message : err || 'unknown_error').slice(0, 800);
+  const retryable = isRetryableD1Error(err) && attempts < ORDER_COMMAND_MAX_RETRIES;
+  if (!retryable) {
+    await db.prepare(`
+      UPDATE order_commands
+      SET status='failed',
+          error=?,
+          result=?,
+          lease_until=0,
+          updated_at=?
+      WHERE command_id=?
+    `).bind(
+      message,
+      JSON.stringify({ ok: false, error: 'command_failed', detail: message }),
+      now,
+      id
+    ).run();
+    return await readOrderCommandRecord(db, id);
+  }
+  const delayMs = getOrderCommandRetryDelayMs(attempts);
+  await db.prepare(`
+    UPDATE order_commands
+    SET status='retry',
+        error=?,
+        lease_until=0,
+        available_at=?,
+        updated_at=?
+    WHERE command_id=?
+  `).bind(message, now + delayMs, now, id).run();
+  return await readOrderCommandRecord(db, id);
+}
+
+async function executeClaimedOrderCommand(db, row, authContext = null) {
+  const commandType = String(row && row.command_type || '').trim().toLowerCase();
+  const commandId = normalizeOpId(row && row.command_id);
+  try {
+    const payload = safeParseJson(row && row.payload, {});
+    let result = null;
+    if (commandType === 'upsert') {
+      result = await applyOrderUpsertMutation(db, payload, authContext);
+    } else if (commandType === 'delete') {
+      result = await applyOrderDeleteMutation(db, payload, authContext);
+    } else {
+      result = { ok: false, error: 'unsupported_command_type', commandType };
+    }
+    const normalizedResult = result && typeof result === 'object' ? result : { ok: false, error: 'invalid_command_result' };
+    const finalStatus = normalizedResult.ok === true ? 'applied' : 'failed';
+    await completeOrderCommand(db, commandId, normalizedResult, finalStatus, normalizedResult.error || '');
+    return normalizedResult;
+  } catch (err) {
+    await retryOrFailOrderCommand(db, row, err);
+    return { ok: false, error: 'command_retry_scheduled', retryable: isRetryableD1Error(err) };
+  }
+}
+
+async function drainOrderCommandQueue(db, authContext = null, opts = {}) {
+  const limit = Math.max(1, Math.min(30, Number(opts.limit) || ORDER_COMMAND_DRAIN_LIMIT));
+  let processed = 0;
+  for (let i = 0; i < limit; i++) {
+    const now = Date.now();
+    const next = await db.prepare(`
+      SELECT * FROM order_commands
+      WHERE available_at<=?
+        AND (
+          status IN ('pending','retry')
+          OR (status='processing' AND lease_until<=?)
+        )
+      ORDER BY available_at ASC, created_at ASC
+      LIMIT 1
+    `).bind(now, now).first();
+    if (!next) break;
+    const claimed = await tryClaimOrderCommand(db, next.command_id, ORDER_COMMAND_LEASE_MS);
+    if (!claimed) continue;
+    await executeClaimedOrderCommand(db, claimed, authContext);
+    processed++;
+  }
+  if (processed) {
+    await maybePruneOrderCommands(db);
+  }
+  return processed;
+}
+
+async function processOrderCommandById(db, commandId, authContext = null, opts = {}) {
+  const id = normalizeOpId(commandId);
+  if (!id) return { ok: false, error: 'command_id_missing' };
+  const startedAt = Date.now();
+  const timeoutMs = Math.max(500, Math.min(15_000, Number(opts.timeoutMs) || ORDER_COMMAND_WAIT_TIMEOUT_MS));
+  while ((Date.now() - startedAt) < timeoutMs) {
+    const current = await readOrderCommandRecord(db, id);
+    if (!current) return { ok: false, error: 'command_not_found', commandId: id };
+    const status = String(current.status || '').trim().toLowerCase();
+    if (status === 'applied' || status === 'failed') {
+      return parseOrderCommandResult(current, { ok: status === 'applied', error: current.error || '' }) || { ok: status === 'applied' };
+    }
+    const claimed = await tryClaimOrderCommand(db, id, ORDER_COMMAND_LEASE_MS);
+    if (claimed) {
+      await executeClaimedOrderCommand(db, claimed, authContext);
+      continue;
+    }
+    await waitMs(ORDER_COMMAND_WAIT_STEP_MS);
+  }
+  return { ok: false, error: 'command_timeout', commandId: id };
 }
 
 function parseOrderMutationPayload(payload) {
@@ -948,6 +1197,7 @@ export default {
       if (path === '/api/orders' && method === 'GET') {
         const sinceTs = Math.max(0, Number(url.searchParams.get('sinceTs')) || 0);
         const sinceV = Math.max(0, Number(url.searchParams.get('sinceV')) || 0);
+        await drainOrderCommandQueue(db, authContext, { limit: 6 });
         return await getOrders(db, authContext, { sinceTs, sinceV });
       }
       if ((path === '/api/backup/import' || path === '/api/orders/bulk') && method === 'POST') {
@@ -967,130 +1217,7 @@ export default {
         if (!id) return json({ error: 'id missing' }, 400);
         let req = {};
         try { req = await request.json(); } catch { req = {}; }
-        const nowTs = Date.now();
-        const requestedDeletedAt = Number(req && req.deletedAt) || nowTs;
-        const requestedV = Number(req && req.v) || 0;
-        const requestedOpId = String(req && req.opId || '').trim() || (`del_${id}_${requestedV || 0}_${requestedDeletedAt}`);
-
-        await ensureOrderTables(db);
-        const knownOp = await readOrderOpRecord(db, requestedOpId);
-        if (knownOp) {
-          const cached = safeParseJson(knownOp.response, null);
-          if (cached && typeof cached === 'object') {
-            return json({ ...cached, idempotent: true });
-          }
-        }
-
-        const prevOrder = await readOrderFromTable(db, id);
-        const prevV = Number(prevOrder && prevOrder.v) || 0;
-        const prevTs = Number(prevOrder && (prevOrder.updatedAt || prevOrder.ts)) || 0;
-        const prevDeleted = !!(prevOrder && prevOrder.deletedAt);
-
-        const nextV = Math.max(1, requestedV, prevV + 1);
-        const deletedAt = Math.max(requestedDeletedAt, prevTs, nowTs);
-
-        // Idempotency/stale protection: keep the freshest tombstone.
-        if (prevDeleted && (prevV > nextV || (prevV === nextV && prevTs >= deletedAt))) {
-          const staleResponse = {
-            ok: true,
-            staleIgnored: true,
-            ackV: prevV,
-            deletedAt: prevTs,
-            conflict: { type: 'stale_delete', serverV: prevV, serverTs: prevTs }
-          };
-          await storeOrderOpRecord(db, {
-            opId: requestedOpId,
-            orderId: id,
-            opType: 'delete',
-            reqV: nextV,
-            reqTs: deletedAt,
-            ackV: prevV || nextV,
-            status: 'stale',
-            response: staleResponse
-          });
-          await recordOrderAuditEvent(db, 'order_delete_stale', id, {
-            opId: requestedOpId,
-            reqV: nextV,
-            reqTs: deletedAt,
-            serverV: prevV,
-            serverTs: prevTs
-          }, authContext);
-          return json(staleResponse);
-        }
-
-        const tombstone = {
-          id,
-          status: 'Deleted',
-          deletedAt,
-          updatedAt: deletedAt,
-          ts: deletedAt,
-          v: nextV,
-          opId: requestedOpId,
-          lastOpId: requestedOpId,
-          products: []
-        };
-        const writeRes = await db.prepare(`
-          INSERT INTO orders (id,ts,data) VALUES (?,?,?)
-          ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts
-          WHERE
-            COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) < ?
-            OR (
-              COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) = ?
-              AND COALESCE(
-                CAST(json_extract(orders.data,'$.updatedAt') AS INTEGER),
-                COALESCE(CAST(json_extract(orders.data,'$.ts') AS INTEGER),0)
-              ) <= ?
-            )
-        `).bind(id, deletedAt, JSON.stringify(tombstone), nextV, nextV, deletedAt).run();
-        const changed = Number(writeRes && writeRes.meta && writeRes.meta.changes) || 0;
-        if (!changed) {
-          const latest = await readOrderFromTable(db, id);
-          const latestV = Number(latest && latest.v) || prevV || nextV;
-          const latestTs = Number(latest && (latest.updatedAt || latest.ts)) || deletedAt;
-          const staleResponse = {
-            ok: true,
-            staleIgnored: true,
-            ackV: latestV,
-            deletedAt: latestTs,
-            conflict: { type: 'concurrent_delete_conflict', serverV: latestV, serverTs: latestTs }
-          };
-          await storeOrderOpRecord(db, {
-            opId: requestedOpId,
-            orderId: id,
-            opType: 'delete',
-            reqV: nextV,
-            reqTs: deletedAt,
-            ackV: latestV,
-            status: 'stale',
-            response: staleResponse
-          });
-          await recordOrderAuditEvent(db, 'order_delete_conflict', id, {
-            opId: requestedOpId,
-            reqV: nextV,
-            reqTs: deletedAt,
-            serverV: latestV,
-            serverTs: latestTs
-          }, authContext);
-          return json(staleResponse);
-        }
-        const successResponse = { ok: true, deletedAt, ackV: nextV };
-        await storeOrderOpRecord(db, {
-          opId: requestedOpId,
-          orderId: id,
-          opType: 'delete',
-          reqV: nextV,
-          reqTs: deletedAt,
-          ackV: nextV,
-          status: 'applied',
-          response: successResponse
-        });
-        await recordOrderAuditEvent(db, 'order_tombstone_applied', id, {
-          opId: requestedOpId,
-          ackV: nextV,
-          deletedAt
-        }, authContext);
-        await maybePruneOrderOps(db);
-        return json(successResponse);
+        return await saveOrderDelete(db, id, req, authContext);
       }
 
       // Images
@@ -1144,6 +1271,13 @@ export default {
           FROM order_ops
           WHERE status!='applied'
         `).first();
+        const commandQueue = await db.prepare(`
+          SELECT
+            COUNT(*) AS pending_count,
+            MIN(created_at) AS oldest_created_at
+          FROM order_commands
+          WHERE status IN ('pending','retry','processing')
+        `).first();
         const lastAudit = await db.prepare(`
           SELECT event_type,order_id,actor_role,created_at
           FROM order_audit_events
@@ -1167,6 +1301,10 @@ export default {
           outbox: {
             pending: Number(outbox && outbox.pending_count) || 0,
             oldestCreatedAt: Number(outbox && outbox.oldest_created_at) || 0
+          },
+          commandQueue: {
+            pending: Number(commandQueue && commandQueue.pending_count) || 0,
+            oldestCreatedAt: Number(commandQueue && commandQueue.oldest_created_at) || 0
           },
           audit: lastAudit || null
         });
@@ -1678,10 +1816,51 @@ async function getOrders(db, authContext = null, opts = {}) {
   }
 }
 
-async function saveOrder(db, payload, authContext = null) {
-  const startedAt = Date.now();
-  await ensureOrderTables(db);
+function buildDeleteCommandPayload(id, req = {}) {
+  const nowTs = Date.now();
+  const requestedDeletedAt = Number(req && req.deletedAt) || nowTs;
+  const requestedV = Number(req && req.v) || 0;
+  const requestedOpId = normalizeOpId(req && req.opId, `del_${id}_${requestedV || 0}_${requestedDeletedAt}`);
+  return {
+    id: String(id || '').trim(),
+    deletedAt: requestedDeletedAt,
+    v: requestedV,
+    opId: requestedOpId
+  };
+}
 
+async function saveOrderDelete(db, id, req, authContext = null) {
+  await ensureOrderTables(db);
+  const payload = buildDeleteCommandPayload(id, req);
+  if (!payload.id) return json({ error: 'id missing' }, 400);
+
+  const knownOp = await readOrderOpRecord(db, payload.opId);
+  if (knownOp) {
+    const cached = safeParseJson(knownOp.response, null);
+    if (cached && typeof cached === 'object') return json({ ...cached, idempotent: true });
+  }
+
+  await enqueueOrderCommand(db, {
+    commandId: payload.opId,
+    opId: payload.opId,
+    orderId: payload.id,
+    commandType: 'delete',
+    payload
+  });
+  const result = await processOrderCommandById(db, payload.opId, authContext);
+  if (!result || result.ok !== true) {
+    return json({
+      ok: false,
+      error: 'order_delete_failed',
+      queued: !!(result && result.error === 'command_timeout'),
+      detail: result && result.error ? result.error : 'command_failed'
+    }, 503);
+  }
+  return json(result);
+}
+
+async function saveOrder(db, payload, authContext = null) {
+  await ensureOrderTables(db);
   const parsed = parseOrderMutationPayload(payload);
   const rawOrder = parsed.order;
   const validationErr = validateOrderPayload(rawOrder);
@@ -1690,6 +1869,194 @@ async function saveOrder(db, payload, authContext = null) {
   const clean = sanitizeOrderForStorage(rawOrder);
   const id = String(clean && clean.id || '').trim();
   if (!id) return json({ error: 'order id missing' }, 400);
+
+  const requestedV = Math.max(0, Number(parsed.v) || Number(clean && clean.v) || 0);
+  const requestedTs = Number(parsed.ts || clean.updatedAt || clean.ts) || Date.now();
+  const opId = normalizeOpId(
+    parsed.opId || parsed.requestId || (clean && (clean.opId || clean.lastOpId)),
+    buildFallbackOpId('upsert', id, Math.max(1, requestedV || 1), requestedTs)
+  );
+  const knownOp = await readOrderOpRecord(db, opId);
+  if (knownOp) {
+    const cached = safeParseJson(knownOp.response, null);
+    if (cached && typeof cached === 'object') {
+      logWorker('info', 'order_upsert_idempotent_hit', { orderId: id, opId });
+      return json({ ...cached, idempotent: true });
+    }
+  }
+
+  await enqueueOrderCommand(db, {
+    commandId: opId,
+    opId,
+    orderId: id,
+    commandType: 'upsert',
+    payload: {
+      order: clean,
+      opId,
+      requestId: parsed.requestId || opId,
+      v: requestedV,
+      ts: requestedTs
+    }
+  });
+  const result = await processOrderCommandById(db, opId, authContext);
+  if (!result || result.ok !== true) {
+    return json({
+      ok: false,
+      error: 'order_upsert_failed',
+      queued: !!(result && result.error === 'command_timeout'),
+      detail: result && result.error ? result.error : 'command_failed'
+    }, 503);
+  }
+  return json(result);
+}
+
+async function applyOrderDeleteMutation(db, payload, authContext = null) {
+  await ensureOrderTables(db);
+  const id = String(payload && payload.id || '').trim();
+  if (!id) return { ok: false, error: 'id missing' };
+  const nowTs = Date.now();
+  const requestedDeletedAt = Number(payload && payload.deletedAt) || nowTs;
+  const requestedV = Number(payload && payload.v) || 0;
+  const requestedOpId = normalizeOpId(payload && payload.opId, `del_${id}_${requestedV || 0}_${requestedDeletedAt}`);
+
+  const knownOp = await readOrderOpRecord(db, requestedOpId);
+  if (knownOp) {
+    const cached = safeParseJson(knownOp.response, null);
+    if (cached && typeof cached === 'object') return { ...cached, idempotent: true };
+  }
+
+  const prevOrder = await withD1Retry(
+    () => readOrderFromTable(db, id),
+    { op: 'order_delete_prev_table', orderId: id, opId: requestedOpId }
+  );
+  const prevV = Number(prevOrder && prevOrder.v) || 0;
+  const prevTs = Number(prevOrder && (prevOrder.updatedAt || prevOrder.ts)) || 0;
+  const prevDeleted = !!(prevOrder && prevOrder.deletedAt);
+  const nextV = Math.max(1, requestedV, prevV + 1);
+  const deletedAt = Math.max(requestedDeletedAt, prevTs, nowTs);
+
+  if (prevDeleted && (prevV > nextV || (prevV === nextV && prevTs >= deletedAt))) {
+    const staleResponse = {
+      ok: true,
+      staleIgnored: true,
+      ackV: prevV,
+      deletedAt: prevTs,
+      conflict: { type: 'stale_delete', serverV: prevV, serverTs: prevTs }
+    };
+    await storeOrderOpRecord(db, {
+      opId: requestedOpId,
+      orderId: id,
+      opType: 'delete',
+      reqV: nextV,
+      reqTs: deletedAt,
+      ackV: prevV || nextV,
+      status: 'stale',
+      response: staleResponse
+    });
+    await recordOrderAuditEvent(db, 'order_delete_stale', id, {
+      opId: requestedOpId,
+      reqV: nextV,
+      reqTs: deletedAt,
+      serverV: prevV,
+      serverTs: prevTs
+    }, authContext);
+    return staleResponse;
+  }
+
+  const tombstone = {
+    id,
+    status: 'Deleted',
+    deletedAt,
+    updatedAt: deletedAt,
+    ts: deletedAt,
+    v: nextV,
+    opId: requestedOpId,
+    lastOpId: requestedOpId,
+    products: []
+  };
+  const writeRes = await withD1Retry(
+    () => db.prepare(`
+      INSERT INTO orders (id,ts,data) VALUES (?,?,?)
+      ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts
+      WHERE
+        COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) < ?
+        OR (
+          COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) = ?
+          AND COALESCE(
+            CAST(json_extract(orders.data,'$.updatedAt') AS INTEGER),
+            COALESCE(CAST(json_extract(orders.data,'$.ts') AS INTEGER),0)
+          ) <= ?
+        )
+    `).bind(id, deletedAt, JSON.stringify(tombstone), nextV, nextV, deletedAt).run(),
+    { op: 'order_delete_write', orderId: id, opId: requestedOpId }
+  );
+  const changed = Number(writeRes && writeRes.meta && writeRes.meta.changes) || 0;
+  if (!changed) {
+    const latest = await withD1Retry(
+      () => readOrderFromTable(db, id),
+      { op: 'order_delete_latest_table', orderId: id, opId: requestedOpId }
+    );
+    const latestV = Number(latest && latest.v) || prevV || nextV;
+    const latestTs = Number(latest && (latest.updatedAt || latest.ts)) || deletedAt;
+    const staleResponse = {
+      ok: true,
+      staleIgnored: true,
+      ackV: latestV,
+      deletedAt: latestTs,
+      conflict: { type: 'concurrent_delete_conflict', serverV: latestV, serverTs: latestTs }
+    };
+    await storeOrderOpRecord(db, {
+      opId: requestedOpId,
+      orderId: id,
+      opType: 'delete',
+      reqV: nextV,
+      reqTs: deletedAt,
+      ackV: latestV,
+      status: 'stale',
+      response: staleResponse
+    });
+    await recordOrderAuditEvent(db, 'order_delete_conflict', id, {
+      opId: requestedOpId,
+      reqV: nextV,
+      reqTs: deletedAt,
+      serverV: latestV,
+      serverTs: latestTs
+    }, authContext);
+    return staleResponse;
+  }
+
+  const successResponse = { ok: true, deletedAt, ackV: nextV };
+  await storeOrderOpRecord(db, {
+    opId: requestedOpId,
+    orderId: id,
+    opType: 'delete',
+    reqV: nextV,
+    reqTs: deletedAt,
+    ackV: nextV,
+    status: 'applied',
+    response: successResponse
+  });
+  await recordOrderAuditEvent(db, 'order_tombstone_applied', id, {
+    opId: requestedOpId,
+    ackV: nextV,
+    deletedAt
+  }, authContext);
+  await maybePruneOrderOps(db);
+  await maybePruneOrderCommands(db);
+  return successResponse;
+}
+
+async function applyOrderUpsertMutation(db, payload, authContext = null) {
+  const startedAt = Date.now();
+  await ensureOrderTables(db);
+  const parsed = parseOrderMutationPayload(payload);
+  const rawOrder = parsed.order;
+  const validationErr = validateOrderPayload(rawOrder);
+  if (validationErr) return { ok: false, error: validationErr };
+
+  const clean = sanitizeOrderForStorage(rawOrder);
+  const id = String(clean && clean.id || '').trim();
+  if (!id) return { ok: false, error: 'order id missing' };
 
   const prev = await withD1Retry(
     () => readOrderFromTable(db, id),
@@ -1713,7 +2080,7 @@ async function saveOrder(db, payload, authContext = null) {
     const cached = safeParseJson(knownOp.response, null);
     if (cached && typeof cached === 'object') {
       logWorker('info', 'order_upsert_idempotent_hit', { orderId: id, opId });
-      return json({ ...cached, idempotent: true });
+      return { ...cached, idempotent: true };
     }
   }
 
@@ -1748,7 +2115,7 @@ async function saveOrder(db, payload, authContext = null) {
       prevTs
     }, authContext);
     logWorker('warn', 'order_upsert_stale', { orderId: id, opId, incomingV, prevV, incomingTs, prevTs });
-    return json(staleResponse);
+    return staleResponse;
   }
 
   const nextOrder = {
@@ -1816,7 +2183,7 @@ async function saveOrder(db, payload, authContext = null) {
       latestTs
     }, authContext);
     logWorker('warn', 'order_upsert_conflict', { orderId: id, opId, incomingV, latestV, incomingTs, latestTs });
-    return json(conflictResponse);
+    return conflictResponse;
   }
 
   const successResponse = { ok: true, ackV: incomingV, opId };
@@ -1837,13 +2204,14 @@ async function saveOrder(db, payload, authContext = null) {
     status: nextOrder.status || ''
   }, authContext);
   await maybePruneOrderOps(db);
+  await maybePruneOrderCommands(db);
   logWorker('info', 'order_upsert_applied', {
     orderId: id,
     opId,
     ackV: incomingV,
     latencyMs: Date.now() - startedAt
   });
-  return json(successResponse);
+  return successResponse;
 }
 
 async function saveOrderEvent(db, event, authContext = null) {
