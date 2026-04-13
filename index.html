@@ -2393,7 +2393,7 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }catch(_e){
     localCount=Math.max(localCount,0);
   }
-  const hasPendingLocalMutations=getActiveLocalOrderMutationIds().length>0;
+  const hasPendingLocalMutations=hasActiveUpsertOrderMutation();
   if(remoteCount>0){
     // If we have pending local writes, reject any snapshot shrink to avoid dropping
     // newly-created orders that have not been acknowledged yet.
@@ -2759,6 +2759,7 @@ async function login(){
         }
         // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         if(cloudOrders.length){
+          ackLocalMutationsFromIncoming(cloudOrders);
           const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
             return {
@@ -3018,11 +3019,11 @@ async function navOrders(status,el){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
             if(shouldAcceptRemoteOrders(od.orders)){
+              ackLocalMutationsFromIncoming(od.orders);
               const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
               orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
               persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
               updateBadges();
-              loaded=true;
             }else{
               // Guard: ignore empty/partial remote snapshot when local has data.
               console.warn('[Pending] Ignoring remote orders snapshot to protect local data');
@@ -8273,6 +8274,7 @@ async function loadFromCloudSilent(){
       // Guard: do not let empty remote snapshots wipe existing local orders.
       return false;
     }
+    ackLocalMutationsFromIncoming(cloudOrders);
 
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
     const merged=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'silent',pruneMissing:true});
@@ -8367,6 +8369,7 @@ async function loadFromCloud(){
             console.warn('[Remote] Ignoring remote orders snapshot to protect local data');
             return false;
           }
+          ackLocalMutationsFromIncoming(cloudOrders);
         } else {
           // Deterministic behavior: never ingest jb_orders from /api/data fallback.
           return false;
@@ -8467,8 +8470,8 @@ const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
-const LOCAL_ORDER_MUTATION_KEEP_MS=90*1000;
-const LOCAL_ORDER_CONVERGENCE_GRACE_MS=90*1000;
+const LOCAL_ORDER_MUTATION_KEEP_MS=6*60*60*1000;
+const LOCAL_ORDER_CONVERGENCE_GRACE_MS=20*60*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
 const LOCAL_DATA_META_KEY='jb_data_meta';
 const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
@@ -8583,6 +8586,21 @@ function getPendingFallbackOrderIds(){
   });
   return ids;
 }
+function hasActiveUpsertOrderMutation(){
+  const map=cleanupLocalOrderMutations();
+  const hasLocalUpsert=Object.keys(map).some(function(id){
+    const row=map[id]||{};
+    return String(row.type||'upsert')!=='delete';
+  });
+  if(hasLocalUpsert) return true;
+  const fallback=readLocalSyncFallback();
+  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+    ? fallback.jb_order_ops.value
+    : [];
+  return pendingOps.some(function(op){
+    return String(op&&op.op||'upsert')!=='delete';
+  });
+}
 function getActiveLocalOrderMutationIds(){
   const map=cleanupLocalOrderMutations();
   const ids=new Set(Object.keys(map));
@@ -8620,10 +8638,7 @@ function hasActiveLocalOrderMutation(orderId,pendingFallbackIds){
   const map=cleanupLocalOrderMutations();
   const row=map[id];
   if(!row) return pendingIds.has(id);
-  const ts=Number(row.ts)||0;
-  const age=Date.now()-ts;
-  if(age<Math.min(LOCAL_ORDER_MUTATION_KEEP_MS,LOCAL_ORDER_CONVERGENCE_GRACE_MS)) return true;
-  return pendingIds.has(id);
+  return true;
 }
 function readLocalDataMutations(){
   try{
@@ -11747,6 +11762,7 @@ async function startPendingPoll(){
         return;
       }
       if(Array.isArray(newOrders)){
+        ackLocalMutationsFromIncoming(newOrders);
         if(me.role==='Reseller'){
           // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
           const prevOrders=Array.isArray(orders)?orders:[];
@@ -15644,7 +15660,9 @@ async function saveOrders(changedOrderIds,opts={}){
           });
           queueOrderEventFallback(event);
         }else{
-          clearLocalOrderMutation(live.id);
+          // Do not clear mutation immediately on 200 OK.
+          // Keep protection active until an authoritative /api/orders read contains this op/version.
+          markLocalOrderMutation(live.id,'upsert',{opId,v});
         }
       }catch(_e){
         queuedFallback=true;
