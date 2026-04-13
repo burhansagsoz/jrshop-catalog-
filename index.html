@@ -8260,9 +8260,9 @@ async function loadFromCloudSilent(){
       applyRemoteKeyToLocal(key,data[key],'load_silent');
     }
 
-    // Otoriter sipariş snapshot'u: realtime kapalı olsa bile cihazlar tutarlı olsun.
-    const incrementalOrdersUrl=appendIncrementalCursorToApiUrl(api+'/api/orders');
-    const ordRes=await fetch(incrementalOrdersUrl,{headers:getAuthHeaders()});
+    // Otoriter sipariş snapshot'u: bu yol mutlaka tam liste çekmeli.
+    // Incremental cursor burada stale/eksik görünüm üretip local state'i geri düşürebilir.
+    const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
     const ordPayload=await ordRes.json();
     const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
@@ -8349,9 +8349,9 @@ async function loadFromCloud(){
           }
           applyRemoteKeyToLocal(k,data[k],'load_aux');
         });
-        // Load orders from dedicated endpoint (individual rows — no size limit)
-        const incrementalOrdersUrl=appendIncrementalCursorToApiUrl(api+'/api/orders');
-        const ordRes=await fetch(incrementalOrdersUrl,{headers:getAuthHeaders()});
+        // Load full authoritative order list. Incremental cursor is intentionally
+        // avoided here to prevent stale merges that can roll back recent edits.
+        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
         let cloudOrders=[];
         if(ordRes.ok){
           const od=await ordRes.json();
@@ -15624,6 +15624,11 @@ async function saveOrders(changedOrderIds,opts={}){
         }
         if(_payload&&_payload.staleIgnored){
           clearLocalOrderMutation(live.id);
+          // Server says local write was stale: immediately refetch authoritative state
+          // to prevent UI from sticking to a reverted local snapshot.
+          if(_payload&&_payload.shouldRefetch){
+            await loadFromCloudSilent().catch(()=>{});
+          }
           continue;
         }
         if(!_sr.ok || (_payload&&_payload.localOnly)){
@@ -15673,6 +15678,9 @@ async function saveOrders(changedOrderIds,opts={}){
         try{_payload=await _dr.json();}catch(_e){_payload={};}
         if(_payload&&_payload.staleIgnored){
           clearLocalOrderMutation(deletedId);
+          if(_payload&&_payload.shouldRefetch){
+            await loadFromCloudSilent().catch(()=>{});
+          }
           continue;
         }
         if(!_dr.ok || (_payload&&_payload.localOnly)){
