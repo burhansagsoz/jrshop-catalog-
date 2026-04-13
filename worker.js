@@ -347,6 +347,109 @@ async function listOrderCommandDeadLetters(db, limit = 50) {
     .filter((item) => item && typeof item === 'object');
 }
 
+async function getOrderCommandDeadLetterById(db, commandId) {
+  const id = normalizeOpId(commandId);
+  if (!id) return null;
+  const row = await db.prepare('SELECT value FROM kv_store WHERE key=?')
+    .bind(`order_deadletter:${id}`)
+    .first();
+  const parsed = safeParseJson(row && row.value, null);
+  return parsed && typeof parsed === 'object' ? parsed : null;
+}
+
+async function removeOrderCommandDeadLetterById(db, commandId) {
+  const id = normalizeOpId(commandId);
+  if (!id) return;
+  await db.prepare('DELETE FROM kv_store WHERE key=?').bind(`order_deadletter:${id}`).run();
+}
+
+async function redriveOrderCommandById(db, commandId, authContext = null, opts = {}) {
+  await ensureOrderTables(db);
+  const id = normalizeOpId(commandId);
+  if (!id) return { ok: false, error: 'command_id_missing' };
+  const now = Date.now();
+  const delayMs = Math.max(0, Math.min(60_000, Number(opts.delayMs) || 0));
+
+  const existing = await readOrderCommandRecord(db, id);
+  if (existing) {
+    const status = String(existing.status || '').trim().toLowerCase();
+    if (status === 'applied') {
+      await removeOrderCommandDeadLetterById(db, id);
+      return { ok: true, skipped: true, reason: 'already_applied', commandId: id };
+    }
+    if (status === 'pending' || status === 'retry' || status === 'processing') {
+      return { ok: true, skipped: true, reason: 'already_queued', commandId: id };
+    }
+    if (status === 'failed') {
+      await db.prepare(`
+        UPDATE order_commands
+        SET status='retry',
+            error='',
+            lease_until=0,
+            available_at=?,
+            updated_at=?,
+            attempts=0
+        WHERE command_id=?
+      `).bind(now + delayMs, now, id).run();
+      await removeOrderCommandDeadLetterById(db, id);
+      await recordOrderAuditEvent(db, 'order_command_redriven', String(existing.order_id || 'unknown'), {
+        commandId: id,
+        opId: String(existing.op_id || ''),
+        delayMs
+      }, authContext);
+      return { ok: true, redriven: true, commandId: id, source: 'failed_command' };
+    }
+  }
+
+  const deadLetter = await getOrderCommandDeadLetterById(db, id);
+  if (!deadLetter) return { ok: false, error: 'deadletter_not_found', commandId: id };
+
+  const payload = deadLetter.payload && typeof deadLetter.payload === 'object' ? deadLetter.payload : {};
+  const commandType = String(deadLetter.commandType || '').trim().toLowerCase();
+  if (!payload || !commandType) {
+    return { ok: false, error: 'deadletter_invalid', commandId: id };
+  }
+  const redriveCommandId = normalizeOpId(`redrive:${id}:${now.toString(36)}`, `redrive_${now}`);
+  await enqueueOrderCommand(db, {
+    commandId: redriveCommandId,
+    opId: normalizeOpId(deadLetter.opId || deadLetter.commandId || redriveCommandId),
+    orderId: String(deadLetter.orderId || ''),
+    commandType,
+    availableAt: now + delayMs,
+    payload
+  });
+  await removeOrderCommandDeadLetterById(db, id);
+  await recordOrderAuditEvent(db, 'order_command_redriven', String(deadLetter.orderId || 'unknown'), {
+    commandId: redriveCommandId,
+    fromDeadLetterCommandId: id,
+    opId: String(deadLetter.opId || ''),
+    delayMs
+  }, authContext);
+  return { ok: true, redriven: true, commandId: redriveCommandId, source: 'deadletter' };
+}
+
+async function redriveOrderCommandsBulk(db, commandIds, authContext = null, opts = {}) {
+  const requested = Array.isArray(commandIds) ? commandIds : [];
+  const normalized = requested
+    .map((id) => normalizeOpId(id))
+    .filter(Boolean);
+  const unique = [...new Set(normalized)];
+  const maxItems = Math.max(1, Math.min(200, Number(opts.maxItems) || 100));
+  const targetIds = unique.slice(0, maxItems);
+  const results = [];
+  for (const id of targetIds) {
+    const res = await redriveOrderCommandById(db, id, authContext, opts);
+    results.push({ commandId: id, ...res });
+  }
+  const summary = results.reduce((acc, row) => {
+    if (row && row.redriven) acc.redriven += 1;
+    else if (row && row.skipped) acc.skipped += 1;
+    else acc.failed += 1;
+    return acc;
+  }, { requested: requested.length, processed: results.length, redriven: 0, skipped: 0, failed: 0 });
+  return { ...summary, results };
+}
+
 async function enqueueOrderCommand(db, command) {
   const env = toOrderCommandEnvelope(command);
   const now = Date.now();
@@ -659,6 +762,9 @@ function getRequiredRolesForRoute(path, method) {
   if (path === '/api/ops/health' && m === 'GET') return ['Admin'];
   if (path === '/api/backup' && m === 'GET') return ['Admin'];
   if (path === '/api/backup/import' && m === 'POST') return ['Admin'];
+  if (path.startsWith('/api/order-command/') && m === 'POST') return ['Admin'];
+  if (path === '/api/order-deadletters/requeue' && m === 'POST') return ['Admin'];
+  if (path === '/api/order-deadletters/clear' && m === 'POST') return ['Admin'];
   if (path.startsWith('/api/logistics/') && m !== 'GET') return ['Admin', 'Staff'];
   if (path === '/api/push/send' && m === 'POST') return ['Admin', 'Staff'];
   if (path === '/api/catalog-page' && m === 'POST') return ['Admin', 'Staff'];
@@ -1302,6 +1408,30 @@ export default {
         const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
         const deadletters = await listOrderCommandDeadLetters(db, limit);
         return json({ ok: true, count: deadletters.length, deadletters });
+      }
+      if (path.startsWith('/api/order-command/') && method === 'POST') {
+        const commandId = decodeURIComponent(path.split('/').pop() || '').trim();
+        if (!commandId) return json({ error: 'command_id missing' }, 400);
+        const body = await request.json().catch(() => ({}));
+        const delayMs = Math.max(0, Math.min(60_000, Number(body && body.delayMs) || 0));
+        const result = await redriveOrderCommandById(db, commandId, authContext, { delayMs });
+        return json(result, result && result.ok ? 200 : 400);
+      }
+      if (path === '/api/order-deadletters/requeue' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const commandIds = Array.isArray(body && body.commandIds) ? body.commandIds : [];
+        const delayMs = Math.max(0, Math.min(60_000, Number(body && body.delayMs) || 0));
+        const result = await redriveOrderCommandsBulk(db, commandIds, authContext, { delayMs, maxItems: 200 });
+        return json({ ok: true, ...result });
+      }
+      if (path === '/api/order-deadletters/clear' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const commandIds = Array.isArray(body && body.commandIds) ? body.commandIds : [];
+        const normalized = [...new Set(commandIds.map((id) => normalizeOpId(id)).filter(Boolean))];
+        for (const id of normalized) {
+          await removeOrderCommandDeadLetterById(db, id);
+        }
+        return json({ ok: true, cleared: normalized.length });
       }
       if ((path === '/api/backup/import' || path === '/api/orders/bulk') && method === 'POST') {
         const body = await request.json();
