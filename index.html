@@ -2462,15 +2462,8 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }
 }
 function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
-  // In Cloudflare mode, /api/orders is the only authoritative source for orders.
-  // /api/data may contain stale jb_orders snapshots and can reintroduce old states
-  // such as pendingApproval after approve/reject actions.
-  if(!getFirebaseEnabled()) return false;
-  const remoteCount=Array.isArray(fallbackOrders)?fallbackOrders.length:0;
-  const localCount=Array.isArray(localOrders)?localOrders.length:0;
-  if(remoteCount<=0) return false;
-  if(localCount===0) return true;
-  if(localCount<30 && remoteCount>=localCount) return true;
+  // Cloudflare /api/orders is the only authoritative source for orders.
+  // Do not fallback to jb_orders snapshots from /api/data.
   return false;
 }
 function persistOrdersState(nextOrders){
@@ -7577,7 +7570,6 @@ let _apiBaseCheckedAt=0;
 const API_BASE_CHECK_COOLDOWN_MS=60*1000;
 function getApiBase(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
-  if(getFirebaseEnabled()) return location.origin;
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
   return CLOUD_API_DEFAULT;
 }
@@ -8485,7 +8477,6 @@ async function recoverOrdersNow(){
   }
 }
 function saveFirebaseSettings(){
-  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
   stopFirebaseRealtime();
   toast('ℹ️ Cloudflare backend modu aktif (Firebase kapalı).','info');
 }
@@ -8505,7 +8496,6 @@ const FIREBASE_CONFIG_DEFAULT={
   measurementId:"G-B1RG9Z0D79"
 };
 const FIREBASE_CONFIG_KEY='jb_firebase_config';
-const FIREBASE_ENABLED_KEY='jb_firebase_enabled';
 const FIREBASE_COLLECTION_ORDERS='orders';
 const FIREBASE_COLLECTION_DATA='app_data';
 const FIREBASE_COLLECTION_MEDIA='media';
@@ -8517,7 +8507,6 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
-const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=6*60*60*1000;
@@ -8553,7 +8542,6 @@ let _firebaseAuthNeedsFreshLogin=(function(){
 })();
 let _lastFirebasePermissionLockAt=0;
 let _ordersBulkPushInFlight=false;
-const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
@@ -8585,13 +8573,6 @@ const _nativeFetch=window.fetch.bind(window);
 function ensureFirebaseConfigDefaults(){
   if(!localStorage.getItem(FIREBASE_CONFIG_KEY)){
     localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(FIREBASE_CONFIG_DEFAULT));
-  }
-  if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
-    localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
-  }
-  // Signed-in transport auth only (no anonymous fallback).
-  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
-    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'1');
   }
 }
 ensureFirebaseConfigDefaults();
@@ -9533,7 +9514,7 @@ function clearFirebaseAuthRetryGuards(){
 }
 
 function getFirebaseLoginCreds(){
-  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH || !me || _firebaseAuthNeedsFreshLogin) return null;
+  if(!me || _firebaseAuthNeedsFreshLogin) return null;
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   if(!isValidAuthEmail(meEmail)) return null;
   const mePw=me&&me.password?String(me.password):'';
@@ -9653,7 +9634,7 @@ async function ensureFirebaseOnlineAuth(opts={}){
     _health.authState='waiting_login';
     return null;
   }
-  const creds=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseLoginCreds():null;
+  const creds=getFirebaseLoginCreds();
   if(!creds||!creds.email||!creds.password){
     _health.authState='waiting_login';
     return null;
@@ -11786,12 +11767,8 @@ let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
 async function startPendingPoll(){
-  if(getFirebaseEnabled() && _health.ordersRealtime){
-    if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}
-    return;
-  }
   if(_pendingPollInterval)clearInterval(_pendingPollInterval);
-  const pendingMs=(getFirebaseEnabled()&&_health.ordersRealtime)?30000:CLOUD_FAST_SYNC_MS;
+  const pendingMs=CLOUD_FAST_SYNC_MS;
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
     try{
@@ -11958,7 +11935,7 @@ async function startResellerChatRealtime(){
 // Start global poll when admin logs in - checks all reseller chats
 function startGlobalChatPoll(){
   if(_globalChatPoll) clearInterval(_globalChatPoll);
-  const pollMs=getFirebaseEnabled()?1200:5000;
+  const pollMs=5000;
   _globalChatPoll = setInterval(pollAllChats, pollMs);
   pollAllChats(); // immediate first check
 }
@@ -12165,7 +12142,7 @@ async function openChatWith(resellerId){
   });
   // Start polling
   if(_chatPollInterval) clearInterval(_chatPollInterval);
-  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?12000:5000);
+  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, 5000);
   document.getElementById('chat-input')?.focus();
 }
 
@@ -12273,8 +12250,7 @@ let _lastResUnreadCount = 0;
 
 function startResellerMessagePoll(){
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
-  // Keep unread badge updated even when Firebase mode is enabled.
-  const pollMs=getFirebaseEnabled()?3000:5000;
+  const pollMs=5000;
   _resMsgPollInterval = setInterval(checkResellerUnreadMessages, pollMs);
   checkResellerUnreadMessages(); // Initial check
 }
@@ -12341,8 +12317,7 @@ function openResellerChat(){
   startResellerChatRealtime().catch(()=>{});
   loadResellerMessages();
   if(_resChatInterval) clearInterval(_resChatInterval);
-  // Keep a lightweight fallback poll only.
-  _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?2500:2000);
+  _resChatInterval = setInterval(loadResellerMessages, 2000);
   // Clear unread badges when chat opened
   const badge = document.getElementById('res-chat-badge');
   if(badge) badge.style.display = 'none';
@@ -12733,9 +12708,6 @@ function initOfflineIndicator(){
     try{
       await ensureWorkingApiBase({silent:true,force:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
-      if(getFirebaseEnabled()){
-        await initFirebaseRealtime({silent:true,force:true});
-      }
       await loadFromCloudSilent().catch(()=>{});
       await loadFromCloud().catch(()=>{});
     }finally{
@@ -12775,16 +12747,12 @@ function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
   warmFirebaseConnect();
   
-  const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:CLOUD_FAST_SYNC_MS;
-  // Sync interval adapts when realtime is active.
+  const syncMs=CLOUD_FAST_SYNC_MS;
   _autoSyncInterval = setInterval(async() => {
     if(me && navigator.onLine){
       await ensureWorkingApiBase({silent:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
       await runSilentLoadWithLock().catch(()=>{});
-      if(isFirebaseEnabled()){
-        initFirebaseRealtime({silent:true}).catch(()=>{});
-      }
     }
   }, syncMs);
   
