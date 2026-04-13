@@ -2640,7 +2640,7 @@ function mergeChatMessages(localArr,remoteArr){
   // Keep chronological chat order for renderer consistency.
   return merged.sort((a,b)=>(a&&a.ts||0)-(b&&b.ts||0));
 }
-function normalizeChatMessage(msg,chatKey){
+function normalizeChatMessageForStore(msg,chatKey){
   const key=String(chatKey||'');
   const baseTs=Number(msg&&msg.ts)||Date.now();
   const id=(msg&&msg.id)?String(msg.id):('m'+baseTs.toString(36)+Math.random().toString(36).slice(2,7));
@@ -2667,7 +2667,7 @@ function normalizeChatMessage(msg,chatKey){
 }
 function normalizeChatMessages(list,chatKey){
   const arr=Array.isArray(list)?list:[];
-  return arr.map(function(m){return normalizeChatMessage(m,chatKey);});
+  return arr.map(function(m){return normalizeChatMessageForStore(m,chatKey);});
 }
 function mergeKeyWithLocalFirst(key,remoteValue){
   if(remoteValue===undefined) return;
@@ -2679,10 +2679,17 @@ function mergeKeyWithLocalFirst(key,remoteValue){
     }
     let localValue=null;
     try{localValue=JSON.parse(localRaw);}catch(_e){localValue=null;}
-    // For feed/chat arrays, merge by message/post id instead of blind overwrite.
+    // For feed/chat arrays, merge by id/version instead of blind overwrite.
     if(Array.isArray(remoteValue)&&Array.isArray(localValue)&&(key==='jb_feed'||key.indexOf('jb_chat_')===0)){
-      const merged=(key.indexOf('jb_chat_')===0)?mergeChatMessages(localValue,remoteValue):mergeArrayByTs(localValue,remoteValue);
-      localStorage.setItem(key,JSON.stringify(merged));
+      if(key.indexOf('jb_chat_')===0){
+        const merged=mergeChatMessages(localValue,remoteValue);
+        localStorage.setItem(key,JSON.stringify(merged));
+        return;
+      }
+      const mergedFeed=mergeFeedByVersion(localValue,remoteValue).map(function(post){
+        return normalizeFeedPost(post,post);
+      });
+      setFeedCache(mergedFeed,Math.max(readFeedUpdatedAt(),Date.now()));
       return;
     }
     // For object maps, preserve local keys and apply remote keys (local-first conflict).
@@ -3045,6 +3052,10 @@ function showPage(id){
   // Clear chat polling interval
   if(typeof _chatPollInterval !== 'undefined' && _chatPollInterval){ clearInterval(_chatPollInterval); _chatPollInterval=null; }
   if(typeof _resChatInterval !== 'undefined' && _resChatInterval){ clearInterval(_resChatInterval); _resChatInterval=null; }
+  // Keep reseller unread badge poll alive across page switches.
+  if(me && me.role==='Reseller' && typeof startResellerMessagePoll==='function'){
+    startResellerMessagePoll();
+  }
   const pg=document.getElementById(id);
   if(pg){
     pg.classList.add('on');
@@ -10581,7 +10592,10 @@ async function subscribeFeedRealtime(opts={}){
         // Ignore stale remote snapshot that could revert a recent local feed change.
         return;
       }
-      setFeedCache(list,remoteTs||Date.now());
+      const mergedFeed=mergeFeedByVersion(getFeedPostsFromCache(),list).map(function(post){
+        return normalizeFeedPost(post,post);
+      });
+      setFeedCache(mergedFeed,Math.max(remoteTs||0,localTs||0,Date.now()));
       _health.feedRealtime=true;
       markSync('feed_snapshot');
       if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
@@ -12434,8 +12448,8 @@ async function startActiveChatRealtime(chatKey,onData){
     _firebaseUnsubActiveChat=_firebaseDb.collection(FIREBASE_COLLECTION_DATA).doc(chatKey).onSnapshot(function(doc){
       const d=doc&&doc.data?doc.data():null;
       const msgs=Array.isArray(d&&d.value)?d.value:[];
-      try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
-      if(typeof onData==='function') onData(msgs);
+      const mergedMsgs=mergeChatMessagesWithCache(chatKey,msgs,readChatMessagesFromCache(chatKey));
+      if(typeof onData==='function') onData(mergedMsgs);
     },function(err){
       console.warn('[chat realtime]',err&&err.message?err.message:err);
     });
@@ -12482,11 +12496,11 @@ async function pollAllChats(){
     resellers.forEach(u=>{
       const chatKey='jb_chat_'+u.id;
       const prevMsgs=Array.isArray(_messages[u.id])?_messages[u.id]:readChatMessagesFromCache(chatKey);
-      const prevUnreadIds=new Set(prevMsgs.filter(function(m){return m&&m.from!=='admin'&&!m.read;}).map(function(m){return String(m.id||'');}));
+      const prevUnreadIds=new Set(prevMsgs.filter(function(m){return isInboundUnreadForAdmin(m,u.id);}).map(function(m){return String(m.id||'');}));
       const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
       const latestUnread=[...mergedMsgs].reverse().find(function(m){
         const id=String(m&&m.id||'');
-        return m&&m.from!=='admin'&&!m.read && !prevUnreadIds.has(id);
+        return isInboundUnreadForAdmin(m,u.id) && !prevUnreadIds.has(id);
       });
       if(latestUnread){
         hasNewMessages = true;
@@ -12515,7 +12529,7 @@ async function pollAllChats(){
       const msgs = _messages[_chatReseller] || [];
       let hasNewUnread = false;
       msgs.forEach(m => {
-        if(m.from !== 'admin' && !m.read){
+        if(isInboundUnreadForAdmin(m,_chatReseller)){
           m.read = true;
           hasNewUnread = true;
         }
@@ -12532,7 +12546,7 @@ async function pollAllChats(){
     // Calculate total unread (only from resellers)
     resellers.forEach(u => {
       const msgs = _messages[u.id] || [];
-      const unread = msgs.filter(m => m.from !== 'admin' && !m.read).length;
+      const unread = msgs.filter(function(m){return isInboundUnreadForAdmin(m,u.id);}).length;
       totalUnread += unread;
     });
     
@@ -12547,6 +12561,17 @@ async function pollAllChats(){
 }
 let _chatPollInterval = null;
 let _messages = {}; // {resellerId: [{id, from, text, ts}]}
+function isInboundUnreadForAdmin(msg,resellerId){
+  if(!msg||msg.read) return false;
+  const from=String(msg.from||'');
+  const rid=String(resellerId||'');
+  if(!from) return false;
+  return from!=='admin' && (!rid || from===rid || from==='reseller');
+}
+function isInboundUnreadForReseller(msg){
+  if(!msg||msg.read) return false;
+  return String(msg.from||'')==='admin';
+}
 
 function renderChatList(filter=''){
   const el = document.getElementById('chat-list');
@@ -12556,7 +12581,7 @@ function renderChatList(filter=''){
   el.innerHTML = resellers.map(u => {
     const msgs = _messages[u.id] || [];
     const last = msgs[msgs.length-1];
-    const unread = msgs.filter(m => m.from===u.id && !m.read).length;
+    const unread = msgs.filter(function(m){return isInboundUnreadForAdmin(m,u.id);}).length;
     const isActive = _chatReseller === u.id;
     const initial = (u.dname||u.email)[0].toUpperCase();
     const colors = ['#f97316','#7c3aed','#16a34a','#0891b2','#dc2626','#ca8a04'];
@@ -12642,7 +12667,7 @@ async function openChatWith(resellerId){
   const msgs = _messages[resellerId] || [];
   let hasUnread = false;
   msgs.forEach(m => {
-    if(m.from !== 'admin' && !m.read){
+    if(isInboundUnreadForAdmin(m,resellerId)){
       m.read = true;
       hasUnread = true;
     }
@@ -12660,7 +12685,7 @@ async function openChatWith(resellerId){
   renderChatList();
   const chatKey='jb_chat_'+resellerId;
   await startActiveChatRealtime(chatKey,function(msgsNow){
-    _messages[resellerId]=Array.isArray(msgsNow)?msgsNow:[];
+    _messages[resellerId]=mergeChatMessagesWithCache(chatKey,Array.isArray(msgsNow)?msgsNow:[],_messages[resellerId]||[]);
     if(_chatReseller===resellerId) renderMessages();
     renderChatList();
     updateChatBadge();
@@ -12791,11 +12816,11 @@ async function checkResellerUnreadMessages(){
     const chatKey='jb_chat_'+me.id;
     const msgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],_messages[String(me.id)]||[]);
     _messages[String(me.id)]=msgs;
-    const unreadCount = msgs.filter(m => m.from === 'admin' && !m.read).length;
+    const unreadCount = msgs.filter(function(m){return isInboundUnreadForReseller(m);}).length;
     
     // Check for new messages (unread count increased)
     if(unreadCount > _lastResUnreadCount){
-      const lastUnread=[...msgs].reverse().find(function(m){return m&&m.from==='admin'&&!m.read;});
+      const lastUnread=[...msgs].reverse().find(function(m){return isInboundUnreadForReseller(m);});
       const eventId=String(lastUnread&&lastUnread.id||('admin_'+(lastUnread&&lastUnread.ts||Date.now())));
       dispatchRealtimeNotification({
         kind:'reseller_chat',
@@ -12841,15 +12866,12 @@ function openResellerChat(){
   if(!_overlay){ toast('Chat could not load','err'); return; }
   _overlay.style.display='flex';
   startResellerChatRealtime().catch(()=>{});
-  loadResellerMessages();
+  loadResellerMessages().catch(()=>{});
   if(_resChatInterval) clearInterval(_resChatInterval);
   // Keep a lightweight fallback poll only.
   _resChatInterval = setInterval(loadResellerMessages, getFirebaseEnabled()?2500:2000);
-  // Clear unread badges when chat opened
-  const badge = document.getElementById('res-chat-badge');
-  if(badge) badge.style.display = 'none';
-  const headerBadge = document.getElementById('res-header-chat-badge');
-  if(headerBadge) headerBadge.style.display = 'none';
+  // Keep reseller unread polling alive while overlay is open.
+  if(typeof startResellerMessagePoll==='function') startResellerMessagePoll();
   setTimeout(()=>document.getElementById('res-chat-input')?.focus(), 300);
 }
 
@@ -12880,7 +12902,7 @@ async function loadResellerMessages(){
     if(isChatOpen){
       let hasUnread = false;
       msgs = msgs.map(m => {
-        if(m.from === 'admin' && !m.read){
+        if(isInboundUnreadForReseller(m)){
           hasUnread = true;
           return {...m, read: true};
         }
@@ -13299,6 +13321,17 @@ function startAutoSync(){
         fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
         loadFromCloud().catch(()=>{});
         maybeSelfHealOrderDrift({reason:'visibility'}).catch(()=>{});
+        if(me.role==='Admin' && typeof pollAllChats==='function'){
+          pollAllChats().catch(()=>{});
+        }
+        if(me.role==='Reseller'){
+          if(typeof checkResellerUnreadMessages==='function'){
+            checkResellerUnreadMessages().catch(()=>{});
+          }
+          if(document.getElementById('res-chat-overlay')?.style.display==='flex' && typeof loadResellerMessages==='function'){
+            loadResellerMessages().catch(()=>{});
+          }
+        }
       }
     });
     _autoSyncVisibilityBound=true;
@@ -14619,11 +14652,18 @@ async function sendChatImage(input){
     try{
       // Chat image quality tuned up to avoid visibly blurry media.
       const compressed=await compressImage(e.target.result,1280,0.88);
-      const msg={id:'m'+Date.now(),from:'admin',to:_chatReseller,text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+_chatReseller;
-      if(!_messages[_chatReseller])_messages[_chatReseller]=[];
-      _messages[_chatReseller].push(msg);
-      try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
+      const localMsgs=Array.isArray(_messages[_chatReseller])?_messages[_chatReseller]:[];
+      const msg=normalizeChatMessage({
+        id:'m'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+        from:'admin',
+        to:_chatReseller,
+        text:'[img]'+compressed,
+        ts:Date.now(),
+        updatedAt:Date.now()
+      },localMsgs[localMsgs.length-1]||null);
+      _messages[_chatReseller]=mergeChatByVersion(localMsgs,[msg]);
+      writeChatMessagesToCache(chatKey,_messages[_chatReseller]);
       renderMessages();
       syncChatThreadToCloud(chatKey,_messages[_chatReseller],{
         opId:createLocalMutationOpId('chatimg')
