@@ -2676,6 +2676,7 @@ async function login(){
     return;
   }
   me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
+  resetCloudDataSnapshotCache();
   const firebaseEmail=String(me.email||em||'').trim().toLowerCase();
   cacheFirebaseLoginCreds(firebaseEmail,pw);
   if(getFirebaseEnabled()){
@@ -2789,8 +2790,12 @@ async function logout(){
   if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}
   _chatPollInFlightByReseller.clear();
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+  if(_resMsgPollInterval){clearInterval(_resMsgPollInterval);_resMsgPollInterval=null;}
   _autoSyncTickInFlight=false;
   _visibilitySyncInFlight=false;
+  _resUnreadPollInFlight=false;
+  _resChatLoadInFlight=null;
+  resetCloudDataSnapshotCache();
   try{
     if(me && navigator.onLine){
       await withTimeoutPromise(
@@ -9217,6 +9222,49 @@ async function fetchWithTimeout(url,options={},timeoutMs=UPLOAD_TIMEOUT_MS){
   }
 }
 
+let _cloudDataSnapshotCache={ts:0,data:null};
+let _cloudDataSnapshotInFlight=null;
+function resetCloudDataSnapshotCache(){
+  _cloudDataSnapshotCache={ts:0,data:null};
+  _cloudDataSnapshotInFlight=null;
+}
+async function fetchCloudDataSnapshot(opts={}){
+  const maxAgeMs=Math.max(0,Number(opts&&opts.maxAgeMs)||1000);
+  const staleOkMs=Math.max(maxAgeMs,Number(opts&&opts.staleOkMs)||10000);
+  const timeoutMs=Math.max(1000,Number(opts&&opts.timeoutMs)||12000);
+  const now=Date.now();
+  const cachedTs=Number(_cloudDataSnapshotCache&&_cloudDataSnapshotCache.ts)||0;
+  const cachedData=_cloudDataSnapshotCache&&_cloudDataSnapshotCache.data;
+  if(cachedData&&((now-cachedTs)<=maxAgeMs)){
+    return cachedData;
+  }
+  if(_cloudDataSnapshotInFlight){
+    try{
+      return await _cloudDataSnapshotInFlight;
+    }catch(_e){}
+  }
+  _cloudDataSnapshotInFlight=(async function(){
+    const api=await ensureWorkingApiBase({silent:true});
+    const res=await fetchWithTimeout(api+'/api/data',{headers:getAuthHeaders()},timeoutMs);
+    if(!res.ok) throw new Error('data_sync_http_'+res.status);
+    const payload=await res.json();
+    const data=payload&&payload.data&&typeof payload.data==='object'?payload.data:{};
+    _cloudDataSnapshotCache={ts:Date.now(),data};
+    return data;
+  })();
+  try{
+    return await _cloudDataSnapshotInFlight;
+  }catch(err){
+    const age=Date.now()-(Number(_cloudDataSnapshotCache&&_cloudDataSnapshotCache.ts)||0);
+    if(_cloudDataSnapshotCache&&_cloudDataSnapshotCache.data&&age<=staleOkMs){
+      return _cloudDataSnapshotCache.data;
+    }
+    throw err;
+  }finally{
+    _cloudDataSnapshotInFlight=null;
+  }
+}
+
 function normalizeStatus(s){
   return s==='At Depott' ? 'At Depot' : (s==='Sent to Wechat'||s==='Sent to WeChat' ? 'Sent to Factory' : s);
 }
@@ -11907,10 +11955,7 @@ async function pollAllChats(){
   if(_globalChatPollInFlight) return;
   _globalChatPollInFlight=true;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetchWithTimeout(api+'/api/data',{headers:getAuthHeaders()},12000);
-    if(!res.ok) return;
-    const {data}=await res.json();
+    const data=await fetchCloudDataSnapshot({maxAgeMs:900,timeoutMs:12000,staleOkMs:6000});
     // Check each reseller's chat key
     const resellers=users.filter(u=>u.role==='Reseller');
     let totalUnread=0;
@@ -12029,10 +12074,7 @@ async function pollMessages(resellerId){
   if(_chatPollInFlightByReseller.has(rid)) return;
   _chatPollInFlightByReseller.add(rid);
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetchWithTimeout(api+'/api/data',{headers:getAuthHeaders()},12000);
-    if(!res.ok) return;
-    const {data}=await res.json();
+    const data=await fetchCloudDataSnapshot({maxAgeMs:900,timeoutMs:12000,staleOkMs:6000});
     const chatKey='jb_chat_'+rid;
     const prevMsgs=Array.isArray(_messages[rid])?_messages[rid]:readChatMessagesFromCache(chatKey);
     const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
@@ -12223,6 +12265,8 @@ function refreshDashboardCounters(){
 let _resChatInterval = null;
 let _resMsgPollInterval = null;
 let _lastResUnreadCount = 0;
+let _resUnreadPollInFlight=false;
+let _resChatLoadInFlight=null;
 
 function startResellerMessagePoll(){
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
@@ -12234,11 +12278,10 @@ function startResellerMessagePoll(){
 
 async function checkResellerUnreadMessages(){
   if(!me) return;
+  if(_resUnreadPollInFlight) return;
+  _resUnreadPollInFlight=true;
   try{
-    const api=await ensureWorkingApiBase({silent:true});
-    const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-    if(!res.ok) return;
-    const {data}=await res.json();
+    const data=await fetchCloudDataSnapshot({maxAgeMs:800,timeoutMs:12000,staleOkMs:5000});
     const chatKey='jb_chat_'+me.id;
     const msgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],_messages[String(me.id)]||[]);
     _messages[String(me.id)]=msgs;
@@ -12283,6 +12326,8 @@ async function checkResellerUnreadMessages(){
     }
   }catch(e){
     console.warn('[checkResellerUnreadMessages]', e);
+  }finally{
+    _resUnreadPollInFlight=false;
   }
 }
 
@@ -12309,20 +12354,19 @@ function closeResellerChat(){
   _resChatRealtimeBound=false;
   stopActiveChatRealtime();
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+  _resChatLoadInFlight=null;
 }
 
 async function loadResellerMessages(){
   if(!me) return;
-  try{
+  if(_resChatLoadInFlight) return _resChatLoadInFlight;
+  _resChatLoadInFlight=(async function(){
+    try{
     const chatKey='jb_chat_'+me.id;
     let msgs=readChatMessagesFromCache(chatKey);
     try{
-      const api=await ensureWorkingApiBase({silent:true});
-      const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-      if(res.ok){
-        const {data}=await res.json();
-        msgs=mergeChatMessagesWithCache(chatKey,data&&data[chatKey]?data[chatKey]:[],msgs);
-      }
+      const data=await fetchCloudDataSnapshot({maxAgeMs:800,timeoutMs:12000,staleOkMs:5000});
+      msgs=mergeChatMessagesWithCache(chatKey,data&&data[chatKey]?data[chatKey]:[],msgs);
     }catch(_e){}
     _messages[String(me.id)]=msgs;
     
@@ -12354,7 +12398,11 @@ async function loadResellerMessages(){
     renderResellerMessages(msgs);
   }catch(e){
     console.error('[loadResellerMessages]', e);
+  }finally{
+    _resChatLoadInFlight=null;
   }
+  })();
+  return _resChatLoadInFlight;
 }
 
 function renderResellerMessages(msgs){
