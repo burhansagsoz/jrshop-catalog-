@@ -2937,10 +2937,6 @@ async function getSyncBootstrapPayload(db, authContext = null, env = {}) {
       updatesLimitDefault: toBoundedInt(env.ORDER_UPDATES_LIMIT_DEFAULT, ORDER_UPDATES_LIMIT_DEFAULT, 20, ORDER_UPDATES_LIMIT_MAX),
       updatesLimitMax: toBoundedInt(env.ORDER_UPDATES_LIMIT_MAX, ORDER_UPDATES_LIMIT_MAX, 50, 2000)
     },
-    features: {
-      orderOpsV1: true,
-      orderUpdatesV1: true
-    },
     queue: {
       pressure: runtime && runtime.pressure ? runtime.pressure : null,
       circuitBreaker: runtime && runtime.breaker ? runtime.breaker : null
