@@ -27,6 +27,12 @@ const ORDER_COMMAND_WAIT_TIMEOUT_MS = 4500;
 const ORDER_COMMAND_WAIT_STEP_MS = 90;
 const ORDER_COMMAND_DLQ_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const ORDER_RECOVERY_OP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const ORDER_QUEUE_MAX_PENDING = 5000;
+const ORDER_QUEUE_MAX_FAILED = 2000;
+const ORDER_QUEUE_CIRCUIT_COOLDOWN_MS = 30 * 1000;
+const ORDER_QUEUE_CIRCUIT_FAIL_THRESHOLD = 20;
+const ORDER_QUEUE_AUTO_REDRIVE_LIMIT = 3;
+const ORDER_QUEUE_AUTO_REDRIVE_COOLDOWN_MS = 30 * 1000;
 const DEFAULT_ADMIN_EMAIL = 'joobuyadmin@gmail.com';
 let _orderTablesEnsuredAt = 0;
 let _lastOrderOpsPruneAt = 0;
@@ -386,6 +392,206 @@ function buildLatencyPercentiles(rows, field = 'ts', nowTs = Date.now()) {
   };
 }
 
+function getOrderQueueLimitConfig(env = {}) {
+  return {
+    pendingMax: toBoundedInt(env.ORDER_QUEUE_PENDING_MAX, ORDER_QUEUE_MAX_PENDING, 100, 200000),
+    failedMax: toBoundedInt(env.ORDER_QUEUE_FAILED_MAX, ORDER_QUEUE_MAX_FAILED, 50, 100000),
+    breakerErrorThreshold: toBoundedInt(env.ORDER_QUEUE_BREAKER_ERROR_THRESHOLD, ORDER_QUEUE_CIRCUIT_FAIL_THRESHOLD, 5, 10000),
+    breakerWindowMs: toBoundedInt(env.ORDER_QUEUE_BREAKER_WINDOW_MS, 2 * 60 * 1000, 10 * 1000, 60 * 60 * 1000),
+    breakerCooldownMs: toBoundedInt(env.ORDER_QUEUE_BREAKER_COOLDOWN_MS, ORDER_QUEUE_CIRCUIT_COOLDOWN_MS, 1000, 10 * 60 * 1000),
+    autoRedriveBatchLimit: toBoundedInt(env.ORDER_AUTO_REDRIVE_BATCH_LIMIT, ORDER_QUEUE_AUTO_REDRIVE_LIMIT, 0, 100),
+    autoRedriveDelayMs: toBoundedInt(env.ORDER_AUTO_REDRIVE_DELAY_MS, 0, 0, 60 * 1000),
+    autoRedriveCooldownMs: toBoundedInt(env.ORDER_AUTO_REDRIVE_COOLDOWN_MS, ORDER_QUEUE_AUTO_REDRIVE_COOLDOWN_MS, 1000, 10 * 60 * 1000)
+  };
+}
+
+async function readOrderQueueRuntimeState(db) {
+  const row = await db.prepare("SELECT value FROM kv_store WHERE key='order_queue_runtime_state'").first();
+  const parsed = safeParseJson(row && row.value, null);
+  if (!parsed || typeof parsed !== 'object') {
+    return {
+      breakerOpenUntil: 0,
+      errorEvents: [],
+      lastAutoRedriveAt: 0,
+      updatedAt: 0
+    };
+  }
+  return {
+    breakerOpenUntil: Math.max(0, Number(parsed.breakerOpenUntil) || 0),
+    errorEvents: Array.isArray(parsed.errorEvents) ? parsed.errorEvents.map((ts) => Number(ts) || 0).filter((ts) => ts > 0) : [],
+    lastAutoRedriveAt: Math.max(0, Number(parsed.lastAutoRedriveAt) || 0),
+    updatedAt: Math.max(0, Number(parsed.updatedAt) || 0)
+  };
+}
+
+async function writeOrderQueueRuntimeState(db, state) {
+  const now = Date.now();
+  const next = {
+    breakerOpenUntil: Math.max(0, Number(state && state.breakerOpenUntil) || 0),
+    errorEvents: Array.isArray(state && state.errorEvents) ? state.errorEvents.map((ts) => Number(ts) || 0).filter((ts) => ts > 0).slice(-500) : [],
+    lastAutoRedriveAt: Math.max(0, Number(state && state.lastAutoRedriveAt) || 0),
+    updatedAt: now
+  };
+  await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .bind('order_queue_runtime_state', JSON.stringify(next))
+    .run();
+  return next;
+}
+
+function pruneBreakerErrorEvents(events, now, windowMs) {
+  const list = Array.isArray(events) ? events : [];
+  const minTs = now - Math.max(1000, Number(windowMs) || 1000);
+  return list
+    .map((ts) => Number(ts) || 0)
+    .filter((ts) => ts >= minTs && ts <= (now + 60 * 1000));
+}
+
+async function markOrderQueueProcessingError(db, env = {}) {
+  const cfg = getOrderQueueLimitConfig(env);
+  const now = Date.now();
+  const state = await readOrderQueueRuntimeState(db);
+  const events = pruneBreakerErrorEvents(state.errorEvents, now, cfg.breakerWindowMs);
+  events.push(now);
+  let breakerOpenUntil = Math.max(0, Number(state.breakerOpenUntil) || 0);
+  if (events.length >= cfg.breakerErrorThreshold) {
+    breakerOpenUntil = Math.max(breakerOpenUntil, now + cfg.breakerCooldownMs);
+  }
+  await writeOrderQueueRuntimeState(db, {
+    ...state,
+    errorEvents: events,
+    breakerOpenUntil
+  });
+  return {
+    breakerOpenUntil,
+    errorCount: events.length
+  };
+}
+
+async function markOrderQueueProcessingSuccess(db, env = {}) {
+  const cfg = getOrderQueueLimitConfig(env);
+  const now = Date.now();
+  const state = await readOrderQueueRuntimeState(db);
+  const events = pruneBreakerErrorEvents(state.errorEvents, now, cfg.breakerWindowMs);
+  const trimmed = events.length > 4 ? events.slice(Math.floor(events.length / 2)) : events;
+  await writeOrderQueueRuntimeState(db, {
+    ...state,
+    errorEvents: trimmed,
+    breakerOpenUntil: Math.max(0, Number(state.breakerOpenUntil) || 0)
+  });
+}
+
+async function getOrderQueuePressureSnapshot(db) {
+  const pendingRow = await db.prepare(`
+    SELECT COUNT(*) AS pending_count
+    FROM order_commands
+    WHERE status IN ('pending','retry','processing')
+  `).first();
+  const failedRow = await db.prepare(`
+    SELECT COUNT(*) AS failed_count
+    FROM order_commands
+    WHERE status='failed'
+  `).first();
+  return {
+    pending: Number(pendingRow && pendingRow.pending_count) || 0,
+    failed: Number(failedRow && failedRow.failed_count) || 0
+  };
+}
+
+async function isOrderQueueWriteSaturated(db, env = {}) {
+  const cfg = getOrderQueueLimitConfig(env);
+  const pressure = await getOrderQueuePressureSnapshot(db);
+  const saturated = pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax;
+  return {
+    saturated,
+    pressure,
+    limits: {
+      pendingMax: cfg.pendingMax,
+      failedMax: cfg.failedMax
+    }
+  };
+}
+
+async function getOrderQueueRuntimeHealth(db, env = {}) {
+  const cfg = getOrderQueueLimitConfig(env);
+  const now = Date.now();
+  const state = await readOrderQueueRuntimeState(db);
+  const events = pruneBreakerErrorEvents(state.errorEvents, now, cfg.breakerWindowMs);
+  const pressure = await getOrderQueuePressureSnapshot(db);
+  return {
+    breaker: {
+      open: Number(state.breakerOpenUntil || 0) > now,
+      openUntil: Number(state.breakerOpenUntil || 0),
+      errorCountInWindow: events.length,
+      threshold: cfg.breakerErrorThreshold,
+      windowMs: cfg.breakerWindowMs,
+      cooldownMs: cfg.breakerCooldownMs
+    },
+    pressure: {
+      pending: pressure.pending,
+      failed: pressure.failed,
+      pendingMax: cfg.pendingMax,
+      failedMax: cfg.failedMax,
+      writeSaturated: pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax
+    },
+    autoRedrive: {
+      batchLimit: cfg.autoRedriveBatchLimit,
+      delayMs: cfg.autoRedriveDelayMs,
+      lastAt: Number(state.lastAutoRedriveAt || 0)
+    }
+  };
+}
+
+async function getOrderQueueWriteGuard(db, env = {}) {
+  const health = await getOrderQueueRuntimeHealth(db, env);
+  if (health && health.breaker && health.breaker.open) {
+    return { blocked: true, reason: 'circuit_open', health };
+  }
+  if (health && health.pressure && health.pressure.writeSaturated) {
+    return { blocked: true, reason: 'queue_saturated', health };
+  }
+  return { blocked: false, reason: '', health };
+}
+
+async function maybeAutoRedriveDeadLetters(db, authContext = null, env = {}, opts = {}) {
+  const cfg = getOrderQueueLimitConfig(env);
+  const limit = Math.max(0, Math.min(cfg.autoRedriveBatchLimit, Number(opts.limit) || cfg.autoRedriveBatchLimit));
+  if (limit <= 0) return { attempted: 0, redriven: 0, skipped: 0, failed: 0 };
+  const now = Date.now();
+  const runtime = await readOrderQueueRuntimeState(db);
+  const minGapMs = cfg.autoRedriveCooldownMs;
+  if (Number(runtime.breakerOpenUntil || 0) > now) {
+    return { attempted: 0, redriven: 0, skipped: 0, failed: 0, blocked: 'circuit_open' };
+  }
+  const pressure = await getOrderQueuePressureSnapshot(db);
+  if (pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax) {
+    return { attempted: 0, redriven: 0, skipped: 0, failed: 0, blocked: 'queue_saturated' };
+  }
+  if ((now - Number(runtime.lastAutoRedriveAt || 0)) < minGapMs) {
+    return { attempted: 0, redriven: 0, skipped: 0, failed: 0, throttled: true };
+  }
+  const deadletters = await listOrderCommandDeadLetters(db, limit);
+  const results = [];
+  for (const item of deadletters) {
+    const id = normalizeOpId(item && item.commandId);
+    if (!id) continue;
+    const result = await redriveOrderCommandById(db, id, authContext, {
+      delayMs: cfg.autoRedriveDelayMs,
+      requestId: normalizeOpId(`auto_redrive:${id}:${now}`, `auto_redrive_${now}`)
+    });
+    results.push(result);
+  }
+  await writeOrderQueueRuntimeState(db, {
+    ...runtime,
+    lastAutoRedriveAt: now
+  });
+  return {
+    attempted: results.length,
+    redriven: results.filter((r) => r && r.redriven).length,
+    skipped: results.filter((r) => r && r.skipped).length,
+    failed: results.filter((r) => !r || r.ok === false).length
+  };
+}
+
 async function recordOrderCommandDeadLetter(db, row, reason, detail = '') {
   if (!db || !row) return;
   const commandId = normalizeOpId(row.command_id || row.commandId);
@@ -686,10 +892,28 @@ async function executeClaimedOrderCommand(db, row, authContext = null) {
 }
 
 async function drainOrderCommandQueue(db, authContext = null, opts = {}) {
+  const env = opts && opts.env && typeof opts.env === 'object' ? opts.env : {};
+  const cfg = getOrderQueueLimitConfig(env);
+  const now = Date.now();
+  const runtime = await readOrderQueueRuntimeState(db);
+  if (Number(runtime.breakerOpenUntil || 0) > now) {
+    return 0;
+  }
+  const pressure = await getOrderQueuePressureSnapshot(db);
+  if (pressure.pending >= cfg.pendingMax || pressure.failed >= cfg.failedMax) {
+    logWorker('warn', 'order_queue_saturated', {
+      pending: pressure.pending,
+      failed: pressure.failed,
+      pendingMax: cfg.pendingMax,
+      failedMax: cfg.failedMax
+    });
+    return 0;
+  }
+
   const limit = Math.max(1, Math.min(30, Number(opts.limit) || ORDER_COMMAND_DRAIN_LIMIT));
   let processed = 0;
   for (let i = 0; i < limit; i++) {
-    const now = Date.now();
+    const cycleNow = Date.now();
     const next = await db.prepare(`
       SELECT * FROM order_commands
       WHERE available_at<=?
@@ -699,15 +923,29 @@ async function drainOrderCommandQueue(db, authContext = null, opts = {}) {
         )
       ORDER BY available_at ASC, created_at ASC
       LIMIT 1
-    `).bind(now, now).first();
+    `).bind(cycleNow, cycleNow).first();
     if (!next) break;
     const claimed = await tryClaimOrderCommand(db, next.command_id, ORDER_COMMAND_LEASE_MS);
     if (!claimed) continue;
-    await executeClaimedOrderCommand(db, claimed, authContext);
+    try {
+      await executeClaimedOrderCommand(db, claimed, authContext);
+      await markOrderQueueProcessingSuccess(db, env);
+    } catch (err) {
+      await markOrderQueueProcessingError(db, env);
+      logWorker('error', 'order_queue_processing_error', {
+        commandId: String(claimed.command_id || ''),
+        message: String(err && err.message ? err.message : err || 'unknown')
+      });
+    }
     processed++;
   }
   if (processed) {
     await maybePruneOrderCommands(db);
+  }
+  if ((opts && opts.autoRedrive !== false) && cfg.autoRedriveBatchLimit > 0) {
+    await maybeAutoRedriveDeadLetters(db, authContext, env, {
+      limit: Math.max(0, Math.min(cfg.autoRedriveBatchLimit, Number(opts && opts.autoRedriveLimit) || cfg.autoRedriveBatchLimit))
+    });
   }
   await maybePruneOrderCommandDeadLetters(db);
   return processed;
@@ -716,9 +954,25 @@ async function drainOrderCommandQueue(db, authContext = null, opts = {}) {
 async function runOrderCommandDrainCycle(db, authContext = null, opts = {}) {
   await ensureOrderTables(db);
   const limit = Math.max(1, Math.min(100, Number(opts && opts.limit) || ORDER_COMMAND_DRAIN_LIMIT));
-  const processed = await drainOrderCommandQueue(db, authContext, { limit });
+  const autoRedrive = opts && opts.autoRedrive !== undefined ? !!opts.autoRedrive : true;
+  const autoRedriveLimit = Math.max(0, Math.min(20, Number(opts && opts.autoRedriveLimit) || ORDER_QUEUE_AUTO_REDRIVE_LIMIT));
+  const processed = await drainOrderCommandQueue(db, authContext, {
+    limit,
+    env: opts && opts.env ? opts.env : {},
+    autoRedrive,
+    autoRedriveLimit
+  });
   await maybePruneOrderRecoveryOps(db);
   return processed;
+}
+
+async function getOrderQueueOpsHealth(db, env = {}) {
+  const runtime = await getOrderQueueRuntimeHealth(db, env);
+  return {
+    breaker: runtime.breaker,
+    pressure: runtime.pressure,
+    autoRedrive: runtime.autoRedrive
+  };
 }
 
 async function getOrderCommandStatus(db, commandId) {
@@ -1505,7 +1759,7 @@ export default {
       if (path === '/api/orders' && method === 'GET') {
         const sinceTs = Math.max(0, Number(url.searchParams.get('sinceTs')) || 0);
         const sinceV = Math.max(0, Number(url.searchParams.get('sinceV')) || 0);
-        await runOrderCommandDrainCycle(db, authContext, { limit: 6 });
+        await runOrderCommandDrainCycle(db, authContext, { limit: 6, env });
         return await getOrders(db, authContext, { sinceTs, sinceV });
       }
       if (path.startsWith('/api/order-command/') && method === 'GET') {
@@ -1635,6 +1889,7 @@ export default {
       if (path === '/api/ops/health' && method === 'GET') {
         await ensureSecurityTables(db);
         await maybePruneSecurityTables(db);
+        const queueRuntime = await getOrderQueueRuntimeHealth(db, env);
         const sinceMs = Math.max(60 * 1000, toBoundedInt(url.searchParams.get('sinceMs'), 5 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000));
         const minTs = Date.now() - sinceMs;
         const secretRotation = getSecretRotationHealth(env);
@@ -1723,7 +1978,10 @@ export default {
             failed: Number(commandFailed && commandFailed.failed_count) || 0,
             oldestFailedAt: Number(commandFailed && commandFailed.oldest_failed_at) || 0,
             latencyMs: queueLatency,
-            failedAgeMs: failedLatency
+            failedAgeMs: failedLatency,
+            pressure: queueRuntime && queueRuntime.pressure ? queueRuntime.pressure : null,
+            circuitBreaker: queueRuntime && queueRuntime.breaker ? queueRuntime.breaker : null,
+            autoRedrive: queueRuntime && queueRuntime.autoRedrive ? queueRuntime.autoRedrive : null
           },
           deadLetters: {
             total: Number(deadLetters && deadLetters.deadletter_count) || 0,
@@ -1834,7 +2092,7 @@ export default {
     const db = env && env.DB ? env.DB : null;
     if (!db) return;
     try {
-      await runOrderCommandDrainCycle(db, null, { limit: 25 });
+      await runOrderCommandDrainCycle(db, null, { limit: 25, env });
     } catch (_e) {}
   }
 };
@@ -2262,6 +2520,17 @@ function buildDeleteCommandPayload(id, req = {}) {
 
 async function saveOrderDelete(db, id, req, authContext = null) {
   await ensureOrderTables(db);
+  const saturation = await isOrderQueueWriteSaturated(db);
+  if (saturation && saturation.saturated) {
+    return json({
+      ok: false,
+      error: 'order_queue_saturated',
+      pending: Number(saturation.pressure && saturation.pressure.pending) || 0,
+      failed: Number(saturation.pressure && saturation.pressure.failed) || 0,
+      pendingMax: Number(saturation.limits && saturation.limits.pendingMax) || ORDER_QUEUE_MAX_PENDING,
+      failedMax: Number(saturation.limits && saturation.limits.failedMax) || ORDER_QUEUE_MAX_FAILED
+    }, 503);
+  }
   const payload = buildDeleteCommandPayload(id, req);
   if (!payload.id) return json({ error: 'id missing' }, 400);
 
@@ -2292,6 +2561,17 @@ async function saveOrderDelete(db, id, req, authContext = null) {
 
 async function saveOrder(db, payload, authContext = null) {
   await ensureOrderTables(db);
+  const saturation = await isOrderQueueWriteSaturated(db);
+  if (saturation && saturation.saturated) {
+    return json({
+      ok: false,
+      error: 'order_queue_saturated',
+      pending: Number(saturation.pressure && saturation.pressure.pending) || 0,
+      failed: Number(saturation.pressure && saturation.pressure.failed) || 0,
+      pendingMax: Number(saturation.limits && saturation.limits.pendingMax) || ORDER_QUEUE_MAX_PENDING,
+      failedMax: Number(saturation.limits && saturation.limits.failedMax) || ORDER_QUEUE_MAX_FAILED
+    }, 503);
+  }
   const parsed = parseOrderMutationPayload(payload);
   const rawOrder = parsed.order;
   const validationErr = validateOrderPayload(rawOrder);
