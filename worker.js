@@ -26,11 +26,13 @@ const ORDER_COMMAND_DRAIN_LIMIT = 8;
 const ORDER_COMMAND_WAIT_TIMEOUT_MS = 4500;
 const ORDER_COMMAND_WAIT_STEP_MS = 90;
 const ORDER_COMMAND_DLQ_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const ORDER_RECOVERY_OP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_ADMIN_EMAIL = 'joobuyadmin@gmail.com';
 let _orderTablesEnsuredAt = 0;
 let _lastOrderOpsPruneAt = 0;
 let _lastOrderCommandsPruneAt = 0;
 let _lastOrderCommandDlqPruneAt = 0;
+let _lastOrderRecoveryOpsPruneAt = 0;
 let _securityWarnedMissingAuthToken = false;
 let _securityTablesEnsuredAt = 0;
 let _lastSecurityMemoryPruneAt = 0;
@@ -251,6 +253,19 @@ async function maybePruneOrderCommandDeadLetters(db) {
   } catch (_e) {}
 }
 
+async function maybePruneOrderRecoveryOps(db) {
+  const now = Date.now();
+  if ((now - _lastOrderRecoveryOpsPruneAt) < ORDER_COMMAND_PRUNE_INTERVAL_MS) return;
+  _lastOrderRecoveryOpsPruneAt = now;
+  try {
+    await db.prepare(`
+      DELETE FROM kv_store
+      WHERE key LIKE 'order_recovery_op:%'
+        AND COALESCE(CAST(json_extract(value,'$.createdAt') AS INTEGER),0) < ?
+    `).bind(now - ORDER_RECOVERY_OP_RETENTION_MS).run();
+  } catch (_e) {}
+}
+
 function getOrderCommandRetryDelayMs(attempts) {
   const n = Math.max(1, Number(attempts) || 1);
   const cappedExponent = Math.min(6, n - 1);
@@ -307,6 +322,68 @@ function toOrderCommandView(row) {
 function parseOrderCommandPayload(row) {
   const parsed = safeParseJson(row && row.payload, {});
   return parsed && typeof parsed === 'object' ? parsed : {};
+}
+
+function buildOrderRecoveryOpStoreKey(action, requestId) {
+  const rid = normalizeOpId(requestId);
+  if (!rid) return '';
+  const actionKey = normalizeOpId(String(action || '').replace(/[:]/g, '_'), 'recovery');
+  return `order_recovery_op:${String(actionKey).slice(0, 80)}:${rid}`;
+}
+
+async function readOrderRecoveryOpResult(db, action, requestId) {
+  const key = buildOrderRecoveryOpStoreKey(action, requestId);
+  if (!key) return null;
+  const row = await db.prepare('SELECT value FROM kv_store WHERE key=?').bind(key).first();
+  const parsed = safeParseJson(row && row.value, null);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return parsed;
+}
+
+async function storeOrderRecoveryOpResult(db, action, requestId, statusCode, responseBody) {
+  const key = buildOrderRecoveryOpStoreKey(action, requestId);
+  if (!key) return;
+  const now = Date.now();
+  const body = responseBody && typeof responseBody === 'object' ? responseBody : {};
+  const record = {
+    action: String(action || ''),
+    requestId: normalizeOpId(requestId),
+    statusCode: Math.max(100, Math.min(599, Number(statusCode) || 200)),
+    response: body,
+    createdAt: now
+  };
+  await db.prepare(
+    'INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
+  ).bind(key, JSON.stringify(record)).run();
+}
+
+function percentileFromSorted(values, q) {
+  const list = Array.isArray(values) ? values : [];
+  if (!list.length) return 0;
+  const p = Math.max(0, Math.min(1, Number(q) || 0));
+  const idx = Math.min(list.length - 1, Math.max(0, Math.ceil((list.length - 1) * p)));
+  return Number(list[idx]) || 0;
+}
+
+function buildLatencyPercentiles(rows, field = 'ts', nowTs = Date.now()) {
+  const source = Array.isArray(rows) ? rows : [];
+  const ages = source
+    .map((row) => Math.max(0, nowTs - (Number(row && row[field]) || 0)))
+    .filter((age) => Number.isFinite(age))
+    .sort((a, b) => a - b);
+  if (!ages.length) {
+    return { samples: 0, min: 0, max: 0, avg: 0, p50: 0, p95: 0, p99: 0 };
+  }
+  const sum = ages.reduce((acc, v) => acc + v, 0);
+  return {
+    samples: ages.length,
+    min: ages[0],
+    max: ages[ages.length - 1],
+    avg: Math.round(sum / ages.length),
+    p50: percentileFromSorted(ages, 0.50),
+    p95: percentileFromSorted(ages, 0.95),
+    p99: percentileFromSorted(ages, 0.99)
+  };
 }
 
 async function recordOrderCommandDeadLetter(db, row, reason, detail = '') {
@@ -369,16 +446,20 @@ async function redriveOrderCommandById(db, commandId, authContext = null, opts =
   if (!id) return { ok: false, error: 'command_id_missing' };
   const now = Date.now();
   const delayMs = Math.max(0, Math.min(60_000, Number(opts.delayMs) || 0));
+  const requestId = normalizeOpId(
+    opts.requestId || (authContext && authContext.requestId),
+    `rq_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  );
 
   const existing = await readOrderCommandRecord(db, id);
   if (existing) {
     const status = String(existing.status || '').trim().toLowerCase();
     if (status === 'applied') {
       await removeOrderCommandDeadLetterById(db, id);
-      return { ok: true, skipped: true, reason: 'already_applied', commandId: id };
+      return { ok: true, skipped: true, reason: 'already_applied', commandId: id, requestId };
     }
     if (status === 'pending' || status === 'retry' || status === 'processing') {
-      return { ok: true, skipped: true, reason: 'already_queued', commandId: id };
+      return { ok: true, skipped: true, reason: 'already_queued', commandId: id, requestId };
     }
     if (status === 'failed') {
       await db.prepare(`
@@ -393,21 +474,27 @@ async function redriveOrderCommandById(db, commandId, authContext = null, opts =
       `).bind(now + delayMs, now, id).run();
       await removeOrderCommandDeadLetterById(db, id);
       await recordOrderAuditEvent(db, 'order_command_redriven', String(existing.order_id || 'unknown'), {
+        requestId,
+        source: 'failed_command',
+        sourceCommandId: id,
         commandId: id,
         opId: String(existing.op_id || ''),
-        delayMs
+        delayMs,
+        previousStatus: status,
+        previousAttempts: Number(existing.attempts) || 0,
+        previousError: String(existing.error || '')
       }, authContext);
-      return { ok: true, redriven: true, commandId: id, source: 'failed_command' };
+      return { ok: true, redriven: true, commandId: id, source: 'failed_command', requestId };
     }
   }
 
   const deadLetter = await getOrderCommandDeadLetterById(db, id);
-  if (!deadLetter) return { ok: false, error: 'deadletter_not_found', commandId: id };
+  if (!deadLetter) return { ok: false, error: 'deadletter_not_found', commandId: id, requestId };
 
   const payload = deadLetter.payload && typeof deadLetter.payload === 'object' ? deadLetter.payload : {};
   const commandType = String(deadLetter.commandType || '').trim().toLowerCase();
   if (!payload || !commandType) {
-    return { ok: false, error: 'deadletter_invalid', commandId: id };
+    return { ok: false, error: 'deadletter_invalid', commandId: id, requestId };
   }
   const redriveCommandId = normalizeOpId(`redrive:${id}:${now.toString(36)}`, `redrive_${now}`);
   await enqueueOrderCommand(db, {
@@ -420,15 +507,25 @@ async function redriveOrderCommandById(db, commandId, authContext = null, opts =
   });
   await removeOrderCommandDeadLetterById(db, id);
   await recordOrderAuditEvent(db, 'order_command_redriven', String(deadLetter.orderId || 'unknown'), {
+    requestId,
+    source: 'deadletter',
+    sourceCommandId: id,
     commandId: redriveCommandId,
     fromDeadLetterCommandId: id,
     opId: String(deadLetter.opId || ''),
-    delayMs
+    delayMs,
+    deadLetterReason: String(deadLetter.reason || ''),
+    deadLetterAttempts: Number(deadLetter.attempts) || 0
   }, authContext);
-  return { ok: true, redriven: true, commandId: redriveCommandId, source: 'deadletter' };
+  return { ok: true, redriven: true, commandId: redriveCommandId, source: 'deadletter', requestId };
 }
 
 async function redriveOrderCommandsBulk(db, commandIds, authContext = null, opts = {}) {
+  const now = Date.now();
+  const requestId = normalizeOpId(
+    opts.requestId || (authContext && authContext.requestId),
+    `rq_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  );
   const requested = Array.isArray(commandIds) ? commandIds : [];
   const normalized = requested
     .map((id) => normalizeOpId(id))
@@ -438,7 +535,7 @@ async function redriveOrderCommandsBulk(db, commandIds, authContext = null, opts
   const targetIds = unique.slice(0, maxItems);
   const results = [];
   for (const id of targetIds) {
-    const res = await redriveOrderCommandById(db, id, authContext, opts);
+    const res = await redriveOrderCommandById(db, id, authContext, { ...opts, requestId });
     results.push({ commandId: id, ...res });
   }
   const summary = results.reduce((acc, row) => {
@@ -447,7 +544,17 @@ async function redriveOrderCommandsBulk(db, commandIds, authContext = null, opts
     else acc.failed += 1;
     return acc;
   }, { requested: requested.length, processed: results.length, redriven: 0, skipped: 0, failed: 0 });
-  return { ...summary, results };
+  await recordOrderAuditEvent(db, 'order_command_redrive_bulk', '__bulk__', {
+    requestId,
+    delayMs: Math.max(0, Math.min(60_000, Number(opts.delayMs) || 0)),
+    requested: summary.requested,
+    processed: summary.processed,
+    redriven: summary.redriven,
+    skipped: summary.skipped,
+    failed: summary.failed,
+    commandIdsSample: targetIds.slice(0, 20)
+  }, authContext);
+  return { ...summary, requestId, results };
 }
 
 async function enqueueOrderCommand(db, command) {
@@ -609,7 +716,9 @@ async function drainOrderCommandQueue(db, authContext = null, opts = {}) {
 async function runOrderCommandDrainCycle(db, authContext = null, opts = {}) {
   await ensureOrderTables(db);
   const limit = Math.max(1, Math.min(100, Number(opts && opts.limit) || ORDER_COMMAND_DRAIN_LIMIT));
-  return await drainOrderCommandQueue(db, authContext, { limit });
+  const processed = await drainOrderCommandQueue(db, authContext, { limit });
+  await maybePruneOrderRecoveryOps(db);
+  return processed;
 }
 
 async function getOrderCommandStatus(db, commandId) {
@@ -762,7 +871,9 @@ function getRequiredRolesForRoute(path, method) {
   if (path === '/api/ops/health' && m === 'GET') return ['Admin'];
   if (path === '/api/backup' && m === 'GET') return ['Admin'];
   if (path === '/api/backup/import' && m === 'POST') return ['Admin'];
+  if (path.startsWith('/api/order-command/') && m === 'GET') return ['Admin'];
   if (path.startsWith('/api/order-command/') && m === 'POST') return ['Admin'];
+  if (path === '/api/order-deadletters' && m === 'GET') return ['Admin'];
   if (path === '/api/order-deadletters/requeue' && m === 'POST') return ['Admin'];
   if (path === '/api/order-deadletters/clear' && m === 'POST') return ['Admin'];
   if (path.startsWith('/api/logistics/') && m !== 'GET') return ['Admin', 'Staff'];
@@ -1413,25 +1524,65 @@ export default {
         const commandId = decodeURIComponent(path.split('/').pop() || '').trim();
         if (!commandId) return json({ error: 'command_id missing' }, 400);
         const body = await request.json().catch(() => ({}));
+        const requestId = normalizeOpId(
+          body && body.requestId,
+          (authContext && authContext.requestId) || getRequestIdFromRequest(request)
+        );
+        const recoveryAction = `redrive_one:${normalizeOpId(commandId, 'unknown')}`;
+        const known = await readOrderRecoveryOpResult(db, recoveryAction, requestId);
+        if (known && known.response && typeof known.response === 'object') {
+          return json({ ...known.response, idempotent: true, requestId }, Number(known.statusCode) || 200);
+        }
         const delayMs = Math.max(0, Math.min(60_000, Number(body && body.delayMs) || 0));
-        const result = await redriveOrderCommandById(db, commandId, authContext, { delayMs });
-        return json(result, result && result.ok ? 200 : 400);
+        const result = await redriveOrderCommandById(db, commandId, authContext, { delayMs, requestId });
+        const statusCode = result && result.ok ? 200 : 400;
+        const response = { ...result, requestId };
+        await storeOrderRecoveryOpResult(db, recoveryAction, requestId, statusCode, response);
+        await maybePruneOrderRecoveryOps(db);
+        return json(response, statusCode);
       }
       if (path === '/api/order-deadletters/requeue' && method === 'POST') {
         const body = await request.json().catch(() => ({}));
+        const requestId = normalizeOpId(
+          body && body.requestId,
+          (authContext && authContext.requestId) || getRequestIdFromRequest(request)
+        );
+        const known = await readOrderRecoveryOpResult(db, 'redrive_bulk', requestId);
+        if (known && known.response && typeof known.response === 'object') {
+          return json({ ...known.response, idempotent: true, requestId }, Number(known.statusCode) || 200);
+        }
         const commandIds = Array.isArray(body && body.commandIds) ? body.commandIds : [];
         const delayMs = Math.max(0, Math.min(60_000, Number(body && body.delayMs) || 0));
-        const result = await redriveOrderCommandsBulk(db, commandIds, authContext, { delayMs, maxItems: 200 });
-        return json({ ok: true, ...result });
+        const result = await redriveOrderCommandsBulk(db, commandIds, authContext, { delayMs, maxItems: 200, requestId });
+        const response = { ok: true, ...result, requestId };
+        await storeOrderRecoveryOpResult(db, 'redrive_bulk', requestId, 200, response);
+        await maybePruneOrderRecoveryOps(db);
+        return json(response);
       }
       if (path === '/api/order-deadletters/clear' && method === 'POST') {
         const body = await request.json().catch(() => ({}));
+        const requestId = normalizeOpId(
+          body && body.requestId,
+          (authContext && authContext.requestId) || getRequestIdFromRequest(request)
+        );
+        const known = await readOrderRecoveryOpResult(db, 'deadletter_clear', requestId);
+        if (known && known.response && typeof known.response === 'object') {
+          return json({ ...known.response, idempotent: true, requestId }, Number(known.statusCode) || 200);
+        }
         const commandIds = Array.isArray(body && body.commandIds) ? body.commandIds : [];
         const normalized = [...new Set(commandIds.map((id) => normalizeOpId(id)).filter(Boolean))];
         for (const id of normalized) {
           await removeOrderCommandDeadLetterById(db, id);
         }
-        return json({ ok: true, cleared: normalized.length });
+        const response = { ok: true, requestId, cleared: normalized.length };
+        await recordOrderAuditEvent(db, 'order_deadletter_cleared', '__bulk__', {
+          requestId,
+          cleared: normalized.length,
+          commandIdsSample: normalized.slice(0, 20)
+        }, authContext);
+        await storeOrderRecoveryOpResult(db, 'deadletter_clear', requestId, 200, response);
+        await maybePruneOrderRecoveryOps(db);
+        return json(response);
       }
       if ((path === '/api/backup/import' || path === '/api/orders/bulk') && method === 'POST') {
         const body = await request.json();
@@ -1511,6 +1662,13 @@ export default {
           FROM order_commands
           WHERE status IN ('pending','retry','processing')
         `).first();
+        const queueLatencyRows = await db.prepare(`
+          SELECT created_at AS ts
+          FROM order_commands
+          WHERE status IN ('pending','retry','processing')
+          ORDER BY created_at DESC
+          LIMIT 500
+        `).all();
         const commandFailed = await db.prepare(`
           SELECT
             COUNT(*) AS failed_count,
@@ -1518,6 +1676,13 @@ export default {
           FROM order_commands
           WHERE status='failed'
         `).first();
+        const failedLatencyRows = await db.prepare(`
+          SELECT updated_at AS ts
+          FROM order_commands
+          WHERE status='failed'
+          ORDER BY updated_at DESC
+          LIMIT 500
+        `).all();
         const deadLetters = await db.prepare(`
           SELECT
             COUNT(*) AS deadletter_count,
@@ -1525,6 +1690,9 @@ export default {
           FROM kv_store
           WHERE key LIKE 'order_deadletter:%'
         `).first();
+        const nowForLatency = Date.now();
+        const queueLatency = buildLatencyPercentiles((queueLatencyRows && queueLatencyRows.results) || [], 'ts', nowForLatency);
+        const failedLatency = buildLatencyPercentiles((failedLatencyRows && failedLatencyRows.results) || [], 'ts', nowForLatency);
         const lastAudit = await db.prepare(`
           SELECT event_type,order_id,actor_role,created_at
           FROM order_audit_events
@@ -1553,7 +1721,9 @@ export default {
             pending: Number(commandQueue && commandQueue.pending_count) || 0,
             oldestCreatedAt: Number(commandQueue && commandQueue.oldest_created_at) || 0,
             failed: Number(commandFailed && commandFailed.failed_count) || 0,
-            oldestFailedAt: Number(commandFailed && commandFailed.oldest_failed_at) || 0
+            oldestFailedAt: Number(commandFailed && commandFailed.oldest_failed_at) || 0,
+            latencyMs: queueLatency,
+            failedAgeMs: failedLatency
           },
           deadLetters: {
             total: Number(deadLetters && deadLetters.deadletter_count) || 0,
