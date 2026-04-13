@@ -14,10 +14,6 @@ const API = (() => {
     };
   }
 
-  function isConfigured() {
-    return true;
-  }
-
   // Temel istek fonksiyonu
   async function request(method, path, body = null, isPublic = false) {
     const cfg = getConfig();
@@ -53,7 +49,6 @@ const API = (() => {
   return {
     // ── Genel ──
     getConfig,
-    isConfigured,
 
     // ── Veri ──
     getData:    ()          => request('GET',  '/api/data'),
