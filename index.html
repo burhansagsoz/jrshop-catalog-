@@ -2338,26 +2338,61 @@ function getShelfStatus(o){
 }
 function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
 let _ordersStorageWarnAt=0;
-function compactOrdersForStorage(list){
+function compactOrdersForStorage(list,opts={}){
   const arr=Array.isArray(list)?list:[];
+  const aggressive=!!(opts&&opts.aggressive);
   const keepRemoteable=function(v){
     if(typeof v!=='string') return null;
     const s=v.trim();
     if(!s) return null;
-    if(/^(https?:|blob:|data:)/i.test(s)) return s;
+    // Never keep blob/data URLs in localStorage compaction; they are quota-heavy
+    // and are a common cause of "saved then disappeared after refresh" regressions.
+    if(/^https?:/i.test(s)) return s;
     if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
     return null;
   };
   return arr.map(function(o){
+    const products=(o&&o.products||[]).map(function(p){
+      const base={
+        ...p,
+        img:keepRemoteable(p&&p.img),
+        depotPhoto:keepRemoteable(p&&p.depotPhoto)
+      };
+      if(!aggressive) return base;
+      return {
+        name:base&&base.name?String(base.name):'',
+        qty:Math.max(1,Number(base&&base.qty)||1),
+        arrived:!!(base&&base.arrived),
+        cnTracking:base&&base.cnTracking?String(base.cnTracking):'',
+        ukTracking:base&&base.ukTracking?String(base.ukTracking):'',
+        img:base&&base.img?base.img:null,
+        depotPhoto:base&&base.depotPhoto?base.depotPhoto:null
+      };
+    });
+    if(!aggressive){
+      return {
+        ...o,
+        products
+      };
+    }
     return {
-      ...o,
-      products:(o&&o.products||[]).map(function(p){
-        return {
-          ...p,
-          img:keepRemoteable(p&&p.img),
-          depotPhoto:keepRemoteable(p&&p.depotPhoto)
-        };
-      })
+      id:o&&o.id?String(o.id):'',
+      ref:o&&o.ref?String(o.ref):'',
+      name:o&&o.name?String(o.name):'',
+      resellerId:o&&o.resellerId?String(o.resellerId):'',
+      supplierId:o&&o.supplierId?String(o.supplierId):'',
+      status:normalizeStatus(o&&o.status),
+      pendingApproval:!!(o&&o.pendingApproval),
+      rejected:!!(o&&o.rejected),
+      rejectNote:o&&o.rejectNote?String(o.rejectNote):'',
+      cnTracking:o&&o.cnTracking?String(o.cnTracking):'',
+      ukTracking:o&&o.ukTracking?String(o.ukTracking):'',
+      ts:Number(o&&o.ts)||Date.now(),
+      updatedAt:Number(o&&o.updatedAt||o&&o.ts)||Date.now(),
+      v:Math.max(1,Number(o&&o.v)||1),
+      opId:o&&o.opId?String(o.opId):'',
+      lastOpId:o&&o.lastOpId?String(o.lastOpId):'',
+      products
     };
   });
 }
@@ -2368,7 +2403,7 @@ function persistOrdersLocalSafe(list){
     return true;
   }catch(_e){
     try{
-      const compact=compactOrdersForStorage(arr);
+      const compact=compactOrdersForStorage(arr,{aggressive:false});
       localStorage.setItem('jb_orders',JSON.stringify(compact));
       const now=Date.now();
       if(now-_ordersStorageWarnAt>20000){
@@ -2377,8 +2412,19 @@ function persistOrdersLocalSafe(list){
       }
       return true;
     }catch(err2){
-      console.error('[persistOrdersLocalSafe]',err2&&err2.message?err2.message:err2);
-      return false;
+      try{
+        const compactAggressive=compactOrdersForStorage(arr,{aggressive:true});
+        localStorage.setItem('jb_orders',JSON.stringify(compactAggressive));
+        const now=Date.now();
+        if(now-_ordersStorageWarnAt>20000){
+          _ordersStorageWarnAt=now;
+          toast('⚠️ Storage was full; compacted order cache to protect changes','info');
+        }
+        return true;
+      }catch(err3){
+        console.error('[persistOrdersLocalSafe]',err3&&err3.message?err3.message:err3);
+        return false;
+      }
     }
   }
 }
@@ -2393,7 +2439,7 @@ function shouldAcceptRemoteOrders(remoteOrders){
   }catch(_e){
     localCount=Math.max(localCount,0);
   }
-  const hasPendingLocalMutations=getActiveLocalOrderMutationIds().length>0;
+  const hasPendingLocalMutations=hasActiveUpsertOrderMutation();
   if(remoteCount>0){
     // If we have pending local writes, reject any snapshot shrink to avoid dropping
     // newly-created orders that have not been acknowledged yet.
@@ -2759,6 +2805,7 @@ async function login(){
         }
         // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         if(cloudOrders.length){
+          ackLocalMutationsFromIncoming(cloudOrders);
           const mergedLogin=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'login',pruneMissing:true});
           orders=pruneLocalOrdersAgainstRemote(mergedLogin,cloudOrders).map(function(o){
             return {
@@ -3018,11 +3065,11 @@ async function navOrders(status,el){
           const od=await ordRes.json();
           if(Array.isArray(od.orders) && !(od&&od.localOnly)){
             if(shouldAcceptRemoteOrders(od.orders)){
+              ackLocalMutationsFromIncoming(od.orders);
               const mergedPending=mergeOrdersByFreshness(localOrders,od.orders,{source:'pending_nav',pruneMissing:true});
               orders=pruneLocalOrdersAgainstRemote(mergedPending,od.orders);
               persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
               updateBadges();
-              loaded=true;
             }else{
               // Guard: ignore empty/partial remote snapshot when local has data.
               console.warn('[Pending] Ignoring remote orders snapshot to protect local data');
@@ -7942,6 +7989,10 @@ function readLocalOrders(){
 }
 function writeLocalJson(key,value){
   if(!key) return;
+  if(key==='jb_orders'){
+    persistOrdersLocalSafe(Array.isArray(value)?value:[]);
+    return;
+  }
   try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
 }
 function cloudSave(key,value){
@@ -8260,9 +8311,9 @@ async function loadFromCloudSilent(){
       applyRemoteKeyToLocal(key,data[key],'load_silent');
     }
 
-    // Otoriter sipariş snapshot'u: realtime kapalı olsa bile cihazlar tutarlı olsun.
-    const incrementalOrdersUrl=appendIncrementalCursorToApiUrl(api+'/api/orders');
-    const ordRes=await fetch(incrementalOrdersUrl,{headers:getAuthHeaders()});
+    // Otoriter sipariş snapshot'u: bu yol mutlaka tam liste çekmeli.
+    // Incremental cursor burada stale/eksik görünüm üretip local state'i geri düşürebilir.
+    const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
     if(!ordRes.ok) return false;
     const ordPayload=await ordRes.json();
     const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
@@ -8273,6 +8324,7 @@ async function loadFromCloudSilent(){
       // Guard: do not let empty remote snapshots wipe existing local orders.
       return false;
     }
+    ackLocalMutationsFromIncoming(cloudOrders);
 
     const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
     const merged=mergeOrdersByFreshness(localOrders,cloudOrders,{source:'silent',pruneMissing:true});
@@ -8349,9 +8401,9 @@ async function loadFromCloud(){
           }
           applyRemoteKeyToLocal(k,data[k],'load_aux');
         });
-        // Load orders from dedicated endpoint (individual rows — no size limit)
-        const incrementalOrdersUrl=appendIncrementalCursorToApiUrl(api+'/api/orders');
-        const ordRes=await fetch(incrementalOrdersUrl,{headers:getAuthHeaders()});
+        // Load full authoritative order list. Incremental cursor is intentionally
+        // avoided here to prevent stale merges that can roll back recent edits.
+        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
         let cloudOrders=[];
         if(ordRes.ok){
           const od=await ordRes.json();
@@ -8367,6 +8419,7 @@ async function loadFromCloud(){
             console.warn('[Remote] Ignoring remote orders snapshot to protect local data');
             return false;
           }
+          ackLocalMutationsFromIncoming(cloudOrders);
         } else {
           // Deterministic behavior: never ingest jb_orders from /api/data fallback.
           return false;
@@ -8467,8 +8520,8 @@ const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
 const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
-const LOCAL_ORDER_MUTATION_KEEP_MS=90*1000;
-const LOCAL_ORDER_CONVERGENCE_GRACE_MS=90*1000;
+const LOCAL_ORDER_MUTATION_KEEP_MS=6*60*60*1000;
+const LOCAL_ORDER_CONVERGENCE_GRACE_MS=20*60*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
 const LOCAL_DATA_META_KEY='jb_data_meta';
 const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
@@ -8583,6 +8636,21 @@ function getPendingFallbackOrderIds(){
   });
   return ids;
 }
+function hasActiveUpsertOrderMutation(){
+  const map=cleanupLocalOrderMutations();
+  const hasLocalUpsert=Object.keys(map).some(function(id){
+    const row=map[id]||{};
+    return String(row.type||'upsert')!=='delete';
+  });
+  if(hasLocalUpsert) return true;
+  const fallback=readLocalSyncFallback();
+  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+    ? fallback.jb_order_ops.value
+    : [];
+  return pendingOps.some(function(op){
+    return String(op&&op.op||'upsert')!=='delete';
+  });
+}
 function getActiveLocalOrderMutationIds(){
   const map=cleanupLocalOrderMutations();
   const ids=new Set(Object.keys(map));
@@ -8620,10 +8688,7 @@ function hasActiveLocalOrderMutation(orderId,pendingFallbackIds){
   const map=cleanupLocalOrderMutations();
   const row=map[id];
   if(!row) return pendingIds.has(id);
-  const ts=Number(row.ts)||0;
-  const age=Date.now()-ts;
-  if(age<Math.min(LOCAL_ORDER_MUTATION_KEEP_MS,LOCAL_ORDER_CONVERGENCE_GRACE_MS)) return true;
-  return pendingIds.has(id);
+  return true;
 }
 function readLocalDataMutations(){
   try{
@@ -10431,6 +10496,10 @@ function parseLocalJson(key,fallback){
   }
 }
 function writeLocalJson(key,value){
+  if(String(key||'')==='jb_orders'){
+    persistOrdersLocalSafe(Array.isArray(value)?value:[]);
+    return;
+  }
   try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
 }
 function readLocalDataMap(){
@@ -11747,6 +11816,7 @@ async function startPendingPoll(){
         return;
       }
       if(Array.isArray(newOrders)){
+        ackLocalMutationsFromIncoming(newOrders);
         if(me.role==='Reseller'){
           // For reseller: never hard-replace with remote snapshot; preserve recent local pending requests.
           const prevOrders=Array.isArray(orders)?orders:[];
@@ -15624,6 +15694,11 @@ async function saveOrders(changedOrderIds,opts={}){
         }
         if(_payload&&_payload.staleIgnored){
           clearLocalOrderMutation(live.id);
+          // Server says local write was stale: immediately refetch authoritative state
+          // to prevent UI from sticking to a reverted local snapshot.
+          if(_payload&&_payload.shouldRefetch){
+            await loadFromCloudSilent().catch(()=>{});
+          }
           continue;
         }
         if(!_sr.ok || (_payload&&_payload.localOnly)){
@@ -15639,7 +15714,9 @@ async function saveOrders(changedOrderIds,opts={}){
           });
           queueOrderEventFallback(event);
         }else{
-          clearLocalOrderMutation(live.id);
+          // Do not clear mutation immediately on 200 OK.
+          // Keep protection active until an authoritative /api/orders read contains this op/version.
+          markLocalOrderMutation(live.id,'upsert',{opId,v});
         }
       }catch(_e){
         queuedFallback=true;
@@ -15673,6 +15750,9 @@ async function saveOrders(changedOrderIds,opts={}){
         try{_payload=await _dr.json();}catch(_e){_payload={};}
         if(_payload&&_payload.staleIgnored){
           clearLocalOrderMutation(deletedId);
+          if(_payload&&_payload.shouldRefetch){
+            await loadFromCloudSilent().catch(()=>{});
+          }
           continue;
         }
         if(!_dr.ok || (_payload&&_payload.localOnly)){
