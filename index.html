@@ -7414,6 +7414,7 @@ function clearFilters(){
 
 // ── RESELLER ORDER CREATION ──
 function openResellerOrderModal(){
+  window.roProdImages={};
   roProdCount=0;document.getElementById('ro-prod-items').innerHTML='';
   ['ro-name','ro-phone','ro-addr','ro-city','ro-post','ro-email','ro-note'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   addROProdItem();
@@ -7548,7 +7549,14 @@ function fillROFromCatalog(idx,sel){
     }
   }
 }
-function removeROProd(idx){const el=document.getElementById('ropi-'+idx);if(el)el.remove();}
+function removeROProd(idx){
+  const el=document.getElementById('ropi-'+idx);
+  if(el)el.remove();
+  if(window.roProdImages){
+    delete window.roProdImages[idx];
+    delete window.roProdImages[String(idx)];
+  }
+}
 async function submitResellerOrder(){
   if(!me||me.role!=='Reseller'){toast('⚠️ Session error. Please login again.','err');return;}
   if(_resellerOrderSubmitting) return;
@@ -7591,12 +7599,27 @@ async function submitResellerOrder(){
   orders.unshift(o);
   markLocalOrderMutation(o.id,'upsert',{opId:createLocalMutationOpId('rescreate')});
   markSync('reseller_order_local_submit');
-  await saveOrders([o.id]);
+  const saveResult=await saveOrders([o.id],{allowFallbackOnStrictFailure:true});
+  if(!saveResult||!saveResult.ok){
+    toast('❌ Order request could not be saved. Please try again.','err');
+    return;
+  }
+  if(saveResult.deferred){
+    toast('⚠️ Request saved locally. Cloud sync will retry automatically.','info');
+  }
   updateBadges();
   logActivity('order_request',`Order request submitted by ${me.dname||me.email}: ${esc(o.ref)} for ${esc(name)}`,o.id);
   _resFilter='pending';
   closeResellerOrderModal();renderResellerView();
-  toast('✅ Order request submitted!','ok');
+  if(!saveResult.deferred){
+    toast('✅ Order request submitted!','ok');
+  }
+  // Immediate post-submit flush attempt to reduce "pending disappeared then returned"
+  // behavior under unstable connections. Failures are harmless; queued fallback remains.
+  flushLocalSyncFallback().catch(()=>{});
+  }catch(err){
+    console.error('[submitResellerOrder]',err);
+    toast('❌ Request failed unexpectedly. Please retry.','err');
   }finally{
     _resellerOrderSubmitting=false;
     if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='📤 Submit Request';}
@@ -7880,6 +7903,38 @@ function buildDeleteOperationFromId(orderId,prev,deletedAt){
     baseVersion:Math.max(0,Number(prev&&prev.v)||0),
     createdAt:ts
   };
+}
+function queueOrderOperationFallback(operation){
+  if(!operation||!operation.entityId) return;
+  const type=String(operation.type||'').toUpperCase();
+  const entityId=String(operation.entityId||'').trim();
+  if(!entityId) return;
+  const opId=String(operation.opId||createLocalMutationOpId('fallback'));
+  const v=Math.max(1,Number(operation.payload&&operation.payload.order&&operation.payload.order.v)||Number(operation.baseVersion)||1);
+  const ts=Number(operation.createdAt)||Date.now();
+  if(type==='DELETE_ORDER'){
+    queueOrderOpFallback({
+      op:'delete',
+      orderId:entityId,
+      opId,
+      v,
+      ts,
+      deletedAt:Number(operation.payload&&operation.payload.deletedAt)||ts
+    });
+    return;
+  }
+  const orderPayload=operation.payload&&operation.payload.order&&typeof operation.payload.order==='object'
+    ? operation.payload.order
+    : null;
+  if(!orderPayload) return;
+  queueOrderOpFallback({
+    op:'upsert',
+    orderId:entityId,
+    opId,
+    v,
+    ts,
+    order:orderPayload
+  });
 }
 function mapOperationResultByEntityId(result,operations){
   const byEntity=new Map();
@@ -16316,6 +16371,7 @@ async function saveOrders(changedOrderIds,opts={}){
   // In multi-tab scenarios, stale in-memory state can otherwise tombstone
   // orders created by another tab. Explicit deletes must use deleteOrderWithTombstone.
   const inferDeletes=!!(opts&&opts.inferDeletes===true);
+  const allowFallbackOnStrictFailure=!!(opts&&opts.allowFallbackOnStrictFailure===true);
   const deletedOrderIds=inferDeletes?[...prevById.keys()].filter(id=>!currentIds.has(id)):[];
 
   const changedSet=(Array.isArray(changedOrderIds)&&changedOrderIds.length)?new Set(changedOrderIds):new Set();
@@ -16375,12 +16431,22 @@ async function saveOrders(changedOrderIds,opts={}){
     const strictFailedOrderIds=new Set();
     const strictFailureReasons=[];
     const opsPayload=buildOrderOpsPayload(targetOrders,prevById,deletedOrderIds,nowTs);
+    const markOpsQueuedForFallback=function(){
+      (opsPayload.operations||[]).forEach(function(op){
+        if(!op||!op.entityId) return;
+        queueOrderOperationFallback(op);
+      });
+      queuedFallback=queuedFallback || (opsPayload.operations||[]).length>0;
+    };
     if(opsPayload.operations.length){
       let opsResult={ok:false,error:'ops_not_sent',acked:[],rejected:[],failed:[]};
       try{
         opsResult=await sendOrderOperationsBatch(opsPayload.operations);
       }catch(_e){
         opsResult={ok:false,error:String((_e&&_e.message)||'ops_transport_error'),acked:[],rejected:[],failed:[]};
+      }
+      if(!opsResult.ok){
+        markOpsQueuedForFallback();
       }
       const byEntity=mapOperationResultByEntityId(opsResult,opsPayload.operations);
       byEntity.forEach(function(entry,entityId){
@@ -16394,6 +16460,12 @@ async function saveOrders(changedOrderIds,opts={}){
         if(STRICT_ORDER_CLOUD_COMMIT){
           strictFailedOrderIds.add(String(entityId));
           strictFailureReasons.push(reason);
+          // For reseller-created pending orders, keep retry queue even in strict mode
+          // so the request is not silently lost on transient connectivity failures.
+          if(String(me&&me.role||'')==='Reseller'){
+            const failedOp=(opsPayload.operations||[]).find(function(op){return String(op&&op.entityId||'')===String(entityId);});
+            if(failedOp) queueOrderOperationFallback(failedOp);
+          }
           return;
         }
         queuedFallback=true;
@@ -16412,6 +16484,28 @@ async function saveOrders(changedOrderIds,opts={}){
     }
     if(STRICT_ORDER_CLOUD_COMMIT && strictFailedOrderIds.size){
       const failedIds=Array.from(strictFailedOrderIds);
+      if(allowFallbackOnStrictFailure){
+        const failedSet=new Set(failedIds.map(function(id){return String(id);}));
+        const failedOps=(opsPayload.operations||[]).filter(function(op){
+          return op&&op.entityId&&failedSet.has(String(op.entityId));
+        });
+        failedOps.forEach(function(op){
+          queueOrderOperationFallback(op);
+        });
+        console.warn('[saveOrders][strict_cloud_commit_deferred]',{
+          failedIds,
+          reason:String(strictFailureReasons[0]||'cloud_commit_failed')
+        });
+        markSync('orders_save_deferred');
+        return {
+          ok:true,
+          saved:targetOrders.length,
+          deleted:deletedOrderIds.length,
+          queuedFallback:true,
+          deferred:true,
+          failedOrderIds:failedIds
+        };
+      }
       const failedSet=new Set(failedIds);
       const nextMap=new Map((orders||[]).filter(function(o){return o&&o.id;}).map(function(o){return [String(o.id),o];}));
       failedSet.forEach(function(id){
