@@ -8000,7 +8000,12 @@ async function maybeSelfHealOrderDrift(opts={}){
       const remoteOrders=Array.isArray(payload&&payload.orders)?payload.orders:[];
       const nextCursor=String(payload&&payload.nextCursor||'').trim();
       if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
-      if(!force && !hasOrderSnapshotDrift(orders,remoteOrders)){
+      const hasDrift=hasOrderSnapshotDrift(orders,remoteOrders);
+      if(hasDrift){
+        _health.orderDriftDetections=Number(_health.orderDriftDetections||0)+1;
+        _health.orderLastDriftAt=Date.now();
+      }
+      if(!force && !hasDrift){
         return false;
       }
       const applied=applyAuthoritativeOrdersSnapshot(remoteOrders,{
@@ -8014,6 +8019,9 @@ async function maybeSelfHealOrderDrift(opts={}){
           afterCount:applied.count,
           remoteCount:Array.isArray(remoteOrders)?remoteOrders.length:0
         });
+        _health.orderSelfHeals=Number(_health.orderSelfHeals||0)+1;
+        _health.orderLastHealAt=Date.now();
+        _health.orderLastHealReason=reason;
         updateBadges();
         render();
         return true;
@@ -9050,7 +9058,24 @@ const _health={
   syncBacklogOps:0,
   syncBacklogKeys:0,
   syncBacklogOldestTs:0,
-  syncDeadLetterOps:0
+  syncDeadLetterOps:0,
+  dataKeyFetchCount:0,
+  dataKeyFetchErrors:0,
+  dataKeyFetchLastAt:0,
+  dataKeyFetchLastMs:0,
+  dataKeyFetchLastKeys:0,
+  chatUnreadAdmin:0,
+  chatUnreadReseller:0,
+  chatLastPollAt:0,
+  chatRealtimeLastAt:0,
+  chatMergeCount:0,
+  feedSnapshotLastAt:0,
+  feedSnapshotCount:0,
+  orderDriftDetections:0,
+  orderSelfHeals:0,
+  orderLastDriftAt:0,
+  orderLastHealAt:0,
+  orderLastHealReason:'-'
 };
 let _realtimeRenderTimer=null;
 let _realtimeMetricsTimer=null;
@@ -9058,6 +9083,15 @@ let _recoveredImageSyncTimer=null;
 const _recoveredImageOrderIds=new Set();
 let _lastOrdersSaveAuditAt=0;
 const _nativeFetch=window.fetch.bind(window);
+function recordDataKeyFetchMetrics(ok,latencyMs,keyCount){
+  _health.dataKeyFetchCount=Number(_health.dataKeyFetchCount||0)+1;
+  if(!ok){
+    _health.dataKeyFetchErrors=Number(_health.dataKeyFetchErrors||0)+1;
+  }
+  _health.dataKeyFetchLastAt=Date.now();
+  _health.dataKeyFetchLastMs=Math.max(0,Number(latencyMs)||0);
+  _health.dataKeyFetchLastKeys=Math.max(0,Number(keyCount)||0);
+}
 
 function ensureFirebaseConfigDefaults(){
   if(!localStorage.getItem(FIREBASE_CONFIG_KEY)){
@@ -9412,6 +9446,15 @@ function mergeChatMessagesWithCache(chatKey,remoteMsgs,seedLocal){
     normalizeChatMessages(localBase,key),
     normalizeChatMessages(Array.isArray(remoteMsgs)?remoteMsgs:[],key)
   );
+  const toFingerprint=function(list){
+    return (Array.isArray(list)?list:[]).map(function(row){
+      return `${String(row&&row.id||'')}:${Number(row&&row.v)||0}:${row&&row.read?'1':'0'}`;
+    }).join('|');
+  };
+  if(toFingerprint(localBase)!==toFingerprint(merged)){
+    _health.chatMergeCount=Number(_health.chatMergeCount||0)+1;
+    _health.chatLastPollAt=Date.now();
+  }
   writeChatMessagesToCache(key,merged);
   return merged;
 }
@@ -9597,6 +9640,14 @@ function renderHealthPanel(){
   const dlq=getLocalSyncDeadletterMetrics();
   const nextRetryTxt=(q.nextRetryAt&&q.nextRetryAt>Date.now())?`${Math.max(1,Math.ceil((q.nextRetryAt-Date.now())/1000))}s`:'now';
   const oldestTxt=q.oldestTs?`${Math.max(0,Math.floor((Date.now()-q.oldestTs)/1000))}s`:'-';
+  const keyFetchRate=_health.dataKeyFetchCount>0
+    ? `${_health.dataKeyFetchCount-_health.dataKeyFetchErrors}/${_health.dataKeyFetchCount}`
+    : '0/0';
+  const keyFetchAge=_health.dataKeyFetchLastAt?`${Math.max(0,Math.floor((Date.now()-_health.dataKeyFetchLastAt)/1000))}s`:'-';
+  const chatPollAge=_health.chatLastPollAt?`${Math.max(0,Math.floor((Date.now()-_health.chatLastPollAt)/1000))}s`:'-';
+  const chatRtAge=_health.chatRealtimeLastAt?`${Math.max(0,Math.floor((Date.now()-_health.chatRealtimeLastAt)/1000))}s`:'-';
+  const feedSnapAge=_health.feedSnapshotLastAt?`${Math.max(0,Math.floor((Date.now()-_health.feedSnapshotLastAt)/1000))}s`:'-';
+  const driftSummary=`det:${Number(_health.orderDriftDetections)||0} · heal:${Number(_health.orderSelfHeals)||0}`;
   el.innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
@@ -9624,6 +9675,21 @@ function renderHealthPanel(){
         <div style="font-size:11px;color:var(--muted);">Dead Letter</div>
         <div style="font-size:13px;font-weight:700;color:${dlq.count>0?'#f59e0b':'#22c55e'};">${dlq.count} entries</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px;">oldest:${dlq.oldestTs?`${Math.max(0,Math.floor((Date.now()-dlq.oldestTs)/1000))}s`:'-'}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Data Key Fetch</div>
+        <div style="font-size:13px;font-weight:700;">${keyFetchRate} ok</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;">last:${_health.dataKeyFetchLastMs}ms · keys:${_health.dataKeyFetchLastKeys} · age:${keyFetchAge}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Chat Diagnostics</div>
+        <div style="font-size:13px;font-weight:700;">admin:${_health.chatUnreadAdmin} · reseller:${_health.chatUnreadReseller}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;">pollAge:${chatPollAge} · rtAge:${chatRtAge} · merges:${_health.chatMergeCount}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">
+        <div style="font-size:11px;color:var(--muted);">Feed / Drift</div>
+        <div style="font-size:13px;font-weight:700;">feed:${_health.feedSnapshotCount} · ${driftSummary}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;">feedAge:${feedSnapAge} · healReason:${esc(_health.orderLastHealReason||'-')}</div>
       </div>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted);">Last sync: ${fmtTs} (${_health.lastSyncSource})</div>
@@ -10596,6 +10662,8 @@ async function subscribeFeedRealtime(opts={}){
         return normalizeFeedPost(post,post);
       });
       setFeedCache(mergedFeed,Math.max(remoteTs||0,localTs||0,Date.now()));
+      _health.feedSnapshotLastAt=Date.now();
+      _health.feedSnapshotCount=Array.isArray(mergedFeed)?mergedFeed.length:0;
       _health.feedRealtime=true;
       markSync('feed_snapshot');
       if(me&&me.role==='Reseller') renderResFeed(document.getElementById('res-feed-search')?.value||'');
@@ -12431,12 +12499,22 @@ let _resChatRealtimeBound=false;
 async function fetchDataMapByKeys(keys){
   const list=Array.isArray(keys)?keys.map(function(k){return String(k||'').trim();}).filter(Boolean):[];
   if(!list.length) return {};
-  const api=await ensureWorkingApiBase({silent:true});
-  const query='?keys='+encodeURIComponent(list.join(','));
-  const res=await fetch(api+'/api/data'+query,{headers:getAuthHeaders()});
-  if(!res.ok) return null;
-  const payload=await res.json().catch(function(){return {};});
-  return payload&&payload.data&&typeof payload.data==='object'?payload.data:{};
+  const startedAt=Date.now();
+  try{
+    const api=await ensureWorkingApiBase({silent:true});
+    const query='?keys='+encodeURIComponent(list.join(','));
+    const res=await fetch(api+'/api/data'+query,{headers:getAuthHeaders()});
+    if(!res.ok){
+      recordDataKeyFetchMetrics(false,Date.now()-startedAt,list.length);
+      return null;
+    }
+    const payload=await res.json().catch(function(){return {};});
+    recordDataKeyFetchMetrics(true,Date.now()-startedAt,list.length);
+    return payload&&payload.data&&typeof payload.data==='object'?payload.data:{};
+  }catch(_e){
+    recordDataKeyFetchMetrics(false,Date.now()-startedAt,list.length);
+    return null;
+  }
 }
 
 function stopActiveChatRealtime(){
@@ -12459,6 +12537,7 @@ async function startActiveChatRealtime(chatKey,onData){
       const d=doc&&doc.data?doc.data():null;
       const msgs=Array.isArray(d&&d.value)?d.value:[];
       const mergedMsgs=mergeChatMessagesWithCache(chatKey,msgs,readChatMessagesFromCache(chatKey));
+      _health.chatRealtimeLastAt=Date.now();
       if(typeof onData==='function') onData(mergedMsgs);
     },function(err){
       console.warn('[chat realtime]',err&&err.message?err.message:err);
@@ -12562,6 +12641,8 @@ async function pollAllChats(){
     // Update badge
     const badge=document.getElementById('chat-badge');
     if(badge){badge.textContent=totalUnread;badge.style.display=totalUnread?'flex':'none';}
+    _health.chatUnreadAdmin=Math.max(0,Number(totalUnread)||0);
+    _health.chatLastPollAt=Date.now();
     // Re-render chat list if open
     if(document.getElementById('pg-chat')?.classList.contains('on')){
       renderChatList();
@@ -12787,9 +12868,15 @@ function openOrderFromRef(ref){
 
 
 function updateChatBadge(){
-  const total=Object.values(_messages).reduce((s,msgs)=>s+msgs.filter(m=>m.from!=='admin'&&!m.read).length,0);
+  const total=Object.entries(_messages).reduce(function(sum,entry){
+    const resellerId=String(entry&&entry[0]||'');
+    const msgs=Array.isArray(entry&&entry[1])?entry[1]:[];
+    const unread=msgs.filter(function(m){return isInboundUnreadForAdmin(m,resellerId);}).length;
+    return sum+unread;
+  },0);
   const badge=document.getElementById('chat-badge');
   if(badge){badge.textContent=total;badge.style.display=total?'flex':'none';}
+  _health.chatUnreadAdmin=Math.max(0,Number(total)||0);
 }
 function refreshDashboardCounters(){
   const pg=document.getElementById('pg-dash');
@@ -12822,6 +12909,8 @@ async function checkResellerUnreadMessages(){
     const msgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],_messages[String(me.id)]||[]);
     _messages[String(me.id)]=msgs;
     const unreadCount = msgs.filter(function(m){return isInboundUnreadForReseller(m);}).length;
+    _health.chatUnreadReseller=Math.max(0,Number(unreadCount)||0);
+    _health.chatLastPollAt=Date.now();
     
     // Check for new messages (unread count increased)
     if(unreadCount > _lastResUnreadCount){
