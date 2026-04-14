@@ -7715,8 +7715,6 @@ let _apiBaseCheckInFlight=null;
 let _apiBaseCheckedAt=0;
 const API_BASE_CHECK_COOLDOWN_MS=60*1000;
 const LOCAL_REPLICA_SYNC_STATE_KEY='jb_replica_sync_state';
-// Production mode: order mutations are considered successful only after cloud ACK.
-const STRICT_ORDER_CLOUD_COMMIT=true;
 function getApiBase(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
   if(getFirebaseEnabled()) return location.origin;
@@ -8118,26 +8116,6 @@ async function syncOrdersViaOpsProtocol(items){
     await fetchOrderUpdatesWithCursor({silent:true}).catch(function(){});
   }
   return {ok:!!result.ok,ackedIds,conflictIds,failedIds,error:result.error||''};
-}
-function applyOpsSyncResultToLocalState(byEntity,strictFailedOrderIds,strictFailureReasons){
-  if(!(byEntity instanceof Map)) return {queuedFallback:false};
-  let queuedFallback=false;
-  byEntity.forEach(function(entry,entityId){
-    if(entry&&entry.status==='acked'){
-      markLocalOrderMutation(entityId,'upsert',{opId:'',v:0});
-      return;
-    }
-    clearLocalOrderMutation(entityId);
-    const firstRow=(entry&&entry.rows&&entry.rows[0])||{};
-    const reason=String(firstRow&&firstRow.reason||'ops_failed');
-    if(STRICT_ORDER_CLOUD_COMMIT){
-      strictFailedOrderIds.add(String(entityId));
-      strictFailureReasons.push(reason);
-      return;
-    }
-    queuedFallback=true;
-  });
-  return {queuedFallback};
 }
 function buildOrderOpsPayload(targetOrders,prevById,deletedOrderIds,nowTs){
   const operations=[];
@@ -9056,7 +9034,6 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
-const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=30*60*1000;
@@ -9093,7 +9070,6 @@ let _firebaseAuthNeedsFreshLogin=(function(){
 })();
 let _lastFirebasePermissionLockAt=0;
 let _ordersBulkPushInFlight=false;
-const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
@@ -9154,10 +9130,6 @@ function ensureFirebaseConfigDefaults(){
   }
   if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
     localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
-  }
-  // Signed-in transport auth only (no anonymous fallback).
-  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
-    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'1');
   }
 }
 ensureFirebaseConfigDefaults();
@@ -9375,15 +9347,6 @@ function buildOrderEvent(op,orderId,meta={}){
     source:meta.source||'client'
   };
 }
-function queueOrderEventFallback(event){
-  if(!event||!event.orderId) return;
-  const q=readLocalSyncFallback();
-  const arr=Array.isArray((q['jb_order_events']&&q['jb_order_events'].value))?q['jb_order_events'].value:[];
-  const key=String(event.opId||event.id||'');
-  const dedup=arr.filter(ev=>String(ev&& (ev.opId||ev.id||''))!==key);
-  dedup.push(event);
-  persistLocalSyncFallback('jb_order_events',dedup);
-}
 function queueGenericSyncEventFallback(eventDoc){
   if(!eventDoc||!eventDoc.key) return;
   const q=readLocalSyncFallback();
@@ -9534,15 +9497,6 @@ function normalizeFeedPost(post,prev){
     imgs:listImgs,
     img:listImgs[0]||null
   };
-}
-function queueOrderOpFallback(op){
-  if(!op||!op.orderId) return;
-  const q=readLocalSyncFallback();
-  const arr=Array.isArray((q['jb_order_ops']&&q['jb_order_ops'].value))?q['jb_order_ops'].value:[];
-  const opId=String(op.opId||'');
-  const dedup=opId?arr.filter(function(row){return String(row&&row.opId||'')!==opId;}):arr.slice();
-  dedup.push(op);
-  persistLocalSyncFallback('jb_order_ops',dedup);
 }
 function ackLocalMutationsFromIncoming(incomingOrders){
   const map=cleanupLocalOrderMutations();
@@ -10015,34 +9969,22 @@ async function deleteOrderWithTombstone(orderId,meta={}){
   if(acked||staleIgnored){
     clearLocalOrderMutation(id);
   }else{
-    if(STRICT_ORDER_CLOUD_COMMIT){
-      // Strict mode: do not keep local-only deletes. Revert immediately.
-      if(previous){
-        const next=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
-        next.push(previous);
-        orders=next
-          .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
-          .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
-      }else{
-        orders=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
-      }
-      clearLocalOrderMutation(id);
-      persistOrdersLocalSafe(orders);
-      updateBadges();
-      render();
-      toast('❌ Cloud delete failed — reverted local change','err');
-      return false;
+    // Strict mode: do not keep local-only deletes. Revert immediately.
+    if(previous){
+      const next=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
+      next.push(previous);
+      orders=next
+        .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
+        .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
+    }else{
+      orders=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
     }
-    queueOrderOpFallback({
-      op:'delete',
-      orderId:id,
-      opId,
-      v,
-      ts,
-      deletedAt:ts,
-      event
-    });
-    queueOrderEventFallback(event);
+    clearLocalOrderMutation(id);
+    persistOrdersLocalSafe(orders);
+    updateBadges();
+    render();
+    toast('❌ Cloud delete failed — reverted local change','err');
+    return false;
   }
   return true;
 }
@@ -10170,7 +10112,7 @@ function clearFirebaseAuthRetryGuards(){
 }
 
 function getFirebaseLoginCreds(){
-  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH || !me || _firebaseAuthNeedsFreshLogin) return null;
+  if(!me || _firebaseAuthNeedsFreshLogin) return null;
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   if(!isValidAuthEmail(meEmail)) return null;
   const mePw=me&&me.password?String(me.password):'';
@@ -10290,7 +10232,7 @@ async function ensureFirebaseOnlineAuth(opts={}){
     _health.authState='waiting_login';
     return null;
   }
-  const creds=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseLoginCreds():null;
+  const creds=getFirebaseLoginCreds();
   if(!creds||!creds.email||!creds.password){
     _health.authState='waiting_login';
     return null;
@@ -16382,7 +16324,6 @@ async function saveOrders(changedOrderIds,opts={}){
     }
 
     await syncBootstrapReplicaState().catch(()=>{});
-    let queuedFallback=false;
     const strictFailedOrderIds=new Set();
     const strictFailureReasons=[];
     const opsPayload=buildOrderOpsPayload(targetOrders,prevById,deletedOrderIds,nowTs);
@@ -16402,26 +16343,20 @@ async function saveOrders(changedOrderIds,opts={}){
         clearLocalOrderMutation(entityId);
         const firstRow=(entry.rows&&entry.rows[0])||{};
         const reason=String(firstRow&&firstRow.reason||opsResult.error||'ops_failed');
-        if(STRICT_ORDER_CLOUD_COMMIT){
-          strictFailedOrderIds.add(String(entityId));
-          strictFailureReasons.push(reason);
-          return;
-        }
-        queuedFallback=true;
+        strictFailedOrderIds.add(String(entityId));
+        strictFailureReasons.push(reason);
       });
       if(opsResult.ok){
         await fetchOrderUpdatesWithCursor({silent:true,maxBatches:3,limit:200}).catch(()=>{});
-      }else if(STRICT_ORDER_CLOUD_COMMIT){
+      }else{
         (opsPayload.operations||[]).forEach(function(op){
           if(!op||!op.entityId) return;
           strictFailedOrderIds.add(String(op.entityId));
         });
         strictFailureReasons.push(String(opsResult.error||'ops_failed'));
-      }else{
-        queuedFallback=true;
       }
     }
-    if(STRICT_ORDER_CLOUD_COMMIT && strictFailedOrderIds.size){
+    if(strictFailedOrderIds.size){
       const failedIds=Array.from(strictFailedOrderIds);
       const failedSet=new Set(failedIds);
       const nextMap=new Map((orders||[]).filter(function(o){return o&&o.id;}).map(function(o){return [String(o.id),o];}));
@@ -16446,16 +16381,13 @@ async function saveOrders(changedOrderIds,opts={}){
       }).catch(()=>{});
       return {ok:false,failedOrderIds:failedIds,reason:firstReason,reverted:true};
     }
-    if(queuedFallback){
-      console.warn('[saveOrders] queued order events for retry');
-    }
     const persistedAfterSync=persistOrdersLocalSafe(orders);
     if(!persistedAfterSync){
       console.warn('[saveOrders] local persist failed after sync', {count:Array.isArray(orders)?orders.length:0});
     }
     markSync('orders_save');
-    writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
-    return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:!!queuedFallback};
+    writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback:false}).catch(()=>{});
+    return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:false};
   } catch(e) {
     console.error('[saveOrders]', e);
     return {ok:false,error:String(e&&e.message||e||'save_orders_failed')};
