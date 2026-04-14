@@ -2259,16 +2259,56 @@ let _singleScanGuard=null;
 
 const ORDER_STATUS_ALIASES=Object.freeze({
   '':'New',
-  'At Depott':'At Depot',
-  'Sent to Wechat':'Sent to Factory',
-  'Sent to WeChat':'Sent to Factory',
-  'Sent to Logistic':'Sent to Logistics'
+  'new':'New',
+  'new order':'New',
+  'at depot':'At Depot',
+  'at depott':'At Depot',
+  'depot':'At Depot',
+  'ready':'At Depot',
+  'ready to ship':'At Depot',
+  'sent to factory':'Sent to Factory',
+  'factory':'Sent to Factory',
+  'sent to wechat':'Sent to Factory',
+  'sent to wechat ':'Sent to Factory',
+  'sent to logistics':'Sent to Logistics',
+  'sent to logistic':'Sent to Logistics',
+  'logistics':'Sent to Logistics',
+  'logistic':'Sent to Logistics',
+  'shipped':'Shipped',
+  'shipping':'Shipped',
+  'completed':'Completed',
+  'complete':'Completed',
+  'delivered':'Completed'
 });
 function normalizeStatus(s){
-  const raw=String(s===undefined||s===null?'':s).trim();
+  const raw=String(s===undefined||s===null?'':s).trim().replace(/\s+/g,' ');
   if(!raw) return 'New';
-  return ORDER_STATUS_ALIASES[raw]||raw;
+  const mapped=ORDER_STATUS_ALIASES[String(raw).toLowerCase()];
+  return mapped||raw;
 }
+function statusIcon(status){
+  const st=normalizeStatus(status);
+  return S_EMOJI[st]||'';
+}
+function statusClass(status){
+  const st=normalizeStatus(status);
+  return S_CLASS[st]||'p-new';
+}
+function normalizeBooleanFlag(v){
+  if(v===true||v===false) return v;
+  if(v===1||v==='1') return true;
+  if(v===0||v==='0') return false;
+  const raw=String(v===undefined||v===null?'':v).trim().toLowerCase();
+  if(!raw) return false;
+  if(raw==='true'||raw==='yes'||raw==='y') return true;
+  if(raw==='false'||raw==='no'||raw==='n') return false;
+  return !!v;
+}
+function orderStatus(order){
+  return normalizeStatus(order&&order.status);
+}
+let _pendingAdminBaselineReady=false;
+const _pendingNotificationSeenIds=new Set();
 function normalizeOrderSnapshotRow(order){
   if(!order||!order.id) return null;
   const ts=Number(order.ts)||Number(order.updatedAt)||Date.now();
@@ -2277,6 +2317,8 @@ function normalizeOrderSnapshotRow(order){
     ...order,
     id:String(order.id),
     status:normalizeStatus(order.status),
+    pendingApproval:normalizeBooleanFlag(order.pendingApproval),
+    rejected:normalizeBooleanFlag(order.rejected),
     ts,
     updatedAt
   };
@@ -2382,7 +2424,7 @@ function getShelfStatus(o){
   const arrived=prods.filter(p=>p.arrived).length;
   return {arrived,total:prods.length,ready:arrived===prods.length&&prods.length>0};
 }
-function isReady(o){return o.status==='At Depot'&&getShelfStatus(o).ready;}
+function isReady(o){return orderStatus(o)==='At Depot'&&getShelfStatus(o).ready;}
 let _ordersStorageWarnAt=0;
 function compactOrdersForStorage(list,opts={}){
   const arr=Array.isArray(list)?list:[];
@@ -2428,8 +2470,8 @@ function compactOrdersForStorage(list,opts={}){
       resellerId:o&&o.resellerId?String(o.resellerId):'',
       supplierId:o&&o.supplierId?String(o.supplierId):'',
       status:normalizeStatus(o&&o.status),
-      pendingApproval:!!(o&&o.pendingApproval),
-      rejected:!!(o&&o.rejected),
+      pendingApproval:normalizeBooleanFlag(o&&o.pendingApproval),
+      rejected:normalizeBooleanFlag(o&&o.rejected),
       rejectNote:o&&o.rejectNote?String(o.rejectNote):'',
       cnTracking:o&&o.cnTracking?String(o.cnTracking):'',
       ukTracking:o&&o.ukTracking?String(o.ukTracking):'',
@@ -2756,7 +2798,7 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
       const id=String(order&&order.id||'');
       if(!id || byId.has(id)) return;
       if(!preservePendingLocalIds.has(id)) return;
-      if(!(order.pendingApproval && !order.rejected)) return;
+      if(!(normalizeBooleanFlag(order&&order.pendingApproval) && !normalizeBooleanFlag(order&&order.rejected))) return;
       byId.set(id,order);
     });
     nextOrders=[...byId.values()].sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
@@ -2915,6 +2957,8 @@ async function login(){
 }
 async function logout(){
   stopPendingPoll();
+  _pendingAdminBaselineReady=false;
+  _pendingNotificationSeenIds.clear();
   if(_globalChatPoll){clearInterval(_globalChatPoll);_globalChatPoll=null;}
   if(_chatPollInterval){clearInterval(_chatPollInterval);_chatPollInterval=null;}
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
@@ -3171,13 +3215,13 @@ async function navOrders(status,el){
   document.getElementById('pg-title').textContent=status==='all'?'All Orders':getStatusLabel(status)+' Orders';
   showOrderTop();
   const tabs=document.querySelectorAll('.ftab');
-  const m={all:0,New:1,'Sent to Factory':2,'At Depot':3,Ready:4,'Sent to Factory':5,Shipped:6,Completed:7};
+  const m={all:0,New:1,'Sent to Factory':2,'At Depot':3,Ready:4,'Sent to Logistics':5,Shipped:6,Completed:7};
   tabs.forEach(t=>t.classList.remove('on'));
   if(m[status]!==undefined)tabs[m[status]].classList.add('on');
   render();
 }
 function renderPendingInTable(){
-  const pending=orders.filter(o=>o.pendingApproval);
+  const pending=orders.filter(o=>normalizeBooleanFlag(o&&o.pendingApproval));
   const tb=document.getElementById('tbody');
   if(!tb)return;
   if(!pending.length){
@@ -3272,7 +3316,11 @@ function closeDetail(){
 function getAlertDays(){return parseInt(settings.alertDays)||3;}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function daysSince(ts){return Math.floor((Date.now()-ts)/(1000*60*60*24));}
-function isOverdue(o){if(['Shipped','Completed'].includes(o.status))return false;return daysSince(o.ts)>=getAlertDays();}
+function isOverdue(o){
+  const st=orderStatus(o);
+  if(st==='Shipped'||st==='Completed') return false;
+  return daysSince(o.ts)>=getAlertDays();
+}
 function getOverdue(){return orders.filter(isOverdue);}
 
 // ── DASHBOARD ──
@@ -3292,9 +3340,9 @@ function renderDash(){
 
   const periodOrders=orders.filter(o=>o.ts>=periodStart);
   const prevOrders=orders.filter(o=>o.ts>=prevStart&&o.ts<periodStart);
-  const cnt=s=>orders.filter(o=>o.status===s).length;
-  const cntP=s=>periodOrders.filter(o=>o.status===s).length;
-  const readyCount=orders.filter(o=>o.status==='At Depot'&&getShelfStatus(o).ready).length;
+  const cnt=s=>orders.filter(o=>orderStatus(o)===s).length;
+  const cntP=s=>periodOrders.filter(o=>orderStatus(o)===s).length;
+  const readyCount=orders.filter(isReady).length;
   const od=getOverdue();
 
   // Change indicator
@@ -3307,7 +3355,7 @@ function renderDash(){
 
   document.getElementById('dash-stats').innerHTML=`
     <div class="stat-card ac"><div class="stat-icon">📦</div><div class="stat-lbl">Total (${_dashPeriod}d)</div><div class="stat-val">${periodOrders.length}</div><div class="stat-sub">${chg(periodOrders.length,prevOrders.length)||'All time: '+orders.length}</div></div>
-    <div class="stat-card"><div class="stat-icon">✅</div><div class="stat-lbl">Completed</div><div class="stat-val">${cntP('Completed')}</div><div class="stat-sub">${chg(cntP('Completed'),prevOrders.filter(o=>o.status==='Completed').length)||'This period'}</div></div>
+    <div class="stat-card"><div class="stat-icon">✅</div><div class="stat-lbl">Completed</div><div class="stat-val">${cntP('Completed')}</div><div class="stat-sub">${chg(cntP('Completed'),prevOrders.filter(o=>orderStatus(o)==='Completed').length)||'This period'}</div></div>
     <div class="stat-card" style="${readyCount?'border-color:var(--green);background:var(--green-bg);':''}"><div class="stat-icon">📦</div><div class="stat-lbl" style="${readyCount?'color:var(--green);':''}">Ready</div><div class="stat-val" style="${readyCount?'color:var(--green);':''}">${readyCount}</div><div class="stat-sub">For logistics</div></div>
     <div class="stat-card ${od.length?'warn':''}"><div class="stat-icon">⚠️</div><div class="stat-lbl">Overdue</div><div class="stat-val">${od.length}</div><div class="stat-sub">${getAlertDays()}+ days</div></div>`;
 
@@ -3345,7 +3393,7 @@ function renderDash(){
 
   // Top resellers
   const resellerMap={};
-  periodOrders.forEach(o=>{if(!o.resellerId)return;if(!resellerMap[o.resellerId])resellerMap[o.resellerId]={count:0,done:0};resellerMap[o.resellerId].count++;if(o.status==='Completed')resellerMap[o.resellerId].done++;});
+  periodOrders.forEach(o=>{if(!o.resellerId)return;if(!resellerMap[o.resellerId])resellerMap[o.resellerId]={count:0,done:0};resellerMap[o.resellerId].count++;if(orderStatus(o)==='Completed')resellerMap[o.resellerId].done++;});
   const topResellers=Object.entries(resellerMap).sort((a,b)=>b[1].count-a[1].count).slice(0,5);
   const trEl=document.getElementById('dash-top-resellers');
   if(!topResellers.length){trEl.innerHTML='<p style="font-size:13px;color:var(--muted);padding:8px 0;">No reseller orders this period.</p>';}
@@ -3368,7 +3416,7 @@ function renderDash(){
   else{tsEl.innerHTML=topSups.map(([id,count])=>{const s=suppliers.find(s=>s.id===id);return`<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:12px;"><div><div style="font-weight:600;">${s?.name||'Unknown'}</div><div style="color:var(--muted);font-size:11px;"></div></div><div style="font-family:var(--mono);font-weight:700;">${count}</div></div>`;}).join('');}
 
   // Avg delivery time
-  const delivered=orders.filter(o=>o.status==='Completed'&&o.ts);
+  const delivered=orders.filter(o=>orderStatus(o)==='Completed'&&o.ts);
   const avgDays=delivered.length?Math.round(delivered.reduce((s,o)=>s+(o.completedAt?Math.floor((o.completedAt-o.ts)/(1000*60*60*24)):daysSince(o.ts)),0)/delivered.length):null;
   const dtEl=document.getElementById('dash-delivery-time');
   dtEl.innerHTML=`
@@ -3382,7 +3430,7 @@ function renderDash(){
     </div>`;
 
   // Ready to ship
-  const readyOrders=orders.filter(o=>o.status==='At Depot'&&getShelfStatus(o).ready);
+  const readyOrders=orders.filter(isReady);
   const readyEl=document.getElementById('dash-ready');
   if(!readyOrders.length){readyEl.innerHTML='<p style="font-size:13px;color:var(--muted);">No orders ready yet.</p>';}
   else readyEl.innerHTML=readyOrders.map(o=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer;" onclick="navOrders('Ready',document.querySelector('.ni'));selectOrder('${o.id}')"><div><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span> <span style="font-size:13px;">${esc(o.name)}</span></div><span class="pill p-ready">📦 Ready</span></div>`).join('');
@@ -3390,7 +3438,7 @@ function renderDash(){
   // Overdue
   const odEl=document.getElementById('dash-overdue');
   if(!od.length){odEl.innerHTML='<p style="font-size:13px;color:var(--muted);padding:8px 0;">✅ No overdue orders!</p>';return;}
-  odEl.innerHTML=`<table style="width:100%;border-collapse:collapse;margin-top:7px;"><thead><tr>${['Ref','Customer','Status','Days'].map(h=>`<th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);">${h}</th>`).join('')}</tr></thead><tbody>${od.map(o=>{const d=daysSince(o.ts);return`<tr style="cursor:pointer;" onclick="navOrders('all',null);selectOrder('${o.id}')"><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;">${esc(o.name)}</td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="pill ${S_CLASS[o.status]||'p-new'}">${S_EMOJI[o.status]||''} ${displayStatus(o.status)}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-family:var(--mono);font-weight:700;color:${d>=5?'var(--red)':'var(--yellow)'};">${d}d</td></tr>`;}).join('')}</tbody></table>`;
+  odEl.innerHTML=`<table style="width:100%;border-collapse:collapse;margin-top:7px;"><thead><tr>${['Ref','Customer','Status','Days'].map(h=>`<th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);">${h}</th>`).join('')}</tr></thead><tbody>${od.map(o=>{const d=daysSince(o.ts);const st=orderStatus(o);return`<tr style="cursor:pointer;" onclick="navOrders('all',null);selectOrder('${o.id}')"><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;">${esc(o.name)}</td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="pill ${S_CLASS[st]||'p-new'}">${S_EMOJI[st]||''} ${displayStatus(st)}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-family:var(--mono);font-weight:700;color:${d>=5?'var(--red)':'var(--yellow)'};">${d}d</td></tr>`;}).join('')}</tbody></table>`;
 }
 
 function renderRealtimeCounters(){
@@ -3427,7 +3475,7 @@ function renderAlerts(){
       <div style="width:8px;height:8px;border-radius:50%;background:${c?'var(--red)':'var(--yellow)'};flex-shrink:0;${firstImg?'':'margin-left:0;'}"></div>
       <div style="flex:1;min-width:0;">
         <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(o.name)} — ${esc(o.ref||o.id.slice(-6))}</div>
-        <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${displayStatus(o.status)} · ${prods}</div>
+        <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${displayStatus(orderStatus(o))} · ${prods}</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px;">${fmtDate(o.ts)}</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
@@ -3455,10 +3503,11 @@ function clearAcknowledgedAlerts(){
 // ── RENDER TABLE ──
 function filtered(){
   return orders.filter(o=>{
-    if(fStatus==='pending') return !!o.pendingApproval;
-    if(fStatus==='Ready') return o.status==='At Depot'&&getShelfStatus(o).ready;
-    if(fStatus==='Sent to Factory' && o.status!=='Sent to Factory' && o.status!=='Sent to Wechat') return false;
-    if(fStatus!=='all' && fStatus!=='Sent to Factory' && o.status!==fStatus) return false;
+    if(fStatus==='pending') return normalizeBooleanFlag(o&&o.pendingApproval);
+    const st=orderStatus(o);
+    if(fStatus==='Ready') return st==='At Depot'&&getShelfStatus(o).ready;
+    if(fStatus==='Sent to Factory' && st!=='Sent to Factory') return false;
+    if(fStatus!=='all' && fStatus!=='Sent to Factory' && st!==fStatus) return false;
     if(fSearch){const q=fSearch.toLowerCase();const names=(o.products||[]).map(p=>p.name).join(' ');if(![o.ref,o.name,o.cnTracking,o.ukTracking,o.id,names].some(v=>v&&v.toLowerCase().includes(q)))return false;}
     // Advanced filters
     const fRes=document.getElementById('flt-reseller')?.value;
@@ -3474,7 +3523,7 @@ function filtered(){
 }
 function render(){
   if(fStatus==='pending'){
-    const pendingCount=orders.filter(o=>o&&o.pendingApproval).length;
+    const pendingCount=orders.filter(o=>o&&normalizeBooleanFlag(o.pendingApproval)).length;
     const badge=document.getElementById('pg-badge');
     if(badge) badge.textContent=pendingCount+' pending';
     updateBadges();
@@ -3495,8 +3544,9 @@ function render(){
     const od=isOverdue(o);
     const shelf=getShelfStatus(o);
     const ready=isReady(o);
-    let sCls=od?'p-overdue':ready?'p-ready':(S_CLASS[o.status]||'p-new');
-    let sLbl=od?'⚠️ Gecikti':ready?'📦 Ready':`${S_EMOJI[o.status]||''} ${displayStatus(o.status)}`;
+    const st=orderStatus(o);
+    let sCls=od?'p-overdue':ready?'p-ready':(S_CLASS[st]||'p-new');
+    let sLbl=od?'⚠️ Gecikti':ready?'📦 Ready':`${S_EMOJI[st]||''} ${displayStatus(st)}`;
     const shelfHtml=prods.length>1?`<div style="font-size:11px;font-family:var(--mono);color:${shelf.ready?'var(--green)':shelf.arrived>0?'var(--yellow)':'var(--muted)'};">${shelf.arrived}/${shelf.total}</div>`:'<div style="font-size:11px;color:var(--muted);">—</div>';
     const chk=_selectMode?`<td><div class="cell"><input type="checkbox" ${_selected.has(o.id)?'checked':''} onclick="toggleSelectOne('${o.id}',event)"></div></td>`:'<td style="width:0;padding:0;"></td>';
     const days=daysSince(o.ts);
@@ -3526,10 +3576,11 @@ function render(){
 // ── SELECT ORDER ──
 function selectOrder(id){
   selId=id;const o=orders.find(x=>x.id===id);if(!o)return;
+  const st=orderStatus(o);
   openDetail();
   document.getElementById('d-name').textContent=o.name||'-';
   document.getElementById('d-ref').textContent='Ref: '+(o.ref||'-')+' · '+fmtDate(o.ts);
-  const pill=document.getElementById('d-pill');pill.textContent=(S_EMOJI[o.status]||'📦')+' '+displayStatus(o.status);pill.className='pill '+(S_CLASS[o.status]||'p-new');
+  const pill=document.getElementById('d-pill');pill.textContent=(S_EMOJI[st]||'📦')+' '+displayStatus(st);pill.className='pill '+(S_CLASS[st]||'p-new');
   document.getElementById('d-name2').textContent=o.name||'-';
   document.getElementById('d-phone').textContent=o.phone||'-';
   document.getElementById('d-addr').textContent=o.address||'-';
@@ -3537,20 +3588,20 @@ function selectOrder(id){
   document.getElementById('d-post').textContent=o.postcode||'-';
   document.getElementById('d-cntry').textContent=o.country||'GB';
   // Steps
-  const curIdx=STATUSES.indexOf(o.status);
+  const curIdx=STATUSES.indexOf(st);
   document.getElementById('d-steps').innerHTML=STATUSES.map((s,i)=>{const done=i<curIdx;const active=i===curIdx;const line=i<STATUSES.length-1?`<div class="step-line ${done?'done':''}"></div>`:'';return`<div><div class="step"><div class="step-dot ${done?'done':active?'active':''}">${done?'✓':i+1}</div><div style="flex:1;"><div class="step-title" style="color:${active?'var(--accent)':done?'var(--text)':'var(--muted)'}">${S_EMOJI[s]} ${getStatusLabel(s)}</div></div></div>${line}</div>`;}).join('');
   // Shelf
   const prods=o.products||[];
   const shelf=getShelfStatus(o);
   const shelfSec=document.getElementById('d-shelf-sec');
-  if(prods.length>1||o.status==='At Depot'){
+  if(prods.length>1||st==='At Depot'){
     shelfSec.style.display='block';
     document.getElementById('d-shelf-items').innerHTML=prods.map((p,i)=>`
       <div class="shelf-item ${p.arrived?'arrived':'missing'}">
         <div class="shelf-dot ${p.arrived?'arrived':'missing'}"></div>
         <div style="flex:1;font-size:12px;font-weight:600;">${p.name||'Product '+(i+1)}</div>
         <div style="font-size:11px;color:var(--muted);">Qty:${p.qty||1}</div>
-        ${!p.arrived&&o.status==='At Depot'?`<button class="btn btn-xs btn-green" onclick="markProductArrived('${o.id}',${i})">✓ Arrived</button>`:''}
+        ${!p.arrived&&st==='At Depot'?`<button class="btn btn-xs btn-green" onclick="markProductArrived('${o.id}',${i})">✓ Arrived</button>`:''}
       </div>`).join('');
     const pct=shelf.total?Math.round(shelf.arrived/shelf.total*100):0;
     document.getElementById('d-shelf-fill').style.width=pct+'%';
@@ -3603,11 +3654,11 @@ function selectOrder(id){
   renderTimeline(o);
   // Status btn
   const btnWrap=document.getElementById('status-btns');
-  const next=S_NEXT[o.status];
-  const readyForLogistics=shelf.ready&&o.status==='At Depot';
+  const next=S_NEXT[st];
+  const readyForLogistics=shelf.ready&&st==='At Depot';
   if(next){
-    let btnHtml=`<button class="btn btn-primary" onclick="advanceStatus()">${S_BTN[o.status]}</button>`;
-    if(o.status==='At Depot'&&!shelf.ready&&prods.length>1){
+    let btnHtml=`<button class="btn btn-primary" onclick="advanceStatus()">${S_BTN[st]}</button>`;
+    if(st==='At Depot'&&!shelf.ready&&prods.length>1){
       btnHtml=`<div style="background:var(--yellow-bg);border:1px solid var(--yellow-border);border-radius:9px;padding:9px 12px;font-size:12px;color:#854d0e;margin-bottom:6px;">⚠️ Waiting for ${shelf.total-shelf.arrived} more item(s)</div>`+btnHtml;
     }
     btnWrap.innerHTML=btnHtml;
@@ -3678,7 +3729,7 @@ function saveProductCN(orderId, prodIdx){
   saveOrders();logActivity('tracking',`CN tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)} - ${o.products[prodIdx].name||'Product '+(prodIdx+1)})`,o.id);
   selectOrder(orderId);toast('✅ CN tracking saved!','ok');
 }
-function saveUk(){const o=orders.find(x=>x.id===selId);if(!o)return;const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}o.ukTracking=val;o.updatedAt=Date.now();if(o.status==='Sent to Factory')o.status='Shipped';saveOrders([o.id]);logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);selectOrder(o.id);toast('✅ UK tracking saved!','ok');}
+function saveUk(){const o=orders.find(x=>x.id===selId);if(!o)return;const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}o.ukTracking=val;o.updatedAt=Date.now();if(orderStatus(o)==='Sent to Factory')o.status='Shipped';saveOrders([o.id]);logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);selectOrder(o.id);toast('✅ UK tracking saved!','ok');}
 function saveNote(){const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();o.note=document.getElementById('d-note-input').value.trim();saveOrders();selectOrder(o.id);toast('✅ Note saved!','ok');}
 
@@ -3708,11 +3759,12 @@ function sendEmail(){
 
   // Build subject based on order status
   const ref = o.ref || o.id.slice(-6);
+  const st=orderStatus(o);
   const subject = o.ukTracking
     ? `Your JRSHOP order has been shipped! 🚚 Ref: ${ref}`
-    : o.status==='Completed'
+    : st==='Completed'
       ? `Your JRSHOP order is complete ✅ Ref: ${ref}`
-      : o.status==='At Depot'||o.status==='Sent to Factory'
+      : st==='At Depot'||st==='Sent to Factory'
         ? `Your JRSHOP order is on its way 📦 Ref: ${ref}`
         : `Your JRSHOP order is confirmed ✅ Ref: ${ref}`;
 
@@ -3852,8 +3904,9 @@ function buildEmailHTML(o){
     </tr>`).join('');
 
   // Status
-  const isShipped=['Shipped','Completed'].includes(o.status);
-  const isDepot=o.status==='At Depot'||o.status==='Sent to Factory';
+  const st=orderStatus(o);
+  const isShipped=['Shipped','Completed'].includes(st);
+  const isDepot=st==='At Depot'||st==='Sent to Factory';
   const headerMsg=isShipped?'🚚 Your order is on its way!':isDepot?'🏭 Your order is at our depot!':'✅ Order Confirmed!';
   const headerColor=isShipped?'#f97316':isDepot?'#f97316':'#f97316';
   const greeting=isShipped?`Great news — your order has been dispatched from our China depot and is on its way to you in the UK!`:
@@ -3866,7 +3919,7 @@ function buildEmailHTML(o){
     {label:'Processing', done:true},
     {label:'At Depot', done:isDepot||isShipped},
     {label:'Dispatched', done:isShipped},
-    {label:'Delivered', done:o.status==='Completed'},
+    {label:'Delivered', done:st==='Completed'},
   ];
   const stepsHtml=steps.map((s,i)=>`
     <td width="20%" style="text-align:center;padding:0 2px;">
@@ -3927,7 +3980,7 @@ function buildEmailHTML(o){
                 <div style="font-size:18px;font-weight:900;color:#f97316;font-family:monospace;">${esc(o.ref||o.id.slice(-6))}</div>
                 <div style="font-size:12px;color:#94a3b8;margin-top:2px;">${new Date(o.ts).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})}</div>
               </td>
-              <td align="right"><div style="background:#dcfce7;color:#166534;font-size:12px;font-weight:700;padding:4px 12px;border-radius:20px;">${displayStatus(o.status)}</div></td>
+              <td align="right"><div style="background:#dcfce7;color:#166534;font-size:12px;font-weight:700;padding:4px 12px;border-radius:20px;">${displayStatus(orderStatus(o))}</div></td>
             </tr>
           </table>
         </td></tr>
@@ -4126,15 +4179,16 @@ function renderResellerView(){
   // Update badge line
   const badgeLine=document.getElementById('res-badge-line');
   if(badgeLine){
-    const pts=allMine.filter(o=>!o.pendingApproval).length*100;
-    badgeLine.textContent=(allMine.filter(o=>!o.pendingApproval).length>49?'🏆 Top Reseller · ':'')+ allMine.length+' orders · '+pts+' pts';
+    const nonPendingCount=allMine.filter(o=>!normalizeBooleanFlag(o&&o.pendingApproval)).length;
+    const pts=nonPendingCount*100;
+    badgeLine.textContent=(nonPendingCount>49?'🏆 Top Reseller · ':'')+ allMine.length+' orders · '+pts+' pts';
   }
   const resPending=document.getElementById('res-pending-count');
-  if(resPending) resPending.textContent=allMine.filter(o=>o.pendingApproval).length;
+  if(resPending) resPending.textContent=allMine.filter(o=>normalizeBooleanFlag(o&&o.pendingApproval)).length;
   const resShipped=document.getElementById('res-shipped');
-  if(resShipped) resShipped.textContent=allMine.filter(o=>o.status==='Shipped').length;
+  if(resShipped) resShipped.textContent=allMine.filter(o=>orderStatus(o)==='Shipped').length;
   const resDone=document.getElementById('res-done');
-  if(resDone) resDone.textContent=allMine.filter(o=>o.status==='Completed').length;
+  if(resDone) resDone.textContent=allMine.filter(o=>orderStatus(o)==='Completed').length;
   const overdueCount=allMine.filter(o=>isOverdue(o)).length;
   const resOverdue=document.getElementById('res-overdue-count');
   if(resOverdue) resOverdue.textContent=overdueCount;
@@ -4143,10 +4197,10 @@ function renderResellerView(){
 
   // Filter
   let myOrders=allMine;
-  if(_resFilter==='pending') myOrders=myOrders.filter(o=>o.pendingApproval);
+  if(_resFilter==='pending') myOrders=myOrders.filter(o=>normalizeBooleanFlag(o&&o.pendingApproval));
   else if(_resFilter==='overdue') myOrders=myOrders.filter(o=>isOverdue(o));
-  else if(_resFilter==='Sent to Factory') myOrders=myOrders.filter(o=>(o.status==='Sent to Factory'||o.status==='Sent to Wechat')&&!o.pendingApproval);
-  else if(_resFilter!=='all') myOrders=myOrders.filter(o=>o.status===_resFilter&&!o.pendingApproval);
+  else if(_resFilter==='Sent to Factory') myOrders=myOrders.filter(o=>orderStatus(o)==='Sent to Factory'&&!normalizeBooleanFlag(o&&o.pendingApproval));
+  else if(_resFilter!=='all') myOrders=myOrders.filter(o=>orderStatus(o)===_resFilter&&!normalizeBooleanFlag(o&&o.pendingApproval));
 
   // Search
   if(_resSearch.trim()){
@@ -4175,8 +4229,9 @@ function renderResellerView(){
     const shelf=getShelfStatus(o);
     const overdue=isOverdue(o);
     const days=daysSince(o.ts);
-    const isPending=o.pendingApproval;
-    const isRejected=o.rejected;
+    const st=orderStatus(o);
+    const isPending=normalizeBooleanFlag(o&&o.pendingApproval);
+    const isRejected=normalizeBooleanFlag(o&&o.rejected);
 
     // Product images row
     const prodImgs=(o.products||[]).map(p=>{
@@ -4191,10 +4246,10 @@ function renderResellerView(){
     let statusBadge='';
     if(isPending&&!isRejected) statusBadge=`<span class="pill" style="background:var(--yellow-bg);color:#854d0e;border:1px solid var(--yellow-border);">⏳ Pending Approval</span>`;
     else if(isRejected) statusBadge=`<span class="pill" style="background:var(--red-bg);color:var(--red);border:1px solid var(--red-border);">❌ Rejected</span>`;
-    else statusBadge=`<span class="pill ${S_CLASS[o.status]||'p-new'}">${S_EMOJI[o.status]||''} ${displayStatus(o.status)}</span>`;
+    else statusBadge=`<span class="pill ${S_CLASS[st]||'p-new'}">${S_EMOJI[st]||''} ${displayStatus(st)}</span>`;
 
     // Overdue warning
-    const overdueWarning=overdue&&!['Shipped','Completed'].includes(o.status)?
+    const overdueWarning=overdue&&!['Shipped','Completed'].includes(st)?
       `<div style="background:var(--red-bg);border:1px solid var(--red-border);border-radius:8px;padding:7px 10px;font-size:12px;color:var(--red);font-weight:600;margin-bottom:8px;">
         ⚠️ ${days} days since order — contact admin if concerned
         <button class="res-issue-btn" style="margin-left:8px;" onclick="reportIssue('${o.id}')">Report</button>
@@ -4377,7 +4432,7 @@ function confirmSingleBarcodeScan(orderId,prodIdx){
   const wasArrived=!!prod.arrived;
   prod.arrived=true;
   if(idx===0||!o.cnTracking) o.cnTracking=code;
-  if(['New','Sent to Factory'].includes(o.status)) o.status='At Depot';
+  if(['New','Sent to Factory'].includes(orderStatus(o))) o.status='At Depot';
   o.updatedAt=Date.now();
   saveOrders([o.id]);updateBadges();
   const shelf=getShelfStatus(o);
@@ -4535,7 +4590,7 @@ function showBarcodeResult(o, prodIdx){
         <div style="width:8px;height:8px;border-radius:50%;background:${p.arrived?'var(--green)':'var(--yellow)'};flex-shrink:0;"></div>
         <div style="flex:1;">${p.name||'Product '+(i+1)}</div>
         <div style="font-family:var(--mono);font-size:11px;color:var(--muted);">${p.cnTracking||'—'}</div>
-        ${!p.arrived&&o.status==='At Depot'?`<button class="btn btn-xs btn-green" onclick="markProdArrivedBarcode('${o.id}',${i})">✓</button>`:''}
+        ${!p.arrived&&orderStatus(o)==='At Depot'?`<button class="btn btn-xs btn-green" onclick="markProdArrivedBarcode('${o.id}',${i})">✓</button>`:''}
       </div>`).join('')}
     </div>`;
   }
@@ -4551,9 +4606,9 @@ function showBarcodeResult(o, prodIdx){
       <button class="btn btn-ghost btn-xs" onclick="cancelBarcodePendingConfirm()">✕ Cancel</button>
     </div>
   </div>`:'';
-  if(['New','Sent to Factory'].includes(o.status)){
+  if(['New','Sent to Factory'].includes(orderStatus(o))){
     actionBtns=`<button class="btn btn-primary btn-sm" style="width:100%;justify-content:center;" onclick="quickMarkDepot('${o.id}')">🏭 Mark At Depot</button>`;
-  } else if(o.status==='At Depot'&&!allArrived&&prods.length>1){
+  } else if(orderStatus(o)==='At Depot'&&!allArrived&&prods.length>1){
     actionBtns=`<div style="background:var(--yellow-bg);border:1px solid var(--yellow-border);border-radius:8px;padding:9px;font-size:12px;color:#854d0e;">⚠️ ${shelf.arrived}/${shelf.total} items arrived — waiting for ${shelf.total-shelf.arrived} more</div>`;
   } else if(allArrived||prods.length<=1){
     actionBtns=`
@@ -4566,7 +4621,7 @@ function showBarcodeResult(o, prodIdx){
     <div style="background:var(--green-bg);border:1px solid var(--green-border);border-radius:11px;padding:13px;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px;">
         <div style="font-size:13px;font-weight:700;color:var(--green);">✅ Order Found!</div>
-        <span class="pill ${S_CLASS[o.status]||'p-new'}">${S_EMOJI[o.status]||''} ${displayStatus(o.status)}</span>
+        <span class="pill ${S_CLASS[orderStatus(o)]||'p-new'}">${S_EMOJI[orderStatus(o)]||''} ${displayStatus(orderStatus(o))}</span>
       </div>
       ${prodInfo}
       <div style="font-size:13px;font-weight:700;margin-bottom:3px;">${esc(o.name)}</div>
@@ -4608,12 +4663,12 @@ function copyAddressFromBarcode(orderId){
   navigator.clipboard.writeText(addr).catch(()=>{const ta=document.createElement('textarea');ta.value=addr;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();});
   toast('📋 Address copied!','ok');
   // Status progression based on current status
-  if(['New','Sent to Factory'].includes(o.status)){
+  if(['New','Sent to Factory'].includes(orderStatus(o))){
     o.status='At Depot';
     updateBadges();
     persistScannerOrderChange(o.id);
     toast('🏭 Status: At Depot','info');
-  } else if(o.status==='At Depot'){
+  } else if(orderStatus(o)==='At Depot'){
     o.status='Sent to Logistics';
     updateBadges();
     persistScannerOrderChange(o.id);
@@ -4836,7 +4891,7 @@ function saveDepotPhoto(input){
     const o=orders.find(x=>x.id===_depotPhotoOrderId);
     if(o&&o.products&&o.products[_depotPhotoProdIdx]){
       o.products[_depotPhotoProdIdx].depotPhoto=img;
-      if(o.status==='New'||o.status==='Sent to Factory') o.status='At Depot';
+      if(['New','Sent to Factory'].includes(orderStatus(o))) o.status='At Depot';
       saveOrders([o.id]);
       logActivity('tracking',`Depot photo added for ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
       toast('✅ Photo saved!','ok');
@@ -4945,12 +5000,12 @@ async function copyAddressOnly(){
   navigator.clipboard.writeText(addr).catch(()=>{const ta=document.createElement('textarea');ta.value=addr;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();});
   toast('📋 Address copied!','ok');
   // Status progression based on current status
-  if(['New','Sent to Factory'].includes(o.status)){
+  if(['New','Sent to Factory'].includes(orderStatus(o))){
     o.status='At Depot';
     updateBadges();
     persistScannerOrderChange(o.id);
     toast('🏭 Status: At Depot','info');
-  } else if(o.status==='At Depot'){
+  } else if(orderStatus(o)==='At Depot'){
     o.status='Sent to Logistics';
     updateBadges();
     persistScannerOrderChange(o.id);
@@ -5159,7 +5214,7 @@ function renderBulkCN(search){
           <div style="font-size:12px;font-family:var(--mono);color:var(--accent);margin-top:2px;">${esc(o.ref||o.id.slice(-6))}</div>
           <div style="font-size:12px;color:var(--muted);margin-top:3px;">${prods.map(p=>p.name).join(' · ')}</div>
         </div>
-        <span class="pill ${S_CLASS[o.status]||'p-new'}">${S_EMOJI[o.status]||''} ${displayStatus(o.status)}</span>
+        <span class="pill ${S_CLASS[orderStatus(o)]||'p-new'}">${S_EMOJI[orderStatus(o)]||''} ${displayStatus(orderStatus(o))}</span>
       </div>
       ${prods.map((p,i)=>`
         <div style="padding:10px 0;border-bottom:1px solid var(--border);">
@@ -5200,7 +5255,7 @@ function saveSingleCN(orderId,prodIdx){
   prods[prodIdx].cnTracking=inp.value.trim();
   // arrived stays FALSE — physical package not here yet
   if(prodIdx===0) o.cnTracking=inp.value.trim();
-  if(o.status==='New'||o.status==='Sent to Factory') o.status='At Depot';
+  if(['New','Sent to Factory'].includes(orderStatus(o))) o.status='At Depot';
   saveOrders();updateBadges();
   logActivity('tracking',`CN tracking: ${inp.value.trim()} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)} - ${prods[prodIdx].name||'P'+(prodIdx+1)})`,o.id);
   toast('✅ CN saved — waiting for physical package','ok');
@@ -5235,7 +5290,7 @@ function handleExcel(input){
       rows.forEach(row=>{
         const name=(row[nameCol]||'').toString().trim();const trk=(row[trkCol]||'').toString().trim();if(!name||!trk)return;
         const order=orders.find(o=>o.name&&o.name.toLowerCase()===name.toLowerCase());
-        if(order){order.ukTracking=trk;if(order.status==='Sent to Factory')order.status='Shipped';matched++;if(order.email)emailOrders.push(order);}
+        if(order){order.ukTracking=trk;if(orderStatus(order)==='Sent to Factory')order.status='Shipped';matched++;if(order.email)emailOrders.push(order);}
         else notFound.push(name);
       });
       saveOrders();render();updateBadges();
@@ -7944,18 +7999,18 @@ function buildOrderStatusDigest(orderList){
   const counts={New:0,'Sent to Factory':0,'At Depot':0,'Sent to Logistics':0,Shipped:0,Completed:0,pendingApproval:0,rejected:0};
   const rows=[];
   normalized.forEach(function(order){
-    const status=normalizeStatus(order&&order.status);
+    const status=orderStatus(order);
     if(counts[status]===undefined) counts[status]=0;
     counts[status]+=1;
-    if(order&&order.pendingApproval) counts.pendingApproval+=1;
-    if(order&&order.rejected) counts.rejected+=1;
+    if(normalizeBooleanFlag(order&&order.pendingApproval)) counts.pendingApproval+=1;
+    if(normalizeBooleanFlag(order&&order.rejected)) counts.rejected+=1;
     rows.push([
       String(order&&order.id||''),
       String(Number(order&&order.v)||0),
       String(Number(order&&order.updatedAt||order&&order.ts)||0),
       status,
-      order&&order.pendingApproval?'1':'0',
-      order&&order.rejected?'1':'0'
+      normalizeBooleanFlag(order&&order.pendingApproval)?'1':'0',
+      normalizeBooleanFlag(order&&order.rejected)?'1':'0'
     ].join(':'));
   });
   rows.sort();
@@ -10771,11 +10826,11 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
 
 function renderLiveCounters(){
   const allCount=Array.isArray(orders)?orders.length:0;
-  const completedCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.status==='Completed').length;
+  const completedCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&orderStatus(o)==='Completed').length;
   const readyCount=(Array.isArray(orders)?orders:[]).filter(function(o){
-    return o&&o.status==='At Depot'&&getShelfStatus(o).ready;
+    return o&&isReady(o);
   }).length;
-  const pendingApprovalCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&o.pendingApproval).length;
+  const pendingApprovalCount=(Array.isArray(orders)?orders:[]).filter(o=>o&&normalizeBooleanFlag(o.pendingApproval)).length;
   const setText=function(id,val){
     const el=document.getElementById(id);
     if(el) el.textContent=String(val);
@@ -12045,7 +12100,7 @@ function buildMsgTemplate(o){
     'New':'Your order has been received and is being processed.',
     'Sent to Factory':'Your order is being processed.',
     'At Depot':'Your order has arrived at our depot and is being prepared.',
-    'Sent to Factory':'Your order has been handed to our logistics partner.',
+    'Sent to Logistics':'Your order has been handed to our logistics partner.',
     'Shipped':`Your order is on its way! Tracking: ${o.ukTracking||'—'}`,
     'Completed':'Your order has been delivered. Thank you!'
   };
@@ -12056,7 +12111,7 @@ function buildMsgTemplate(o){
 // ── DEPOT STATUS ──
 function goDepot(el){setNav(el);showPage('pg-depot');document.getElementById('pg-title').textContent='Depot Status';hideTop();try{renderDepotStatus();}catch(e){console.error("[goDepot]",e);}}
 function renderDepotStatus(){
-  const atDepot=orders.filter(o=>o.status==='At Depot');
+  const atDepot=orders.filter(o=>orderStatus(o)==='At Depot');
   const ready=atDepot.filter(o=>getShelfStatus(o).ready);
   const waiting=atDepot.filter(o=>!getShelfStatus(o).ready);
   const totalProds=atDepot.reduce((s,o)=>(o.products||[]).reduce((ps,p)=>ps+(p.arrived?1:0),s),0);
@@ -12110,7 +12165,7 @@ function renderSupplierPerf(){
     if(!o.supplierId||!supStats[o.supplierId]) return;
     const s=supStats[o.supplierId];
     s.orders++;
-    if(['Completed','Shipped'].includes(o.status)){
+    if(['Completed','Shipped'].includes(orderStatus(o))){
       s.completed++;
       const days=Math.floor((Date.now()-o.ts)/(1000*60*60*24));
       s.totalDays+=days;
@@ -12378,6 +12433,10 @@ let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
 async function startPendingPoll(){
+  if(me&&me.role==='Admin'){
+    _pendingAdminBaselineReady=false;
+    _pendingNotificationSeenIds.clear();
+  }
   if(getFirebaseEnabled() && _health.ordersRealtime){
     if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}
     return;
@@ -12410,7 +12469,7 @@ async function startPendingPoll(){
           const myOld=prevOrders.filter(o=>o.resellerId===me.id);
           const nowTs=Date.now();
           const recentLocalPending=myOld.filter(o=>
-            o&&o.id&&o.pendingApproval&&!o.rejected&&
+            o&&o.id&&normalizeBooleanFlag(o.pendingApproval)&&!normalizeBooleanFlag(o.rejected)&&
             !newOrders.find(n=>n&&n.id===o.id)&&
             (nowTs-((o.updatedAt||o.ts||0)))<RESELLER_PENDING_LOCAL_GRACE_MS
           );
@@ -12426,7 +12485,7 @@ async function startPendingPoll(){
           myNew.forEach(o=>{
             const old=myOld.find(x=>x.id===o.id);
             if(!old)return;
-            if(old.pendingApproval&&!o.pendingApproval&&!o.rejected){
+            if(normalizeBooleanFlag(old.pendingApproval)&&!normalizeBooleanFlag(o.pendingApproval)&&!normalizeBooleanFlag(o.rejected)){
               dispatchRealtimeNotification({
                 kind:'reseller_order_approved',
                 eventId:String(o.id)+'_approved_'+String(o.approvedAt||o.updatedAt||Date.now()),
@@ -12438,7 +12497,7 @@ async function startPendingPoll(){
                 vibratePattern:[200,80,120]
               }).catch(()=>{});
               renderResellerView();
-            } else if(!old.rejected&&o.rejected){
+            } else if(!normalizeBooleanFlag(old.rejected)&&normalizeBooleanFlag(o.rejected)){
               dispatchRealtimeNotification({
                 kind:'reseller_order_rejected',
                 eventId:String(o.id)+'_rejected_'+String(o.updatedAt||Date.now()),
@@ -12465,16 +12524,36 @@ async function startPendingPoll(){
             }
           });
         } else {
-          const oldPending=prevOrders.filter(o=>o.pendingApproval).length;
-          const newPending=newOrders.filter(o=>o.pendingApproval).length;
+          const oldPendingRows=prevOrders.filter(function(o){return normalizeBooleanFlag(o&&o.pendingApproval);});
+          const oldPending=oldPendingRows.length;
+          const newPendingRows=(Array.isArray(newOrders)?newOrders:[]).filter(function(o){return normalizeBooleanFlag(o&&o.pendingApproval);});
+          const newPending=newPendingRows.length;
           const applied=applyAuthoritativeOrdersSnapshot(newOrders,{source:'poll_admin',forceRemote:true});
           if(!applied.applied) return;
           updateBadges();
-          if(newPending>oldPending){
-            const latestPending=newOrders.filter(function(o){return o&&o.pendingApproval;}).sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0];
+          if(!_pendingAdminBaselineReady){
+            newPendingRows.forEach(function(o){
+              if(o&&o.id) _pendingNotificationSeenIds.add(String(o.id));
+            });
+            _pendingAdminBaselineReady=true;
+            return;
+          }
+          const trulyNewPending=newPendingRows.filter(function(o){
+            if(!o||!o.id) return false;
+            const id=String(o.id);
+            if(_pendingNotificationSeenIds.has(id)) return false;
+            return true;
+          });
+          newPendingRows.forEach(function(o){
+            if(o&&o.id) _pendingNotificationSeenIds.add(String(o.id));
+          });
+          if(trulyNewPending.length || newPending>oldPending){
+            const latestPending=trulyNewPending
+              .sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0]
+              || newPendingRows.sort(function(a,b){return Number(b&&b.updatedAt||b&&b.ts||0)-Number(a&&a.updatedAt||a&&a.ts||0);})[0];
             dispatchRealtimeNotification({
               kind:'admin_pending_order',
-              eventId:String(latestPending&&latestPending.id||Date.now())+'_pending',
+              eventId:'pending:'+String(latestPending&&latestPending.id||Date.now())+':'+String(Number(latestPending&&latestPending.updatedAt||latestPending&&latestPending.ts||Date.now())),
               title:'🔔 New Order Request',
               body:'A reseller order is waiting for approval.',
               toastType:'info',
@@ -13644,7 +13723,7 @@ function renderResChart(){
   const start = now - period * 24 * 60 * 60 * 1000;
   
   // Get my orders in period
-  const myOrders = orders.filter(o => o.resellerId === me.id && o.ts >= start && !o.pendingApproval);
+  const myOrders = orders.filter(o => o.resellerId === me.id && o.ts >= start && !normalizeBooleanFlag(o&&o.pendingApproval));
   
   // Calculate stats
   const totalOrders = myOrders.length;
@@ -13664,7 +13743,7 @@ function renderResChart(){
   
   // Calculate previous period for trend
   const prevStart = start - period * 24 * 60 * 60 * 1000;
-  const prevOrders = orders.filter(o => o.resellerId === me.id && o.ts >= prevStart && o.ts < start && !o.pendingApproval);
+  const prevOrders = orders.filter(o => o.resellerId === me.id && o.ts >= prevStart && o.ts < start && !normalizeBooleanFlag(o&&o.pendingApproval));
   const prevRevenue = prevOrders.reduce((sum, o) => {
     const orderTotal = (o.products || []).reduce((s, p) => s + (p.price || 0) * (p.qty || 1), 0);
     return sum + orderTotal;
@@ -13970,7 +14049,7 @@ function renderResLB(){
   const resellers=users.filter(u=>u.role==='Reseller');
   const lb=resellers.map(u=>({
     ...u,
-    count:orders.filter(o=>o.resellerId===u.id&&!o.pendingApproval).length
+    count:orders.filter(o=>o.resellerId===u.id&&!normalizeBooleanFlag(o&&o.pendingApproval)).length
   })).sort((a,b)=>b.count-a.count);
   
   const colors=['#f97316','#7c3aed','#16a34a','#0891b2','#dc2626'];
@@ -14026,7 +14105,7 @@ function renderResOrders(){
   const filter=document.querySelector('#res-order-filters .active')?.dataset?.filter||'all';
   let myOrders=orders.filter(o=>o.resellerId===me.id);
   
-  if(filter==='pending') myOrders=myOrders.filter(o=>o.pendingApproval);
+  if(filter==='pending') myOrders=myOrders.filter(o=>normalizeBooleanFlag(o&&o.pendingApproval));
   else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>normalizeStatus(o.status)==='Sent to Factory');
   else if(filter!=='all') myOrders=myOrders.filter(o=>normalizeStatus(o.status)===filter);
   
@@ -14045,8 +14124,9 @@ function renderResOrders(){
   el.innerHTML=myOrders.map(o=>{
     const stepIdx=statusSteps.indexOf(normStatus(o));
     const prods=(o.products||[]).map(p=>esc(p.name)).join(', ');
-    const isPending=o.pendingApproval;
-    const statusLabel=isPending?'⏳ Pending Approval':(statusIcons[o.status]||'📦')+' '+displayStatus(o.status);
+    const statusNorm=orderStatus(o);
+    const isPending=normalizeBooleanFlag(o&&o.pendingApproval);
+    const statusLabel=isPending?'⏳ Pending Approval':(statusIcons[statusNorm]||'📦')+' '+displayStatus(statusNorm);
     // Get first product image
     const firstImg=(o.products||[]).find(p=>p.img)?.img;
     
@@ -14065,7 +14145,7 @@ function renderResOrders(){
     
     return `<div onclick="openResDetail('${o.id}')" style="background:var(--card);border-radius:16px;margin-bottom:10px;overflow:hidden;border:1px solid var(--border);cursor:pointer;">
       <div style="padding:12px 14px;display:flex;align-items:center;gap:10px;">
-        ${firstImg?`<img src="${firstImg}" style="width:38px;height:38px;border-radius:12px;object-fit:cover;flex-shrink:0;" onerror="this.style.display='none';">`:`<div style="width:38px;height:38px;border-radius:12px;background:${isPending?'rgba(148,163,184,.1)':'rgba(249,115,22,.15)'};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">${statusIcons[o.status]||'📦'}</div>`}
+        ${firstImg?`<img src="${firstImg}" style="width:38px;height:38px;border-radius:12px;object-fit:cover;flex-shrink:0;" onerror="this.style.display='none';">`:`<div style="width:38px;height:38px;border-radius:12px;background:${isPending?'rgba(148,163,184,.1)':'rgba(249,115,22,.15)'};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">${statusIcons[statusNorm]||'📦'}</div>`}
         <div style="flex:1;">
           <div style="font-size:13px;font-weight:800;color:#f97316;">${esc(o.ref||o.id.slice(-6))}</div>
           <div style="font-size:12px;color:var(--text);margin-top:1px;">${esc(o.name)}</div>
@@ -14101,14 +14181,16 @@ function openResDetail(orderId){
     {key:'Shipped',label:'Shipped to UK',icon:'🚚'},
     {key:'Completed',label:'Delivered',icon:'🏠'},
   ];
-  const curIdx=statusSteps.findIndex(s=>s.key===o.status);
+  const st=orderStatus(o);
+  const isPending=normalizeBooleanFlag(o&&o.pendingApproval);
+  const curIdx=statusSteps.findIndex(s=>s.key===st);
   // Product images
   const prodImgs=(o.products||[]).filter(p=>p.img);
   const prodImgsHtml=prodImgs.length?`<div style="margin-bottom:14px;"><div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Product Images</div><div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:8px;">${prodImgs.map(p=>`<img src="${p.img}" style="width:80px;height:80px;border-radius:10px;object-fit:cover;cursor:pointer;flex-shrink:0;" onclick="openLightbox('${p.img.replace(/'/g,"\\'")}')" onerror="this.style.display='none';">`).join('')}</div></div>`:'';
   
   content.innerHTML=`
     <div style="font-size:16px;font-weight:800;margin-bottom:4px;">${esc(o.ref||o.id.slice(-6))}</div>
-    <div style="font-size:13px;color:#f97316;font-weight:700;margin-bottom:16px;">${displayStatus(o.status)}</div>
+    <div style="font-size:13px;color:#f97316;font-weight:700;margin-bottom:16px;">${displayStatus(st)}</div>
     
     <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Customer</div>
     <div style="background:var(--bg);border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;">
@@ -14132,8 +14214,8 @@ function openResDetail(orderId){
     <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Live Timeline</div>
     <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;">
       ${statusSteps.map((s,i)=>{
-        const done=i<=curIdx&&!o.pendingApproval;
-        const active=i===curIdx&&!o.pendingApproval;
+        const done=i<=curIdx&&!isPending;
+        const active=i===curIdx&&!isPending;
         return `<div style="display:flex;gap:10px;align-items:flex-start;">
           <div style="width:10px;height:10px;border-radius:50%;flex-shrink:0;margin-top:4px;background:${done?'#f97316':active?'rgba(249,115,22,.3)':'rgba(255,255,255,.1)'};${active?'box-shadow:0 0 0 4px rgba(249,115,22,.2);':''}"></div>
           <div><div style="font-size:13px;font-weight:${done||active?700:400};color:${done||active?'var(--text)':'var(--muted)'};">${s.icon} ${s.label}</div></div>
@@ -15523,7 +15605,14 @@ function checkAutoBackup(){
     }).catch(()=>{});
   }
 }
-function stopPendingPoll(){if(_pendingPollInterval){clearInterval(_pendingPollInterval);_pendingPollInterval=null;}}
+function stopPendingPoll(){
+  if(_pendingPollInterval){
+    clearInterval(_pendingPollInterval);
+    _pendingPollInterval=null;
+  }
+  _pendingAdminBaselineReady=false;
+  _pendingNotificationSeenIds.clear();
+}
 
 function resetSessionTimer(){
   clearTimeout(_sessionTimer);
@@ -15610,15 +15699,15 @@ function generateReport(){
   <button onclick="window.print()" style="background:#f97316;color:#fff;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;margin-bottom:20px;">🖨️ Print</button>
   <h2>📊 Bu Hafta</h2>
   <div>
-    ${[['New Order',weekOrders.length],['Tamamlanan',weekOrders.filter(o=>o.status==='Completed').length],['Kargolanan',weekOrders.filter(o=>['Shipped','Completed'].includes(o.status)).length],['Geciken',weekOrders.filter(isOverdue).length]].map(([l,n])=>`<div class="stat"><div class="stat-n">${n}</div><div class="stat-l">${l}</div></div>`).join('')}
+    ${[['New Order',weekOrders.length],['Tamamlanan',weekOrders.filter(o=>orderStatus(o)==='Completed').length],['Kargolanan',weekOrders.filter(o=>['Shipped','Completed'].includes(orderStatus(o))).length],['Geciken',weekOrders.filter(isOverdue).length]].map(([l,n])=>`<div class="stat"><div class="stat-n">${n}</div><div class="stat-l">${l}</div></div>`).join('')}
   </div>
   <h2>📅 Bu Ay</h2>
   <div>
-    ${[['Toplam Order',monthOrders.length],['Tamamlanan',monthOrders.filter(o=>o.status==='Completed').length],['Kargolanan',monthOrders.filter(o=>['Shipped','Completed'].includes(o.status)).length]].map(([l,n])=>`<div class="stat"><div class="stat-n">${n}</div><div class="stat-l">${l}</div></div>`).join('')}
+    ${[['Toplam Order',monthOrders.length],['Tamamlanan',monthOrders.filter(o=>orderStatus(o)==='Completed').length],['Kargolanan',monthOrders.filter(o=>['Shipped','Completed'].includes(orderStatus(o))).length]].map(([l,n])=>`<div class="stat"><div class="stat-n">${n}</div><div class="stat-l">${l}</div></div>`).join('')}
   </div>
   <h2>📋 Bu Haftaki Orderler</h2>
   <table><tr><th>Ref</th><th>Customer</th><th>Ürünler</th><th>Status</th><th>Tarih</th></tr>
-  ${weekOrders.map(o=>`<tr><td style="font-family:monospace;">${esc(o.ref||o.id.slice(-6))}</td><td>${esc(o.name)}</td><td>${(o.products||[]).map(p=>p.name).join(', ')}</td><td>${displayStatus(o.status)}</td><td>${fmtDate(o.ts)}</td></tr>`).join('')}
+  ${weekOrders.map(o=>`<tr><td style="font-family:monospace;">${esc(o.ref||o.id.slice(-6))}</td><td>${esc(o.name)}</td><td>${(o.products||[]).map(p=>p.name).join(', ')}</td><td>${displayStatus(orderStatus(o))}</td><td>${fmtDate(o.ts)}</td></tr>`).join('')}
   </table>
   </${'body'}></${'html'}>`);
 }
@@ -16126,7 +16215,7 @@ function saveAllBulkCN(){
       if(pi===0) o.cnTracking=normalizedTracking;
     });
     // Advance status
-    if(o.status==='New'||o.status==='Sent to Factory') o.status='At Depot';
+    if(['New','Sent to Factory'].includes(orderStatus(o))) o.status='At Depot';
     logActivity('tracking',`CN added via AI: ${esc(normalizedTracking)} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
     saved++;
   });
@@ -16161,7 +16250,7 @@ function saveCNProductSelection(){
       if(pi===0) o.cnTracking=_cnPMTracking;
     }
   });
-  if(o.status==='New'||o.status==='Sent to Factory') o.status='At Depot';
+  if(['New','Sent to Factory'].includes(orderStatus(o))) o.status='At Depot';
   saveOrders();updateBadges();
   closeCNProductModal();
   // Process next in queue
@@ -16209,7 +16298,7 @@ function updateBadges(){
   if(nb('nb-ship'))nb('nb-ship').textContent=cnt('Shipped');
   if(nb('nb-done'))nb('nb-done').textContent=cnt('Completed');
   const od=getOverdue().filter(o=>!_acknowledgedAlerts.has(o.id)).length;const nba=nb('nb-alert');if(nba){nba.textContent=od;nba.style.display=od?'inline':'none';}
-  const pendingCount=normalizedOrders.filter(o=>o.pendingApproval).length;
+  const pendingCount=normalizedOrders.filter(o=>normalizeBooleanFlag(o&&o.pendingApproval)).length;
   const nbPending=nb('nb-pending');if(nbPending)nbPending.textContent=pendingCount;
   const navPending=document.getElementById('nav-pending');
   if(navPending)navPending.style.display=(me&&me.role!=='Reseller'&&pendingCount>0)?'flex':'none';
