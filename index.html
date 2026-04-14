@@ -8441,7 +8441,6 @@ async function recoverOrdersNow(){
   }
 }
 function saveFirebaseSettings(){
-  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
   stopFirebaseRealtime();
   toast('ℹ️ Cloudflare backend modu aktif (Firebase kapalı).','info');
 }
@@ -8461,7 +8460,6 @@ const FIREBASE_CONFIG_DEFAULT={
   measurementId:"G-B1RG9Z0D79"
 };
 const FIREBASE_CONFIG_KEY='jb_firebase_config';
-const FIREBASE_ENABLED_KEY='jb_firebase_enabled';
 const FIREBASE_COLLECTION_ORDERS='orders';
 const FIREBASE_COLLECTION_DATA='app_data';
 const FIREBASE_COLLECTION_MEDIA='media';
@@ -8473,7 +8471,6 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
-const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=90*1000;
@@ -8541,13 +8538,6 @@ const _nativeFetch=window.fetch.bind(window);
 function ensureFirebaseConfigDefaults(){
   if(!localStorage.getItem(FIREBASE_CONFIG_KEY)){
     localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(FIREBASE_CONFIG_DEFAULT));
-  }
-  if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
-    localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
-  }
-  // Signed-in transport auth only (no anonymous fallback).
-  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
-    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'1');
   }
 }
 ensureFirebaseConfigDefaults();
