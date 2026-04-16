@@ -2148,6 +2148,42 @@ console.error = function(...args){
     // logError('console_error', msg);
   }
 };
+function isDebugLoggingEnabled(){
+  try{
+    const raw=String(localStorage.getItem('jb_debug_logs')||'').trim().toLowerCase();
+    return raw==='1' || raw==='true' || raw==='yes' || raw==='on';
+  }catch(_e){
+    return false;
+  }
+}
+function debugLog(){
+  if(!isDebugLoggingEnabled()) return;
+  try{ _originalConsole.log.apply(console,arguments); }catch(_e){}
+}
+
+const ORDER_STATUS_ALIASES=Object.freeze({
+  '':'New',
+  'new':'New',
+  'new order':'New',
+  'at depot':'At Depot',
+  'at depott':'At Depot',
+  'depot':'At Depot',
+  'ready':'At Depot',
+  'ready to ship':'At Depot',
+  'sent to factory':'Sent to Factory',
+  'factory':'Sent to Factory',
+  'sent to wechat':'Sent to Factory',
+  'sent to wechat ':'Sent to Factory',
+  'sent to logistics':'Sent to Logistics',
+  'sent to logistic':'Sent to Logistics',
+  'logistics':'Sent to Logistics',
+  'logistic':'Sent to Logistics',
+  'shipped':'Shipped',
+  'shipping':'Shipped',
+  'completed':'Completed',
+  'complete':'Completed',
+  'delivered':'Completed'
+});
 
 // ── STATE ──
 let orders    = (()=>{
@@ -2224,7 +2260,7 @@ function persistUsersLocalSafe(remoteUsers,source=''){
   const merged=mergeUsersSafely(localUsers,remoteUsers);
   try{localStorage.setItem('jb_users',JSON.stringify(merged));}catch(_e){}
   users=merged;
-  if(source) console.log('[Users] merged from',source,'local',Array.isArray(localUsers)?localUsers.length:0,'remote',Array.isArray(remoteUsers)?remoteUsers.length:0,'final',merged.length);
+  if(source) debugLog('[Users] merged from',source,'local',Array.isArray(localUsers)?localUsers.length:0,'remote',Array.isArray(remoteUsers)?remoteUsers.length:0,'final',merged.length);
   return merged;
 }
 function findUserForLogin(identifier,password){
@@ -2257,29 +2293,6 @@ const SCAN_DETECT_INTERVAL_MS=650;
 let _selectMode=false, _selected=new Set();
 let _singleScanGuard=null;
 
-const ORDER_STATUS_ALIASES=Object.freeze({
-  '':'New',
-  'new':'New',
-  'new order':'New',
-  'at depot':'At Depot',
-  'at depott':'At Depot',
-  'depot':'At Depot',
-  'ready':'At Depot',
-  'ready to ship':'At Depot',
-  'sent to factory':'Sent to Factory',
-  'factory':'Sent to Factory',
-  'sent to wechat':'Sent to Factory',
-  'sent to wechat ':'Sent to Factory',
-  'sent to logistics':'Sent to Logistics',
-  'sent to logistic':'Sent to Logistics',
-  'logistics':'Sent to Logistics',
-  'logistic':'Sent to Logistics',
-  'shipped':'Shipped',
-  'shipping':'Shipped',
-  'completed':'Completed',
-  'complete':'Completed',
-  'delivered':'Completed'
-});
 function normalizeStatus(s){
   const raw=String(s===undefined||s===null?'':s).trim().replace(/\s+/g,' ');
   if(!raw) return 'New';
@@ -2577,6 +2590,47 @@ function isUsableOrderImage(url){
   if(/^(https?:|data:|blob:)/i.test(v)) return true;
   return /^\/?api\/image\/[a-z0-9_-]+$/i.test(v);
 }
+const BROKEN_IMAGE_CACHE_KEY='jb_broken_images';
+const MAX_BROKEN_IMAGE_CACHE=500;
+const _brokenImageCache=(function(){
+  try{
+    const raw=localStorage.getItem(BROKEN_IMAGE_CACHE_KEY);
+    const list=raw?JSON.parse(raw):[];
+    return new Set((Array.isArray(list)?list:[]).map(function(v){return String(v||'').trim();}).filter(Boolean));
+  }catch(_e){
+    return new Set();
+  }
+})();
+function persistBrokenImageCache(){
+  try{
+    const list=[..._brokenImageCache];
+    if(list.length>MAX_BROKEN_IMAGE_CACHE){
+      list.splice(0,list.length-MAX_BROKEN_IMAGE_CACHE);
+    }
+    localStorage.setItem(BROKEN_IMAGE_CACHE_KEY,JSON.stringify(list));
+  }catch(_e){}
+}
+function normalizeImageUrlForRender(url){
+  const v=String(url||'').trim();
+  if(!isUsableOrderImage(v)) return '';
+  if(!/^\/?api\/image\//i.test(v)) return v;
+  return v.startsWith('/')?v:('/'+v);
+}
+function getRenderableImageUrl(url){
+  const normalized=normalizeImageUrlForRender(url);
+  if(!normalized) return '';
+  if(_brokenImageCache.has(normalized)) return '';
+  return normalized;
+}
+function handleBrokenImage(el){
+  if(!el) return;
+  const src=String(el.getAttribute('src')||el.dataset.src||'').trim();
+  if(src){
+    _brokenImageCache.add(src);
+    persistBrokenImageCache();
+  }
+  el.style.display='none';
+}
 function buildCatalogImageLookup(){
   const byName=new Map();
   try{
@@ -2837,21 +2891,46 @@ async function login(){
     // Cloudflare API login retry
     const loginBtn=document.querySelector('.login-btn');
     if(loginBtn)loginBtn.textContent='Checking...';
-    fetch(getApiBase()+'/api/data',{headers:getAuthHeaders()})
-    .then(r=>r.json())
-    .then(res=>{
-      if(res.data&&res.data.jb_users){
-        users=persistUsersLocalSafe(res.data.jb_users,'login_retry');
-        const u2=findUserForLogin(em,pw);
-        if(u2){if(loginBtn)loginBtn.textContent='Sign In →';login();return;}
+    try{
+      let matchedFromApi=null;
+      // Preferred path: ask backend to validate credentials directly.
+      try{
+        const loginRes=await fetch(getApiBase()+'/api/login',{
+          method:'POST',
+          headers:getAuthHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({email:em,password:pw})
+        });
+        if(loginRes.ok){
+          const payload=await loginRes.json().catch(()=>({}));
+          const remoteUser=payload&&payload.user&&typeof payload.user==='object'?payload.user:null;
+          if(remoteUser&&remoteUser.email){
+            users=persistUsersLocalSafe([{
+              id:String(remoteUser.id||('u'+Date.now())),
+              email:String(remoteUser.email||'').trim(),
+              password:pw,
+              role:String(remoteUser.role||'Reseller'),
+              dname:String(remoteUser.dname||'').trim()
+            }],'login_endpoint');
+            matchedFromApi=findUserForLogin(em,pw);
+          }
+        }
+      }catch(_e){}
+      if(!matchedFromApi){
+        // Backward compatibility: older workers without /api/login.
+        const dataRes=await fetch(getApiBase()+'/api/data',{headers:getAuthHeaders()});
+        const res=await dataRes.json().catch(()=>({}));
+        if(res.data&&res.data.jb_users){
+          users=persistUsersLocalSafe(res.data.jb_users,'login_retry');
+          matchedFromApi=findUserForLogin(em,pw);
+        }
       }
+      if(matchedFromApi){if(loginBtn)loginBtn.textContent='Sign In →';login();return;}
       if(loginBtn)loginBtn.textContent='Sign In →';
       document.getElementById('login-err').style.display='block';
-    })
-    .catch(()=>{
+    }catch(_e){
       if(loginBtn)loginBtn.textContent='Sign In →';
       document.getElementById('login-err').style.display='block';
-    });
+    }
     return;
   }
   me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
@@ -3539,8 +3618,16 @@ function render(){
     const prods=o.products||[];
     // Show all product images stacked
     const imgsH=prods.length===0?`<div class="prod-thumb-ph">📦</div>`:
-      prods.length===1?(prods[0].img?`<img src="${prods[0].img}" class="prod-thumb" alt="">` :`<div class="prod-thumb-ph">📦</div>`):
-      `<div style="display:flex;gap:3px;">${prods.slice(0,3).map(p=>p.img?`<img src="${p.img}" style="width:36px;height:36px;border-radius:7px;object-fit:cover;border:1px solid var(--border);" alt="">`:`<div style="width:36px;height:36px;border-radius:7px;background:var(--bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:14px;">📦</div>`).join('')}${prods.length>3?`<div style="width:36px;height:36px;border-radius:7px;background:var(--accent-light);border:1px solid var(--accent-border);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);">+${prods.length-3}</div>`:''}` +'</div>';
+      prods.length===1?((function(){
+        const imgSrc=getRenderableImageUrl(prods[0]&&prods[0].img);
+        return imgSrc?`<img src="${imgSrc}" class="prod-thumb" alt="" onerror="handleBrokenImage(this)">`:`<div class="prod-thumb-ph">📦</div>`;
+      })()):
+      `<div style="display:flex;gap:3px;">${prods.slice(0,3).map(function(p){
+        const imgSrc=getRenderableImageUrl(p&&p.img);
+        return imgSrc
+          ? `<img src="${imgSrc}" style="width:36px;height:36px;border-radius:7px;object-fit:cover;border:1px solid var(--border);" alt="" onerror="handleBrokenImage(this)">`
+          : `<div style="width:36px;height:36px;border-radius:7px;background:var(--bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:14px;">📦</div>`;
+      }).join('')}${prods.length>3?`<div style="width:36px;height:36px;border-radius:7px;background:var(--accent-light);border:1px solid var(--accent-border);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);">+${prods.length-3}</div>`:''}` +'</div>';
     const od=isOverdue(o);
     const shelf=getShelfStatus(o);
     const ready=isReady(o);
@@ -3615,8 +3702,14 @@ function selectOrder(id){
   document.getElementById('d-twgt').textContent=totalQty+' item'+(totalQty!==1?'s':'');
   document.getElementById('d-products').innerHTML=prods.map((p,i)=>`<div class="d-prod-item">
     <div style="display:flex;gap:5px;flex-shrink:0;">
-      ${p.img?`<img src="${p.img}" class="d-prod-img" alt="Product image" title="Product image — click to enlarge" onclick="openLightbox('${p.img.replace(/'/g,"\\'")}')">` :`<div class="d-prod-ph">📦</div>`}
-      ${p.depotPhoto?`<img src="${p.depotPhoto}" class="d-prod-img" alt="Depot photo" title="Depot photo — click to enlarge" onclick="openLightbox('${p.depotPhoto.replace(/'/g,"\\'")}')">` :''}
+      ${(function(){
+        const imgSrc=getRenderableImageUrl(p&&p.img);
+        return imgSrc?`<img src="${imgSrc}" class="d-prod-img" alt="Product image" title="Product image — click to enlarge" onclick="openLightbox('${imgSrc.replace(/'/g,"\\'")}')" onerror="handleBrokenImage(this)">`:`<div class="d-prod-ph">📦</div>`;
+      })()}
+      ${(function(){
+        const depotSrc=getRenderableImageUrl(p&&p.depotPhoto);
+        return depotSrc?`<img src="${depotSrc}" class="d-prod-img" alt="Depot photo" title="Depot photo — click to enlarge" onclick="openLightbox('${depotSrc.replace(/'/g,"\\'")}')" onerror="handleBrokenImage(this)">`:'';
+      })()}
     </div>
     <div style="flex:1;"><div style="font-size:12px;font-weight:600;">${p.name||'-'}${p.arrived?` <span style="color:var(--green);font-size:10px;">✓ Arrived</span>`:''}</div>
     <div style="font-size:11px;color:var(--muted);">Qty:${p.qty||1}</div>
@@ -8179,7 +8272,7 @@ function applyOpsSyncResultToLocalState(byEntity,strictFailedOrderIds,strictFail
   let queuedFallback=false;
   byEntity.forEach(function(entry,entityId){
     if(entry&&entry.status==='acked'){
-      markLocalOrderMutation(entityId,'upsert',{opId:'',v:0});
+      clearLocalOrderMutation(entityId);
       return;
     }
     clearLocalOrderMutation(entityId);
@@ -8967,10 +9060,10 @@ async function loadFromCloud(){
   try{
     const api=await ensureWorkingApiBase({silent:true});
       try{
-        console.log('[Remote] Loading data...');
+        debugLog('[Remote] Loading data...');
         // Load settings & other data
         const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
-        console.log('[Remote] Response status:', dataRes.status);
+        debugLog('[Remote] Response status:', dataRes.status);
         if(!dataRes.ok){
           const errText = await dataRes.text().catch(()=>'');
           console.error('[Remote] Error response:', errText);
@@ -9031,7 +9124,7 @@ async function loadFromCloud(){
         notifSettings=JSON.parse(localStorage.getItem('jb_notif')||'{"shipped":true}');
         loadSettings();loadTemplates();loadNotifSettings();
         updateBadges();render();
-        console.log(`[Remote] Loaded ${applied.count} orders`);
+        debugLog(`[Remote] Loaded ${applied.count} orders`);
         return true;
       }catch(e){
         console.error('[Remote] Error:', e);
@@ -9079,6 +9172,7 @@ async function recoverOrdersNow(){
   }
 }
 function saveFirebaseSettings(){
+  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
   stopFirebaseRealtime();
   toast('ℹ️ Cloudflare backend modu aktif (Firebase kapalı).','info');
 }
@@ -9098,6 +9192,7 @@ const FIREBASE_CONFIG_DEFAULT={
   measurementId:"G-B1RG9Z0D79"
 };
 const FIREBASE_CONFIG_KEY='jb_firebase_config';
+const FIREBASE_ENABLED_KEY='jb_firebase_enabled';
 const FIREBASE_COLLECTION_ORDERS='orders';
 const FIREBASE_COLLECTION_DATA='app_data';
 const FIREBASE_COLLECTION_MEDIA='media';
@@ -9109,6 +9204,7 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
+const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
 const LOCAL_ORDER_MUTATION_KEEP_MS=30*60*1000;
@@ -9145,6 +9241,7 @@ let _firebaseAuthNeedsFreshLogin=(function(){
 })();
 let _lastFirebasePermissionLockAt=0;
 let _ordersBulkPushInFlight=false;
+const FIREBASE_USE_EMAIL_PASSWORD_AUTH=true;
 const FIREBASE_AUTH_RATE_LIMIT_COOLDOWN_MS=60*1000;
 const FIREBASE_AUTH_PASSWORD_RETRY_COOLDOWN_MS=2*60*1000;
 const FIREBASE_AUTH_RETRY_CAP_MS=5*60*1000;
@@ -9202,6 +9299,13 @@ function recordDataKeyFetchMetrics(ok,latencyMs,keyCount){
 function ensureFirebaseConfigDefaults(){
   if(!localStorage.getItem(FIREBASE_CONFIG_KEY)){
     localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(FIREBASE_CONFIG_DEFAULT));
+  }
+  if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
+    localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
+  }
+  // Signed-in transport auth only (no anonymous fallback).
+  if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
+    localStorage.setItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY,'1');
   }
 }
 ensureFirebaseConfigDefaults();
@@ -10214,7 +10318,7 @@ function clearFirebaseAuthRetryGuards(){
 }
 
 function getFirebaseLoginCreds(){
-  if(!me || _firebaseAuthNeedsFreshLogin) return null;
+  if(!FIREBASE_USE_EMAIL_PASSWORD_AUTH || !me || _firebaseAuthNeedsFreshLogin) return null;
   const meEmail=me&&me.email?String(me.email).trim().toLowerCase():'';
   if(!isValidAuthEmail(meEmail)) return null;
   const mePw=me&&me.password?String(me.password):'';
@@ -10334,7 +10438,7 @@ async function ensureFirebaseOnlineAuth(opts={}){
     _health.authState='waiting_login';
     return null;
   }
-  const creds=getFirebaseLoginCreds();
+  const creds=FIREBASE_USE_EMAIL_PASSWORD_AUTH?getFirebaseLoginCreds():null;
   if(!creds||!creds.email||!creds.password){
     _health.authState='waiting_login';
     return null;
@@ -12474,6 +12578,8 @@ async function dispatchRealtimeNotification(opts={}){
 
 // ── SESSION TIMEOUT ──
 let _sessionTimer=null, _sessionTimeout=30*60*1000; // 30 min default
+// Temporary hotfix: disabled per customer request to prevent data-loss after relogin.
+const SESSION_LOCK_ENABLED=false;
 // ── AUTO REFRESH for pending orders ──
 let _pendingPollInterval=null;
 async function startPendingPoll(){
@@ -15659,6 +15765,7 @@ function stopPendingPoll(){
 }
 
 function resetSessionTimer(){
+  if(!SESSION_LOCK_ENABLED) return;
   clearTimeout(_sessionTimer);
   if(!me) return;
   _sessionTimer=setTimeout(()=>{
@@ -15667,6 +15774,11 @@ function resetSessionTimer(){
   },_sessionTimeout);
 }
 function sessionUnlock(){
+  if(!SESSION_LOCK_ENABLED){
+    const overlay=document.getElementById('session-overlay');
+    if(overlay) overlay.style.display='none';
+    return;
+  }
   const pw=document.getElementById('session-pw').value;
   if(!pw){toast('⚠️ Şifre girin','err');return;}
   if(pw===me.password){
@@ -15679,7 +15791,9 @@ function sessionUnlock(){
     toast('❌ Yanlış şifre','err');
   }
 }
-['click','touchstart','keydown','mousemove'].forEach(e=>document.addEventListener(e,resetSessionTimer,{passive:true}));
+if(SESSION_LOCK_ENABLED){
+  ['click','touchstart','keydown','mousemove'].forEach(e=>document.addEventListener(e,resetSessionTimer,{passive:true}));
+}
 
 // ── ORDER TIMELINE ──
 function renderTimeline(o){
@@ -16451,7 +16565,7 @@ async function saveOrders(changedOrderIds,opts={}){
       const byEntity=mapOperationResultByEntityId(opsResult,opsPayload.operations);
       byEntity.forEach(function(entry,entityId){
         if(entry.status==='acked'){
-          markLocalOrderMutation(entityId,'upsert',{opId:'',v:0});
+          clearLocalOrderMutation(entityId);
           return;
         }
         clearLocalOrderMutation(entityId);

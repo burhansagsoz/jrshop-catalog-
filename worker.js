@@ -1329,6 +1329,7 @@ function getRequestIdFromRequest(request) {
 function isPublicApiRoute(path, method) {
   const m = String(method || '').toUpperCase();
   if (path === '/api/test') return true;
+  if (path === '/api/login' && m === 'POST') return true;
   if (path.startsWith('/api/image/') && m === 'GET') return true;
   if (path.startsWith('/api/catalog-order/') && m === 'GET') return true;
   if (path === '/api/auth/health' && m === 'GET') return true;
@@ -1860,6 +1861,29 @@ async function readUsersFromStore(db) {
   }
 }
 
+function sanitizeUserForClient(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    id: String(raw.id || ''),
+    email: String(raw.email || '').trim(),
+    role: String(raw.role || 'Reseller'),
+    dname: String(raw.dname || '').trim()
+  };
+}
+
+async function loginUserWithCredentials(db, emailRaw, passwordRaw) {
+  const email = String(emailRaw || '').trim().toLowerCase();
+  const password = String(passwordRaw || '');
+  if (!email || !password) return null;
+  const users = await readUsersFromStore(db);
+  const matched = users.find((u) => {
+    const userEmail = String(u && u.email || '').trim().toLowerCase();
+    return userEmail === email && String(u && u.password || '') === password;
+  }) || null;
+  if (!matched) return null;
+  return sanitizeUserForClient(matched);
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -1961,6 +1985,12 @@ export default {
       const db = env.DB;
 
       // Data
+      if (path === '/api/login' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const user = await loginUserWithCredentials(db, body && body.email, body && body.password);
+        if (!user) return json({ ok: false, error: 'invalid_credentials' }, 401);
+        return json({ ok: true, user });
+      }
       if (path === '/api/data' && method === 'GET') return await getData(db, url);
       if (path === '/api/data' && method === 'POST') {
         const body = await request.json();
