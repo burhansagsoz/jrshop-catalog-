@@ -2186,10 +2186,7 @@ const ORDER_STATUS_ALIASES=Object.freeze({
 });
 
 // ── STATE ──
-let orders    = (()=>{
-  const raw = JSON.parse(localStorage.getItem('jb_orders') || '[]');
-  return normalizeOrderSnapshotList(Array.isArray(raw)?raw:[]);
-})();
+let orders    = [];
 let settings  = JSON.parse(localStorage.getItem('jb_settings')  || '{}');
 const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
 function normalizeUsersList(raw){
@@ -2361,6 +2358,15 @@ function normalizeOrderSnapshotList(list){
     .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
 }
 
+let _ordersCloudSnapshot=[];
+function getOrdersCloudSnapshot(){
+  return normalizeOrderSnapshotList(Array.isArray(_ordersCloudSnapshot)?_ordersCloudSnapshot:[]);
+}
+function setOrdersCloudSnapshot(list){
+  _ordersCloudSnapshot=normalizeOrderSnapshotList(Array.isArray(list)?list:[]);
+  return _ordersCloudSnapshot;
+}
+
 const STATUSES=['New','Sent to Factory','At Depot','Sent to Logistics','Shipped','Completed'];
 const S_LABEL={'New':'New','Sent to Factory':'Sent to Factory','At Depot':'At Depot','Sent to Logistics':'Sent to Logistics','Shipped':'Shipped','Completed':'Completed'};
 function getStatusLabel(s){
@@ -2378,16 +2384,26 @@ function displayStatus(s){
 
 // ── DARK MODE ──
 function toggleDark(){const d=document.body.classList.toggle('dark');document.getElementById('dark-btn').textContent=d?'☀️':'🌙';localStorage.setItem('jb_dark',d?'1':'0');}
+function getPreferredApiBaseDefault(){
+  try{
+    const host=String(location.hostname||'').toLowerCase();
+    const isLocalHost=(host==='127.0.0.1'||host==='localhost');
+    if(isLocalHost && String(location.port||'')==='5500'){
+      return `${location.protocol}//${location.hostname}:8787`;
+    }
+  }catch(_e){}
+  return location.origin;
+}
 function getApiBaseEarly(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
   if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
-  return location.origin;
+  return getPreferredApiBaseDefault();
 }
 (function(){
   // Initialize API base once; allow operator override from Settings.
   try{
     if(!localStorage.getItem('jb_cloud_api')){
-      localStorage.setItem('jb_cloud_api',location.origin);
+      localStorage.setItem('jb_cloud_api',getPreferredApiBaseDefault());
     }
   }catch(_e){}
   const savedUsers=localStorage.getItem('jb_users');
@@ -2498,48 +2514,14 @@ function compactOrdersForStorage(list,opts={}){
   });
 }
 function persistOrdersLocalSafe(list){
-  const arr=Array.isArray(list)?list:[];
-  try{
-    localStorage.setItem('jb_orders',JSON.stringify(arr));
-    return true;
-  }catch(_e){
-    try{
-      const compact=compactOrdersForStorage(arr,{aggressive:false});
-      localStorage.setItem('jb_orders',JSON.stringify(compact));
-      const now=Date.now();
-      if(now-_ordersStorageWarnAt>20000){
-        _ordersStorageWarnAt=now;
-        toast('⚠️ Order images compacted to protect updates','info');
-      }
-      return true;
-    }catch(err2){
-      try{
-        const compactAggressive=compactOrdersForStorage(arr,{aggressive:true});
-        localStorage.setItem('jb_orders',JSON.stringify(compactAggressive));
-        const now=Date.now();
-        if(now-_ordersStorageWarnAt>20000){
-          _ordersStorageWarnAt=now;
-          toast('⚠️ Storage was full; compacted order cache to protect changes','info');
-        }
-        return true;
-      }catch(err3){
-        console.error('[persistOrdersLocalSafe]',err3&&err3.message?err3.message:err3);
-        return false;
-      }
-    }
-  }
+  void list;
+  try{ localStorage.removeItem('jb_orders'); }catch(_e){}
+  return true;
 }
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
   const remoteCount=remoteOrders.length;
-  let localCount=Array.isArray(orders)?orders.length:0;
-  try{
-    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    const storageCount=Array.isArray(localOrders)?localOrders.length:0;
-    localCount=Math.max(localCount,storageCount);
-  }catch(_e){
-    localCount=Math.max(localCount,0);
-  }
+  const localCount=Array.isArray(orders)?orders.length:0;
   const hasPendingLocalMutations=hasActiveUpsertOrderMutation();
   if(remoteCount>0){
     // If we have pending local writes, reject any snapshot shrink to avoid dropping
@@ -2555,12 +2537,7 @@ function shouldAcceptRemoteOrders(remoteOrders){
     }
     return true;
   }
-  try{
-    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    return !Array.isArray(localOrders)||localOrders.length===0;
-  }catch(_e){
-    return true;
-  }
+  return localCount===0;
 }
 function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
   // In Cloudflare mode, /api/orders is the only authoritative source for orders.
@@ -2859,6 +2836,7 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
   }
   const changed=JSON.stringify(currentOrders)!==JSON.stringify(nextOrders);
   orders=nextOrders;
+  setOrdersCloudSnapshot(orders);
   persistOrdersLocalSafe(orders);
   return {applied:true,changed,count:orders.length,source};
 }
@@ -3006,7 +2984,6 @@ async function login(){
           }
         });
         // Prefer authoritative /api/orders on login; fallback to /api/data snapshot only if needed.
-        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         let cloudOrders=[];
         try{
           const ordRes=await fetch(getApiBase()+'/api/orders',{headers:getAuthHeaders()});
@@ -3020,8 +2997,7 @@ async function login(){
         // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'login',forceRemote:true});
         if(!applied.applied){
-          orders=normalizeOrderSnapshotList(Array.isArray(localOrders)?localOrders:[]);
-          persistOrdersLocalSafe(orders);
+          console.warn('[OrderSync][login] authoritative snapshot skipped due to pending mutations');
         }
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
@@ -7824,7 +7800,7 @@ async function trackOrder(){
 
 
 // ── REMOTE SYNC (Firebase bridge first) ──
-const CLOUD_API_DEFAULT=location.origin;
+const CLOUD_API_DEFAULT=getPreferredApiBaseDefault();
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
 let _apiBaseCheckInFlight=null;
@@ -7836,7 +7812,19 @@ const STRICT_ORDER_CLOUD_COMMIT=true;
 function getApiBase(){
   const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
   if(getFirebaseEnabled()) return location.origin;
-  if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
+  if(/^https?:\/\//i.test(raw)){
+    const normalized=raw.replace(/\/$/,'');
+    try{
+      const u=new URL(normalized);
+      const host=String(u.hostname||'').toLowerCase();
+      const isLocalHost=(host==='127.0.0.1'||host==='localhost');
+      if(isLocalHost && String(u.port||'')==='5500' && CLOUD_API_DEFAULT!==location.origin){
+        try{localStorage.setItem('jb_cloud_api',CLOUD_API_DEFAULT);}catch(_e){}
+        return CLOUD_API_DEFAULT;
+      }
+    }catch(_e){}
+    return normalized;
+  }
   return CLOUD_API_DEFAULT;
 }
 function isApiEndpointReachableResponse(res){
@@ -7855,8 +7843,9 @@ async function ensureWorkingApiBase(opts={}){
   _apiBaseCheckInFlight=(async function(){
     const configured=getApiBase();
     const origin=location.origin.replace(/\/$/,'');
+    const preferred=CLOUD_API_DEFAULT.replace(/\/$/,'');
     try{
-      if(configured===origin){
+      if(configured===preferred){
         return configured;
       }
       let configuredReachable=false;
@@ -7872,6 +7861,19 @@ async function ensureWorkingApiBase(opts={}){
         const r2=await fetchWithTimeout(origin+'/api/test',{headers:getAuthHeaders()},4000);
         originReachable=isApiEndpointReachableResponse(r2);
       }catch(_e){}
+      let preferredReachable=false;
+      if(preferred!==origin){
+        try{
+          const r3=await fetchWithTimeout(preferred+'/api/test',{headers:getAuthHeaders()},4000);
+          preferredReachable=isApiEndpointReachableResponse(r3);
+        }catch(_e){}
+      }
+      if(preferredReachable){
+        try{localStorage.setItem('jb_cloud_api',preferred);}catch(_e){}
+        renderCloudApiSummary();
+        if(!opts.silent) toast('ℹ️ API URL auto-corrected to local worker','info');
+        return preferred;
+      }
       if(originReachable){
         try{localStorage.setItem('jb_cloud_api',origin);}catch(_e){}
         renderCloudApiSummary();
@@ -7889,12 +7891,12 @@ async function ensureWorkingApiBase(opts={}){
 function renderCloudApiSummary(){
   const el=document.getElementById('cfg-cloud-active');
   if(!el) return;
-  const api=(localStorage.getItem('jb_cloud_api')||'').trim()||location.origin;
+  const api=(localStorage.getItem('jb_cloud_api')||'').trim()||CLOUD_API_DEFAULT;
   const hasKey=!!(localStorage.getItem('jb_cloud_key')||'').trim();
   el.textContent=`Active API base: ${api} · API key: ${hasKey?'set':'not set'}`;
 }
 function apiUrl(path){
-  return ((localStorage.getItem('jb_cloud_api')||'').trim()||location.origin)+String(path||'');
+  return ((localStorage.getItem('jb_cloud_api')||'').trim()||CLOUD_API_DEFAULT)+String(path||'');
 }
 function createClientRequestId(prefix){
   const p=String(prefix||'rq').replace(/[^a-z0-9_-]/gi,'').slice(0,8)||'rq';
@@ -8655,13 +8657,7 @@ function readLocalDataMap(){
   return out;
 }
 function readLocalOrders(){
-  try{
-    const raw=localStorage.getItem('jb_orders');
-    const arr=raw?JSON.parse(raw):[];
-    return Array.isArray(arr)?arr:[];
-  }catch(_e){
-    return [];
-  }
+  return [];
 }
 function writeLocalJson(key,value){
   if(!key) return;
@@ -9034,17 +9030,10 @@ async function loadFromCloudSilent(){
     return !!applied.applied;
   }catch(e){
     const fallbackMetrics=getLocalSyncFallbackMetrics();
-    let storageOrdersCount=0;
-    try{
-      const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-      storageOrdersCount=Array.isArray(localOrders)?localOrders.length:0;
-    }catch(_e){
-      storageOrdersCount=0;
-    }
     console.warn('[OrderSync][silent_load_failed]',{
       error:String(e&&e.message||e||'unknown'),
       memoryOrdersCount:Array.isArray(orders)?orders.length:0,
-      storageOrdersCount,
+      storageOrdersCount:0,
       pendingMutations:getActiveLocalOrderMutationIds().length,
       pendingFallbackOps:Number(fallbackMetrics&&fallbackMetrics.ops)||0,
       pendingFallbackKeys:Number(fallbackMetrics&&fallbackMetrics.keys)||0,
@@ -16473,12 +16462,7 @@ function orderCompareSnapshot(order){
 }
 async function saveOrders(changedOrderIds,opts={}){
   const nowTs=Date.now();
-  let previousOrders=[];
-  try{
-    previousOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-  }catch(_e){
-    previousOrders=[];
-  }
+  const previousOrders=getOrdersCloudSnapshot();
   const prevById=new Map((Array.isArray(previousOrders)?previousOrders:[]).filter(o=>o&&o.id).map(o=>[o.id,o]));
   const currentIds=new Set((orders||[]).filter(o=>o&&o.id).map(o=>o.id));
   // Never infer deletes from memory-vs-storage mismatch by default.
@@ -16535,10 +16519,6 @@ async function saveOrders(changedOrderIds,opts={}){
         v:nextV
       };
     }).filter(o=>o&&o.id&&!isOrderDeleted(o));
-    const persistedBeforeSync=persistOrdersLocalSafe(orders);
-    if(!persistedBeforeSync){
-      console.warn('[saveOrders] local persist failed before sync', {count:Array.isArray(orders)?orders.length:0});
-    }
 
     await syncBootstrapReplicaState().catch(()=>{});
     let queuedFallback=false;
@@ -16630,6 +16610,7 @@ async function saveOrders(changedOrderIds,opts={}){
       orders=[...nextMap.values()]
         .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
         .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
+      setOrdersCloudSnapshot(orders);
       persistOrdersLocalSafe(orders);
       updateBadges();
       render();
@@ -16645,11 +16626,10 @@ async function saveOrders(changedOrderIds,opts={}){
     }
     if(queuedFallback){
       console.warn('[saveOrders] queued order events for retry');
+    }else{
+      setOrdersCloudSnapshot(orders);
     }
-    const persistedAfterSync=persistOrdersLocalSafe(orders);
-    if(!persistedAfterSync){
-      console.warn('[saveOrders] local persist failed after sync', {count:Array.isArray(orders)?orders.length:0});
-    }
+    persistOrdersLocalSafe(orders);
     markSync('orders_save');
     writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
     return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:!!queuedFallback};
