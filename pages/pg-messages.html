@@ -1,0 +1,47 @@
+<!-- MESSAGES -->
+<div class="page scrl" id="pg-messages">
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
+    <h3 style="font-size:14px;font-weight:700;margin-bottom:13px;">🔔 Reseller Notification Settings</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
+      <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-depot" style="accent-color:var(--accent);"> 🏭 Notify when order arrives at depot</label>
+      <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-logistics" style="accent-color:var(--accent);"> 🚛 Notify when sent to logistics</label>
+      <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-shipped" checked style="accent-color:var(--accent);"> 🚚 Notify when shipped (with tracking)</label>
+      <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-completed" style="accent-color:var(--accent);"> ✅ Notify when completed</label>
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="saveNotifSettings()">💾 Save Settings</button>
+  </div>
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
+    <h3 style="font-size:13px;font-weight:700;margin-bottom:3px;">✉️ Order Confirmation</h3>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Sent when order is placed</p>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('order_confirmation','{{name}}')">{{name}}</span>
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('order_confirmation','{{ref}}')">{{ref}}</span>
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('order_confirmation','{{products}}')">{{products}}</span>
+    </div>
+    <textarea class="fi" id="tpl-order_confirmation" style="min-height:90px;margin-bottom:8px;"></textarea>
+    <button class="btn btn-primary btn-sm" onclick="saveTpl('order_confirmation')">💾 Save</button>
+  </div>
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
+    <h3 style="font-size:13px;font-weight:700;margin-bottom:3px;">🚚 Tracking Notification</h3>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Sent when UK tracking is available</p>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('tracking','{{name}}')">{{name}}</span>
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('tracking','{{tracking}}')">{{tracking}}</span>
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('tracking','{{products}}')">{{products}}</span>
+    </div>
+    <textarea class="fi" id="tpl-tracking" style="min-height:90px;margin-bottom:8px;"></textarea>
+    <button class="btn btn-primary btn-sm" onclick="saveTpl('tracking')">💾 Save</button>
+  </div>
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
+    <h3 style="font-size:13px;font-weight:700;margin-bottom:3px;">🏭 Factory Message</h3>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Message template to send to factory</p>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{ref}}')">{{ref}}</span>
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{name}}')">{{name}}</span>
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{address}}')">{{address}}</span>
+      <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{products}}')">{{products}}</span>
+    </div>
+    <textarea class="fi" id="tpl-supplier" style="min-height:90px;margin-bottom:8px;"></textarea>
+    <button class="btn btn-primary btn-sm" onclick="saveTpl('supplier')">💾 Save</button>
+  </div>
+</div>

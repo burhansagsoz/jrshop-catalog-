@@ -17,6 +17,26 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+function includePageFragmentSync(targetId, filePath){
+  try{
+    var host=document.getElementById(targetId);
+    if(!host) return;
+    var normalizedPath=String(filePath||'').trim();
+    if(normalizedPath && normalizedPath.charAt(0)!=='/' && !/^https?:\/\//i.test(normalizedPath)){
+      normalizedPath='/'+normalizedPath;
+    }
+    var xhr=new XMLHttpRequest();
+    xhr.open('GET', normalizedPath, false);
+    xhr.send(null);
+    if(xhr.status>=200 && xhr.status<300){
+      host.innerHTML=xhr.responseText;
+    }else{
+      host.innerHTML='<div class="page scrl on"><div style="padding:12px;color:var(--red);">Failed to load '+normalizedPath+'</div></div>';
+    }
+  }catch(_e){}
+}
+</script>
 <style>
 :root{
   --bg:#f4f6fb;--sidebar:#111827;--sidebar2:#1f2937;
@@ -145,10 +165,16 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
 
 /* CONTENT */
 .content{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0;}
+.page-slot{display:contents;}
 .page{display:none!important;flex:1;flex-direction:column;overflow:hidden;min-height:0;}
 .page.on{display:flex!important;}
-.scrl{flex:1;flex-direction:column;overflow-y:auto;overflow-x:hidden;padding:16px 16px 100px;gap:13px;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;}
-.page.scrl.on{overflow-y:auto!important;overflow-x:hidden!important;}
+.scrl{flex:1;flex-direction:column;overflow-y:scroll;overflow-x:hidden;padding:16px 16px 100px;gap:13px;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;scrollbar-gutter:stable both-edges;}
+.page.scrl.on{overflow-y:auto!important;overflow-x:hidden!important;min-height:0!important;height:100%!important;scrollbar-width:thin;}
+.scrl::-webkit-scrollbar{width:10px;}
+.scrl::-webkit-scrollbar-thumb{background:rgba(148,163,184,.55);border-radius:8px;}
+.scrl::-webkit-scrollbar-track{background:transparent;}
+.page.scrl.on::-webkit-scrollbar{width:10px;}
+.page.scrl.on::-webkit-scrollbar-thumb{background:rgba(100,116,139,.65);border-radius:8px;}
 
 /* ORDERS */
 .orders-page{flex-direction:row;overflow:hidden;}
@@ -724,6 +750,7 @@ body.dark .modal-foot{background:#263548;}
               <tbody id="tbody"></tbody>
             </table>
           </div>
+          <div id="orders-pagination" style="display:none;padding:10px 12px;border-top:1px solid var(--border);background:var(--card);"></div>
         </div>
 
         <!-- DETAIL PANEL -->
@@ -1115,150 +1142,17 @@ body.dark .modal-foot{background:#263548;}
         </div>
       </div>
 
-      <!-- BARCODE -->
-      <div class="page scrl" id="pg-barcode">
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;">🏭 Depot Scanner</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Scan CN barcode when package arrives — marks item arrived and shows address.</p>
-          <button class="btn btn-primary" id="btn-camera" onclick="startCamera()" style="width:100%;justify-content:center;padding:11px;margin-bottom:11px;">📷 Open Camera</button>
-          <div id="camera-wrap" style="display:none;margin-bottom:11px;position:relative;border-radius:10px;overflow:hidden;background:#000;">
-            <video id="camera-video" autoplay playsinline muted style="width:100%;max-height:240px;display:block;object-fit:cover;"></video>
-            <div style="position:absolute;inset:0;pointer-events:none;">
-              <div style="position:absolute;left:10%;right:10%;height:2px;background:var(--accent);opacity:.8;animation:scanline 2s linear infinite;top:20%;"></div>
-              <div style="position:absolute;top:15%;left:8%;right:8%;bottom:15%;border:2px solid rgba(249,115,22,.6);border-radius:8px;"></div>
-            </div>
-            <button onclick="stopCamera()" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:8px;padding:5px 10px;font-size:12px;cursor:pointer;">✕</button>
-            <div id="camera-status" style="position:absolute;bottom:6px;left:0;right:0;text-align:center;color:#fff;font-size:11px;background:rgba(0,0,0,.5);padding:4px;">Scanning…</div>
-          </div>
+      <div class="page-slot" id="pg-barcode-slot"></div>
+      <script>includePageFragmentSync('pg-barcode-slot','pages/pg-barcode.html');</script>
 
-          <div style="display:flex;gap:7px;margin-bottom:9px;">
-            <input type="text" class="fi" id="barcode-input" placeholder="CN tracking, Ref #, or name…" style="font-family:var(--mono);" onkeydown="if(event.key==='Enter')barcodeSearch()">
-            <button class="btn btn-primary" onclick="barcodeSearch()">🔍</button>
-          </div>
-          <div id="barcode-result"></div>
-          <!-- DEPOT PHOTO + ACTION -->
-          <div id="depot-photo-section" style="display:none;margin-top:13px;border-top:2px solid var(--accent);padding-top:13px;">
-            <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:10px;">📷 Step 2 — Add Depot Photo</div>
-            <div id="depot-photo-preview" style="margin-bottom:10px;"></div>
-            <div id="depot-photo-btns">
-              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                <label class="btn btn-primary" style="cursor:pointer;flex:1;justify-content:center;">📷 Take Photo<input type="file" accept="image/*" capture="environment" id="depot-photo-input" style="display:none;" onchange="saveDepotPhoto(this)"></label>
-                <label class="btn btn-secondary" style="cursor:pointer;flex:1;justify-content:center;">🖼️ Gallery<input type="file" accept="image/*" id="depot-gallery-input" style="display:none;" onchange="saveDepotPhoto(this)"></label>
-              </div>
-              <div style="font-size:11px;color:var(--muted);text-align:center;">Photo is optional — you can skip and proceed</div>
-            </div>
-            <div id="depot-action-btns" style="display:none;flex-direction:column;gap:8px;margin-top:10px;">
-              <button class="btn btn-primary" style="width:100%;justify-content:center;padding:13px;" onclick="copyAndMarkLogistics()">📋 Copy Address & Mark Sent to Logistics</button>
-              <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center;" onclick="copyAddressOnly()">📋 Copy Address Only</button>
-              <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center;" onclick="addAnotherPhoto()">📷 Retake / Change Photo</button>
-            </div>
-            <div id="depot-skip-btn" style="margin-top:8px;">
-              <button class="btn btn-secondary" style="width:100%;justify-content:center;padding:11px;" onclick="showDepotActions()">⏭️ Skip Photo & Continue</button>
-            </div>
-          </div>
-        </div>
-        <div style="background:var(--blue-bg);border:1px solid var(--blue-border);border-radius:var(--r);padding:12px;font-size:12px;color:var(--blue);">
-          💡 Camera works best with Chrome on Android via HTTPS (Netlify).
-        </div>
-      </div>
+      <div class="page-slot" id="pg-bulk-cn-slot"></div>
+      <script>includePageFragmentSync('pg-bulk-cn-slot','pages/pg-bulk-cn.html');</script>
 
-      <!-- BULK CN TRACKING -->
-      <div class="page scrl" id="pg-bulk-cn">
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;margin-bottom:13px;">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;">📸 AI Bulk CN Scanner</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:11px;">Upload photos of shipping labels from suppliers. AI will read the order code and CN tracking number from each label.</p>
-          <label class="btn btn-primary" style="cursor:pointer;width:100%;justify-content:center;padding:13px;">
-            📸 Upload Shipping Labels
-            <input type="file" accept="image/*" multiple id="bulk-img-input" style="display:none;" onchange="processBulkImages(this)">
-          </label>
-          <div id="bulk-img-status" style="display:none;margin-top:11px;"></div>
-          <div id="bulk-img-results" style="margin-top:11px;"></div>
-        </div>
+      <div class="page-slot" id="pg-import-slot"></div>
+      <script>includePageFragmentSync('pg-import-slot','pages/pg-import.html');</script>
 
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;">🏭 Manuel CN Tracking</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:11px;">Search orders, enter CN barcodes or scan with camera.</p>
-
-          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:5px;">Search Order</div>
-          <div style="display:flex;gap:7px;margin-bottom:5px;">
-            <input type="text" class="fi" id="bcn-search" placeholder="Customer name, ref # or product name…" style="flex:1;" oninput="renderBulkCN(this.value)">
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('bcn-search').value='';renderBulkCN('')">✕</button>
-          </div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:11px;">Tip: type customer name, ref # or product name</div>
-
-          <div style="display:flex;gap:6px;margin-bottom:13px;">
-            <button class="btn btn-primary btn-sm" id="bcn-tab-pending" onclick="setBCNTab('pending',this)">⏳ Pending</button>
-            <button class="btn btn-ghost btn-sm" id="bcn-tab-all" onclick="setBCNTab('all',this)">📋 All Active</button>
-          </div>
-
-          <div id="bulk-cn-list"></div>
-
-          <div id="camera-wrap-bcn" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:999;background:#000;border-radius:16px 16px 0 0;overflow:hidden;">
-            <video id="camera-video-bcn" autoplay playsinline muted style="width:100%;max-height:260px;display:block;object-fit:cover;"></video>
-            <div style="position:absolute;inset:0;pointer-events:none;">
-              <div style="position:absolute;left:10%;right:10%;height:2px;background:var(--green);opacity:.9;animation:scanline 2s linear infinite;top:40%;"></div>
-              <div style="position:absolute;top:20%;left:8%;right:8%;bottom:20%;border:2px solid rgba(16,185,129,.7);border-radius:8px;"></div>
-            </div>
-            <div style="padding:14px;background:var(--card);display:flex;align-items:center;justify-content:space-between;">
-              <div>
-                <div style="font-size:11px;color:var(--muted);">Scanning CN for:</div>
-                <div style="font-size:13px;font-weight:700;" id="bcn-camera-target-label">—</div>
-              </div>
-              <button onclick="stopBCNCamera()" class="btn btn-danger btn-sm">✕ Cancel</button>
-            </div>
-            <div id="camera-status-bcn" style="position:absolute;top:8px;left:0;right:0;text-align:center;color:#fff;font-size:11px;background:rgba(0,0,0,.5);padding:4px;">Point camera at CN barcode…</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- IMPORT -->
-      <div class="page scrl" id="pg-import">
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;">📥 Import UK Tracking</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Upload Excel from logistics. Must have <strong>Name</strong> and <strong>Tracking</strong> columns.</p>
-          <div style="border:2px dashed var(--border);border-radius:12px;padding:28px;text-align:center;cursor:pointer;background:#fafafa;" id="drop-zone">
-            <div style="font-size:28px;margin-bottom:7px;">📊</div>
-            <p style="font-size:13px;color:var(--muted);">Drag & drop or <label for="excel-input" style="color:var(--accent);font-weight:600;cursor:pointer;">browse</label></p>
-            <input type="file" id="excel-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleExcel(this)">
-          </div>
-          <div id="import-result" style="background:var(--green-bg);border:1px solid var(--green-border);border-radius:9px;padding:11px;display:none;margin-top:11px;"><h4 style="font-size:13px;font-weight:700;color:var(--green);margin-bottom:4px;">✅ Import Successful</h4><div id="import-result-body"></div></div>
-          <div id="import-err" style="background:var(--red-bg);border:1px solid var(--red-border);border-radius:9px;padding:11px;display:none;margin-top:11px;"><h4 style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:4px;">❌ Failed</h4><div id="import-err-body"></div></div>
-          <div id="email-send-section" style="display:none;margin-top:13px;">
-            <div style="background:var(--green-bg);border:1px solid var(--green-border);border-radius:11px;padding:13px;">
-              <div style="font-size:13px;font-weight:700;color:var(--green);margin-bottom:5px;">📧 Send Tracking Emails</div>
-              <div style="font-size:12px;color:var(--muted);margin-bottom:9px;" id="email-send-info"></div>
-              <div id="email-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:9px;max-height:220px;overflow-y:auto;"></div>
-              <div style="display:flex;gap:7px;flex-wrap:wrap;">
-                <button class="btn btn-primary btn-sm" onclick="sendAllEmails()">📧 Send All</button>
-                <button class="btn btn-ghost btn-sm" onclick="document.getElementById('email-send-section').style.display='none'">Dismiss</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ACTIVITY LOG -->
-      <div class="page scrl" id="pg-activity">
-        <div class="info-card">
-          <div class="card-head">
-            <h3>📋 Activity Log</h3>
-            <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;">
-              <select class="fi" id="activity-filter-type" style="width:auto;padding:5px 10px;font-size:12px;" onchange="renderActivityLog()">
-                <option value="">All Actions</option>
-                <option value="created">Created</option>
-                <option value="status">Status Changed</option>
-                <option value="tracking">Tracking Added</option>
-                <option value="edited">Edited</option>
-                <option value="deleted">Deleted</option>
-                <option value="issue">⚠️ Issues</option>
-                <option value="notification">🔔 Notifications</option>
-              </select>
-              <button class="btn btn-danger btn-xs" onclick="clearActivityLog()">🗑️ Clear Log</button>
-            </div>
-          </div>
-          <div id="activity-list"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-activity-slot"></div>
+      <script>includePageFragmentSync('pg-activity-slot','pages/pg-activity.html');</script>
 
       <!-- PRODUCT CATALOG -->
 
@@ -1363,145 +1257,32 @@ body.dark .modal-foot{background:#263548;}
         </div>
       </div>
 
-      <div class="page scrl" id="pg-catalog">
-        <div class="info-card" style="margin-bottom:13px;">
-          <div class="card-head">
-            <h3>🛍️ Product Catalog</h3>
-            <div style="display:flex;gap:7px;flex-wrap:wrap;">
-              <button class="btn btn-ghost btn-sm" onclick="openManageCatsModal()">🏷️ Categories</button>
-              <button class="btn btn-ghost btn-sm" onclick="shareCatalog()">📤 Share</button>
-              <button class="btn btn-primary btn-sm" onclick="openCatalogModal()">＋ Add Product</button>
-            </div>
-          </div>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Add products with categories and variants. Share the catalog with customers to browse and order.</p>
-          <div id="catalog-cat-bar" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;"></div>
-          <div id="catalog-list"></div>
-        </div>
-        <div class="info-card">
-          <div class="card-head"><h3>📥 Import Order</h3></div>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Paste the order code from the customer's Messenger message to automatically create a new order.</p>
-          <div style="display:flex;gap:7px;">
-            <input type="text" class="fi" id="import-order-input" placeholder="Paste order code here… (JRORDER-xxxxx)" style="flex:1;font-family:var(--mono);font-size:13px;">
-            <button class="btn btn-primary" onclick="importOrderFromCode()">📥 Import</button>
-          </div>
-          <div id="import-order-preview" style="margin-top:11px;"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-catalog-slot"></div>
+      <script>includePageFragmentSync('pg-catalog-slot','pages/pg-catalog.html');</script>
 
 
-      <!-- CUSTOMERS -->
-      <div class="page scrl" id="pg-customers">
-        <div class="info-card">
-          <div class="card-head"><h3>👤 Customers</h3>
-            <div class="search-box" style="width:190px;"><span style="color:var(--muted);">🔍</span><input type="text" placeholder="Search…" oninput="filterCustomers(this.value)" style="border:none;background:transparent;outline:none;font-size:13px;font-family:var(--font);"></div>
-          </div>
-          <div id="customers-list"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-customers-slot"></div>
+      <script>includePageFragmentSync('pg-customers-slot','pages/pg-customers.html');</script>
 
-      <!-- SUPPLIERS -->
-      <div class="page scrl" id="pg-suppliers">
-        <div class="info-card">
-          <div class="card-head"><h3>🏭 Factories</h3><button class="btn btn-primary btn-sm" onclick="openSupModal()">＋ Add</button></div>
-          <div id="suppliers-list"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-suppliers-slot"></div>
+      <script>includePageFragmentSync('pg-suppliers-slot','pages/pg-suppliers.html');</script>
 
-      <!-- MESSAGES -->
-      <div class="page scrl" id="pg-messages">
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:13px;">🔔 Reseller Notification Settings</h3>
-          <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
-            <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-depot" style="accent-color:var(--accent);"> 🏭 Notify when order arrives at depot</label>
-            <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-logistics" style="accent-color:var(--accent);"> 🚛 Notify when sent to logistics</label>
-            <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-shipped" checked style="accent-color:var(--accent);"> 🚚 Notify when shipped (with tracking)</label>
-            <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;"><input type="checkbox" id="notif-completed" style="accent-color:var(--accent);"> ✅ Notify when completed</label>
-          </div>
-          <button class="btn btn-primary btn-sm" onclick="saveNotifSettings()">💾 Save Settings</button>
-        </div>
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
-          <h3 style="font-size:13px;font-weight:700;margin-bottom:3px;">✉️ Order Confirmation</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Sent when order is placed</p>
-          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('order_confirmation','{{name}}')">{{name}}</span>
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('order_confirmation','{{ref}}')">{{ref}}</span>
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('order_confirmation','{{products}}')">{{products}}</span>
-          </div>
-          <textarea class="fi" id="tpl-order_confirmation" style="min-height:90px;margin-bottom:8px;"></textarea>
-          <button class="btn btn-primary btn-sm" onclick="saveTpl('order_confirmation')">💾 Save</button>
-        </div>
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
-          <h3 style="font-size:13px;font-weight:700;margin-bottom:3px;">🚚 Tracking Notification</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Sent when UK tracking is available</p>
-          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('tracking','{{name}}')">{{name}}</span>
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('tracking','{{tracking}}')">{{tracking}}</span>
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('tracking','{{products}}')">{{products}}</span>
-          </div>
-          <textarea class="fi" id="tpl-tracking" style="min-height:90px;margin-bottom:8px;"></textarea>
-          <button class="btn btn-primary btn-sm" onclick="saveTpl('tracking')">💾 Save</button>
-        </div>
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
-          <h3 style="font-size:13px;font-weight:700;margin-bottom:3px;">🏭 Factory Message</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Message template to send to factory</p>
-          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{ref}}')">{{ref}}</span>
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{name}}')">{{name}}</span>
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{address}}')">{{address}}</span>
-            <span style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border);border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--mono);" onclick="insertVar('supplier','{{products}}')">{{products}}</span>
-          </div>
-          <textarea class="fi" id="tpl-supplier" style="min-height:90px;margin-bottom:8px;"></textarea>
-          <button class="btn btn-primary btn-sm" onclick="saveTpl('supplier')">💾 Save</button>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-messages-slot"></div>
+      <script>includePageFragmentSync('pg-messages-slot','pages/pg-messages.html');</script>
 
-      <!-- USERS -->
-      <div class="page scrl" id="pg-users">
-        <div class="info-card">
-          <div class="card-head"><h3>👥 Users & Resellers</h3><button class="btn btn-primary btn-sm" onclick="openUserModal()">＋ Add</button></div>
-          <div id="users-list"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-users-slot"></div>
+      <script>includePageFragmentSync('pg-users-slot','pages/pg-users.html');</script>
 
       <!-- SETTINGS -->
       
-      <!-- DEPOT STATUS -->
-      <div class="page scrl" id="pg-depot">
-        <div class="info-card" style="margin-bottom:13px;">
-          <div class="card-head"><h3>🏭 Depot Status</h3><button class="btn btn-ghost btn-sm" onclick="renderDepotStatus()">🔄</button></div>
-          <div id="depot-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:13px;"></div>
-          <div id="depot-longest"></div>
-        </div>
-        <div class="info-card">
-          <div class="card-head"><h3>⏳ Longest Waiting</h3></div>
-          <div id="depot-waiting-list"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-depot-slot"></div>
+      <script>includePageFragmentSync('pg-depot-slot','pages/pg-depot.html');</script>
 
-      <!-- SUPPLIER PERFORMANCE -->
-      <div class="page scrl" id="pg-sup-perf">
-        <div class="info-card">
-          <div class="card-head"><h3>🏭 Factory Performance</h3><button class="btn btn-ghost btn-sm" onclick="renderSupplierPerf()">🔄 Refresh</button></div>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Scores based on order completion time and delay rate.</p>
-          <div id="sup-perf-list"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-sup-perf-slot"></div>
+      <script>includePageFragmentSync('pg-sup-perf-slot','pages/pg-sup-perf.html');</script>
 
-      <!-- REORDER REMINDERS -->
-      <div class="page scrl" id="pg-reorder">
-        <div class="info-card">
-          <div class="card-head">
-            <h3>🔁 Reorder Reminders</h3>
-            <select class="fi" id="reorder-days" style="width:auto;padding:5px 10px;font-size:12px;" onchange="renderReorderReminders()">
-              <option value="30">30 days inactive</option>
-              <option value="14">14 days inactive</option>
-              <option value="60">60 days inactive</option>
-            </select>
-          </div>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Customers who haven't ordered recently. Send a WhatsApp reminder.</p>
-          <div id="reorder-list"></div>
-        </div>
-      </div>
+      <div class="page-slot" id="pg-reorder-slot"></div>
+      <script>includePageFragmentSync('pg-reorder-slot','pages/pg-reorder.html');</script>
 
       
       <!-- DEPOT STAFF PAGE - 中文界面 -->
@@ -1599,47 +1380,8 @@ body.dark .modal-foot{background:#263548;}
         </div>
       </div>
 
-<div class="page scrl" id="pg-settings">
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;max-width:560px;">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:3px;">⚙️ Settings</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:14px;">General configuration.</p>
-          <div class="form-grid" style="grid-template-columns:1fr;gap:10px;">
-            <div class="fg"><label class="fl">Alert after (days)</label><input type="number" class="fi" id="cfg-alert-days" value="3" min="1" max="30"></div>
-            <div class="fg"><label class="fl">Session timeout (minutes)</label><input type="number" class="fi" id="cfg-session-timeout" value="30" min="5" max="120"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Auto-lock when inactive</div></div>
-            <div class="fg"><label class="fl">Your Messenger / Facebook Link</label><input type="text" class="fi" id="cfg-messenger-link" placeholder="https://m.me/yourpage or facebook.com/yourpage"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Used in customer catalog — "Send Order" button opens this</div></div>
-            <div class="fg"><label class="fl">Cloudflare Worker API URL</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api.<subdomain>.workers.dev"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Leave empty to use current site origin.</div></div>
-            <div class="fg"><label class="fl">Cloudflare API Key (optional)</label><input type="text" class="fi" id="cfg-cloud-key" placeholder="Bearer token (if your Worker requires auth)"></div>
-            <div class="fg"><label class="fl">Sound notifications</label><button class="btn btn-secondary btn-sm" onclick="toggleSound()" id="sound-toggle-btn">🔔 Sounds On</button></div>
-          </div>
-          <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
-          <div id="cfg-cloud-active" style="margin-top:8px;font-size:11px;color:var(--muted);"></div>
-        <div class="info-card" style="margin-top:16px;">
-          <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">☁️ Cloudflare Sync</div>
-          <div style="padding:13px 16px;">
-            <div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:8px;">
-              Runtime is now Cloudflare Worker API mode. Firebase realtime bridge is disabled.
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Cloudflare</button>
-              <button class="btn btn-blue" onclick="recoverOrdersNow()">⬇️ Recover Orders</button>
-            </div>
-            <div id="sync-health-panel" style="margin-top:10px;"></div>
-          </div>
-        </div>
-        
-<!-- AI Settings removed -->
-        <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;max-width:560px;">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:3px;">💾 Data Backup</h3>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Export or import all data.</p>
-          <div id="last-backup-info" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn btn-green" onclick="exportBackup()">📤 Export Backup</button>
-            <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">☁️ Cloudflare Backup</button>
-            <label class="btn btn-ghost" style="cursor:pointer;">📥 Import<input type="file" accept=".json" onchange="importBackup(this)" style="display:none;"></label>
-          
-            <button class="btn btn-danger btn-sm" onclick="clearCache()">🧹 Clear Cache</button></div>
-        </div>
-      </div>
+<div class="page-slot" id="pg-settings-slot"></div>
+<script>includePageFragmentSync('pg-settings-slot','pages/pg-settings.html');</script>
 
     </div>
   </div>
@@ -2186,7 +1928,10 @@ const ORDER_STATUS_ALIASES=Object.freeze({
 });
 
 // ── STATE ──
-let orders    = [];
+let orders    = (()=>{
+  const raw = JSON.parse(localStorage.getItem('jb_orders') || '[]');
+  return normalizeOrderSnapshotList(Array.isArray(raw)?raw:[]);
+})();
 let settings  = JSON.parse(localStorage.getItem('jb_settings')  || '{}');
 const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
 function normalizeUsersList(raw){
@@ -2289,6 +2034,148 @@ let _barcodeDetectBusy=false, _bcnDetectBusy=false, _staffDetectBusy=false;
 const SCAN_DETECT_INTERVAL_MS=650;
 let _selectMode=false, _selected=new Set();
 let _singleScanGuard=null;
+const PAGE_STATE_KEY='jb_active_page';
+const SESSION_LOGIN_KEY='jb_login_session';
+const ORDERS_PAGE_SIZE=30;
+const LIST_PAGE_SIZE=30;
+let _ordersPage=1;
+let _customersPage=1;
+let _suppliersPage=1;
+let _usersPage=1;
+let _customersFilterQuery='';
+
+function getSavedPageId(){
+  try{
+    return String(localStorage.getItem(PAGE_STATE_KEY)||'').trim();
+  }catch(_e){
+    return '';
+  }
+}
+function saveActivePageId(id){
+  const pageId=String(id||'').trim();
+  if(!pageId) return;
+  try{localStorage.setItem(PAGE_STATE_KEY,pageId);}catch(_e){}
+}
+function saveLoginSession(email,password){
+  const em=String(email||'').trim().toLowerCase();
+  const pw=String(password||'');
+  if(!em || !pw) return;
+  try{localStorage.setItem(SESSION_LOGIN_KEY,JSON.stringify({email:em,password:pw,ts:Date.now()}));}catch(_e){}
+}
+function getLoginSession(){
+  try{
+    const raw=localStorage.getItem(SESSION_LOGIN_KEY)||'';
+    const parsed=raw?JSON.parse(raw):null;
+    if(!parsed||typeof parsed!=='object') return null;
+    const email=String(parsed.email||'').trim().toLowerCase();
+    const password=String(parsed.password||'');
+    if(!email||!password) return null;
+    return {email,password};
+  }catch(_e){
+    return null;
+  }
+}
+function clearLoginSession(){
+  try{localStorage.removeItem(SESSION_LOGIN_KEY);}catch(_e){}
+}
+function getOrdersPageBounds(total){
+  const totalCount=Math.max(0,Number(total)||0);
+  const pageSize=ORDERS_PAGE_SIZE;
+  const totalPages=Math.max(1,Math.ceil(totalCount/pageSize));
+  if(_ordersPage>totalPages) _ordersPage=totalPages;
+  if(_ordersPage<1) _ordersPage=1;
+  const start=(_ordersPage-1)*pageSize;
+  const end=Math.min(start+pageSize,totalCount);
+  return {totalCount,pageSize,totalPages,start,end,page:_ordersPage};
+}
+function setOrdersPage(page){
+  const n=Math.max(1,Number(page)||1);
+  _ordersPage=n;
+  if(fStatus==='pending') renderPendingInTable();
+  else render();
+}
+function resetOrdersPage(){
+  _ordersPage=1;
+}
+function renderOrdersPagination(totalCount){
+  const el=document.getElementById('orders-pagination');
+  if(!el) return;
+  const b=getOrdersPageBounds(totalCount);
+  if(b.totalCount<=b.pageSize){
+    el.style.display='none';
+    el.innerHTML='';
+    return;
+  }
+  el.style.display='flex';
+  el.style.alignItems='center';
+  el.style.justifyContent='space-between';
+  const prevDisabled=b.page<=1;
+  const nextDisabled=b.page>=b.totalPages;
+  el.innerHTML=`
+    <div style="font-size:12px;color:var(--muted);">
+      Showing ${b.start+1}-${b.end} of ${b.totalCount}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button class="btn btn-xs ${prevDisabled?'btn-ghost':''}" ${prevDisabled?'disabled':''} onclick="setOrdersPage(${b.page-1})">← Prev</button>
+      <span style="font-size:12px;font-weight:600;min-width:76px;text-align:center;">Page ${b.page}/${b.totalPages}</span>
+      <button class="btn btn-xs ${nextDisabled?'btn-ghost':''}" ${nextDisabled?'disabled':''} onclick="setOrdersPage(${b.page+1})">Next →</button>
+    </div>`;
+}
+function paginateCollection(items,page,size){
+  const list=Array.isArray(items)?items:[];
+  const pageSize=Math.max(1,Number(size)||LIST_PAGE_SIZE);
+  let current=Math.max(1,Number(page)||1);
+  const total=list.length;
+  const totalPages=Math.max(1,Math.ceil(total/pageSize));
+  if(current>totalPages) current=totalPages;
+  const start=(current-1)*pageSize;
+  const end=Math.min(start+pageSize,total);
+  return {
+    items:list.slice(start,end),
+    page:current,
+    total,
+    totalPages,
+    start,
+    end,
+    pageSize
+  };
+}
+function renderInlineListPagination(opts){
+  const el=document.getElementById(String(opts&&opts.targetId||''));
+  if(!el) return;
+  const page=Math.max(1,Number(opts&&opts.page)||1);
+  const total=Math.max(0,Number(opts&&opts.total)||0);
+  const totalPages=Math.max(1,Number(opts&&opts.totalPages)||1);
+  const pageSize=Math.max(1,Number(opts&&opts.pageSize)||LIST_PAGE_SIZE);
+  if(total<=pageSize){
+    el.innerHTML='';
+    return;
+  }
+  const onPage=String(opts&&opts.onPage||'');
+  const start=(page-1)*pageSize+1;
+  const end=Math.min(page*pageSize,total);
+  el.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;">
+      <span style="font-size:11px;color:var(--muted);">Showing ${start}-${end} of ${total}</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="btn btn-xs ${page<=1?'btn-ghost':''}" ${page<=1?'disabled':''} onclick="${onPage}(${page-1})">← Prev</button>
+        <span style="font-size:11px;font-weight:700;min-width:66px;text-align:center;">${page}/${totalPages}</span>
+        <button class="btn btn-xs ${page>=totalPages?'btn-ghost':''}" ${page>=totalPages?'disabled':''} onclick="${onPage}(${page+1})">Next →</button>
+      </div>
+    </div>`;
+}
+function setCustomersPage(page){
+  _customersPage=Math.max(1,Number(page)||1);
+  renderCustomers(_customersFilterQuery);
+}
+function setSuppliersPage(page){
+  _suppliersPage=Math.max(1,Number(page)||1);
+  renderSuppliers();
+}
+function setUsersPage(page){
+  _usersPage=Math.max(1,Number(page)||1);
+  renderUsers();
+}
 
 function normalizeStatus(s){
   const raw=String(s===undefined||s===null?'':s).trim().replace(/\s+/g,' ');
@@ -2358,15 +2245,6 @@ function normalizeOrderSnapshotList(list){
     .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
 }
 
-let _ordersCloudSnapshot=[];
-function getOrdersCloudSnapshot(){
-  return normalizeOrderSnapshotList(Array.isArray(_ordersCloudSnapshot)?_ordersCloudSnapshot:[]);
-}
-function setOrdersCloudSnapshot(list){
-  _ordersCloudSnapshot=normalizeOrderSnapshotList(Array.isArray(list)?list:[]);
-  return _ordersCloudSnapshot;
-}
-
 const STATUSES=['New','Sent to Factory','At Depot','Sent to Logistics','Shipped','Completed'];
 const S_LABEL={'New':'New','Sent to Factory':'Sent to Factory','At Depot':'At Depot','Sent to Logistics':'Sent to Logistics','Shipped':'Shipped','Completed':'Completed'};
 function getStatusLabel(s){
@@ -2384,26 +2262,59 @@ function displayStatus(s){
 
 // ── DARK MODE ──
 function toggleDark(){const d=document.body.classList.toggle('dark');document.getElementById('dark-btn').textContent=d?'☀️':'🌙';localStorage.setItem('jb_dark',d?'1':'0');}
-function getPreferredApiBaseDefault(){
+function enforceCanonicalLocalOrigin(){
   try{
-    const host=String(location.hostname||'').toLowerCase();
-    const isLocalHost=(host==='127.0.0.1'||host==='localhost');
-    if(isLocalHost && String(location.port||'')==='5500'){
-      return `${location.protocol}//${location.hostname}:8787`;
-    }
+    const h=String(location.hostname||'').toLowerCase();
+    if(h!=='localhost') return;
+    const target='http://127.0.0.1'+(location.port?(':'+location.port):'')+location.pathname+location.search+location.hash;
+    location.replace(target);
+  }catch(_e){}
+}
+function getDefaultApiBaseByLocation(){
+  try{
+    const h=String(location.hostname||'').toLowerCase();
+    const p=String(location.port||'');
+    if(h==='127.0.0.1' && p==='5500') return 'http://127.0.0.1:8788';
+    if(h==='127.0.0.1' && p==='8788') return 'http://127.0.0.1:8888';
   }catch(_e){}
   return location.origin;
 }
+function normalizeConfiguredApiBase(raw){
+  const fallback=getDefaultApiBaseByLocation();
+  let value=String(raw||'').trim();
+  if(!value) return fallback;
+  if(!/^https?:\/\//i.test(value)) return fallback;
+  value=value.replace(/\/$/,'');
+  // Prevent pointing API to local static frontend servers.
+  if(/^https?:\/\/(127\.0\.0\.1|localhost):5500$/i.test(value)) return 'http://127.0.0.1:8788';
+  if(/^https?:\/\/(127\.0\.0\.1|localhost):8788$/i.test(value)) return 'http://127.0.0.1:8888';
+  return value;
+}
+function getDefaultCloudKeyByLocation(){
+  try{
+    const h=String(location.hostname||'').toLowerCase();
+    const p=String(location.port||'');
+    const isLocal=(h==='localhost'||h==='127.0.0.1');
+    if(isLocal && (p==='5500'||p==='8788'||p==='8888')) return 'local-dev-token';
+  }catch(_e){}
+  return '';
+}
 function getApiBaseEarly(){
-  const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
-  if(/^https?:\/\//i.test(raw)) return raw.replace(/\/$/,'');
-  return getPreferredApiBaseDefault();
+  return normalizeConfiguredApiBase(localStorage.getItem('jb_cloud_api'));
 }
 (function(){
+  enforceCanonicalLocalOrigin();
   // Initialize API base once; allow operator override from Settings.
   try{
-    if(!localStorage.getItem('jb_cloud_api')){
-      localStorage.setItem('jb_cloud_api',getPreferredApiBaseDefault());
+    const defaultApi=getDefaultApiBaseByLocation();
+    const existingRaw=(localStorage.getItem('jb_cloud_api')||'').trim();
+    const existingApi=normalizeConfiguredApiBase(existingRaw);
+    if(existingApi!==existingRaw){
+      localStorage.setItem('jb_cloud_api',existingApi||defaultApi);
+    }
+    if(!localStorage.getItem('jb_cloud_key')){
+      const defKey=getDefaultCloudKeyByLocation();
+      if(defKey) localStorage.setItem('jb_cloud_key',defKey);
     }
   }catch(_e){}
   const savedUsers=localStorage.getItem('jb_users');
@@ -2514,14 +2425,48 @@ function compactOrdersForStorage(list,opts={}){
   });
 }
 function persistOrdersLocalSafe(list){
-  void list;
-  try{ localStorage.removeItem('jb_orders'); }catch(_e){}
-  return true;
+  const arr=Array.isArray(list)?list:[];
+  try{
+    localStorage.setItem('jb_orders',JSON.stringify(arr));
+    return true;
+  }catch(_e){
+    try{
+      const compact=compactOrdersForStorage(arr,{aggressive:false});
+      localStorage.setItem('jb_orders',JSON.stringify(compact));
+      const now=Date.now();
+      if(now-_ordersStorageWarnAt>20000){
+        _ordersStorageWarnAt=now;
+        toast('⚠️ Order images compacted to protect updates','info');
+      }
+      return true;
+    }catch(err2){
+      try{
+        const compactAggressive=compactOrdersForStorage(arr,{aggressive:true});
+        localStorage.setItem('jb_orders',JSON.stringify(compactAggressive));
+        const now=Date.now();
+        if(now-_ordersStorageWarnAt>20000){
+          _ordersStorageWarnAt=now;
+          toast('⚠️ Storage was full; compacted order cache to protect changes','info');
+        }
+        return true;
+      }catch(err3){
+        console.error('[persistOrdersLocalSafe]',err3&&err3.message?err3.message:err3);
+        return false;
+      }
+    }
+  }
 }
 function shouldAcceptRemoteOrders(remoteOrders){
   if(!Array.isArray(remoteOrders)) return false;
   const remoteCount=remoteOrders.length;
-  const localCount=Array.isArray(orders)?orders.length:0;
+  let localCount=Array.isArray(orders)?orders.length:0;
+  try{
+    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    const storageCount=Array.isArray(localOrders)?localOrders.length:0;
+    localCount=Math.max(localCount,storageCount);
+  }catch(_e){
+    localCount=Math.max(localCount,0);
+  }
   const hasPendingLocalMutations=hasActiveUpsertOrderMutation();
   if(remoteCount>0){
     // If we have pending local writes, reject any snapshot shrink to avoid dropping
@@ -2537,7 +2482,12 @@ function shouldAcceptRemoteOrders(remoteOrders){
     }
     return true;
   }
-  return localCount===0;
+  try{
+    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+    return !Array.isArray(localOrders)||localOrders.length===0;
+  }catch(_e){
+    return true;
+  }
 }
 function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
   // In Cloudflare mode, /api/orders is the only authoritative source for orders.
@@ -2809,10 +2759,12 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
   }
   if(forceRemote && !opts.ignorePendingGuards){
     const hasRecentMutationBlock=hasRecentUpsertOrderMutation();
-    if(hasRecentMutationBlock || pendingFallbackIds.size){
+    const recentFallbackOps=getRecentPendingFallbackOrderCount();
+    if(hasRecentMutationBlock || recentFallbackOps>0){
       console.warn('[OrderSync] Skip authoritative replace due to pending local mutations', {
         source,
         recentPendingMutations:getRecentUpsertOrderMutationCount(),
+        recentPendingFallbackOps:recentFallbackOps,
         pendingMutationsTotal:getActiveLocalOrderMutationIds().length,
         pendingFallbackOps:pendingFallbackIds.size
       });
@@ -2836,7 +2788,6 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
   }
   const changed=JSON.stringify(currentOrders)!==JSON.stringify(nextOrders);
   orders=nextOrders;
-  setOrdersCloudSnapshot(orders);
   persistOrdersLocalSafe(orders);
   return {applied:true,changed,count:orders.length,source};
 }
@@ -2856,6 +2807,237 @@ function scheduleFirebaseAutoConnect(reason){
 function warmFirebaseConnect(){
   scheduleFirebaseAutoConnect('warm');
 }
+
+function restoreSavedMenuPageForAdmin(){
+  if(!me || me.role!=='Admin') return;
+  const saved=getSavedPageId();
+  if(!saved || saved==='pg-dash') return;
+  const supported=new Set([
+    'pg-dash','pg-alerts','pg-orders','pg-catalog','pg-activity','pg-barcode','pg-bulk-cn',
+    'pg-import','pg-customers','pg-suppliers','pg-users','pg-settings','pg-chat','pg-feed',
+    'pg-depot','pg-sup-perf','pg-reorder'
+  ]);
+  if(!supported.has(saved)) return;
+  showPage(saved);
+  const titleMap={
+    'pg-dash':'Dashboard',
+    'pg-alerts':'Alerts',
+    'pg-orders':'Orders',
+    'pg-catalog':'Product Catalog',
+    'pg-activity':'Activity Log',
+    'pg-barcode':'Depot Scanner',
+    'pg-bulk-cn':'Bulk CN Tracking',
+    'pg-import':'Import Tracking',
+    'pg-customers':'Customers',
+    'pg-suppliers':'Factories',
+    'pg-users':'Users',
+    'pg-settings':'Settings',
+    'pg-chat':'Messages',
+    'pg-feed':'Reseller Feed',
+    'pg-depot':'Depot Status',
+    'pg-sup-perf':'Factory Performance',
+    'pg-reorder':'Reorder Reminders'
+  };
+  const title=titleMap[saved]||'Dashboard';
+  const titleEl=document.getElementById('pg-title');
+  if(titleEl) titleEl.textContent=title;
+  if(saved==='pg-orders'){
+    showOrderTop();
+    render();
+  }else{
+    hideTop();
+  }
+}
+
+const PAGE_PATH_MAP={
+  'pg-dash':'/dashboard',
+  'pg-alerts':'/alerts',
+  'pg-orders':'/orders',
+  'pg-catalog':'/catalog',
+  'pg-activity':'/activity',
+  'pg-barcode':'/barcode',
+  'pg-bulk-cn':'/bulk-cn',
+  'pg-import':'/import',
+  'pg-customers':'/customers',
+  'pg-suppliers':'/suppliers',
+  'pg-users':'/users',
+  'pg-settings':'/settings',
+  'pg-chat':'/messages',
+  'pg-feed':'/feed',
+  'pg-depot':'/depot',
+  'pg-sup-perf':'/factory-performance',
+  'pg-reorder':'/reorder',
+  'pg-reseller':'/my-orders'
+};
+const ORDER_STATUS_ROUTE_SEGMENT={
+  'all':'all',
+  'pending':'pending',
+  'New':'new',
+  'Sent to Factory':'sent-to-factory',
+  'At Depot':'at-depot',
+  'Ready':'ready',
+  'Sent to Logistics':'sent-to-logistics',
+  'Shipped':'shipped',
+  'Completed':'completed'
+};
+const ORDER_ROUTE_SEGMENT_STATUS={
+  '':'all',
+  'all':'all',
+  'pending':'pending',
+  'new':'New',
+  'sent-to-factory':'Sent to Factory',
+  'at-depot':'At Depot',
+  'ready':'Ready',
+  'sent-to-logistics':'Sent to Logistics',
+  'shipped':'Shipped',
+  'completed':'Completed'
+};
+const ORDER_HEAVY_PAGES=new Set([
+  'pg-dash','pg-alerts','pg-orders','pg-activity','pg-depot','pg-sup-perf','pg-reorder','pg-import','pg-bulk-cn','pg-reseller'
+]);
+const AUX_DATA_PAGES=new Set([
+  'pg-customers','pg-suppliers','pg-users','pg-settings','pg-chat','pg-feed','pg-messages','pg-catalog'
+]);
+let _routeSyncLock=false;
+let _pageDataSyncInFlight=false;
+let _pageDataLastSyncAt=0;
+const PAGE_DATA_SYNC_COOLDOWN_MS=15000;
+function shouldUseHashRouting(){
+  // Path-based routing only: keep clean URLs like /settings (no #).
+  return false;
+}
+function getCurrentPageId(){
+  const el=document.querySelector('.page.on');
+  return el&&el.id?String(el.id):'';
+}
+function parseRouteLocation(){
+  const hashPath=String(location.hash||'').replace(/^#/,'').trim();
+  const raw=shouldUseHashRouting() ? (hashPath||'/dashboard') : String(location.pathname||'/');
+  const p=String(raw||'/').toLowerCase();
+  return p.startsWith('/')?p:('/'+p);
+}
+function pageIdFromPath(path){
+  const p=String(path||'/').toLowerCase();
+  const map=[
+    ['/dashboard','pg-dash'],['/alerts','pg-alerts'],['/orders','pg-orders'],['/catalog','pg-catalog'],
+    ['/activity','pg-activity'],['/barcode','pg-barcode'],['/bulk-cn','pg-bulk-cn'],['/import','pg-import'],
+    ['/customers','pg-customers'],['/suppliers','pg-suppliers'],['/users','pg-users'],['/settings','pg-settings'],
+    ['/messages','pg-chat'],['/feed','pg-feed'],['/depot','pg-depot'],['/factory-performance','pg-sup-perf'],
+    ['/reorder','pg-reorder'],['/my-orders','pg-reseller']
+  ];
+  for(const [prefix,id] of map){
+    if(p===prefix||p.startsWith(prefix+'/')) return id;
+  }
+  return '';
+}
+function syncUrlPathForPage(pageId){
+  if(_routeSyncLock) return;
+  const target=PAGE_PATH_MAP[String(pageId||'')]||'';
+  if(!target) return;
+  if(shouldUseHashRouting()){
+    const currentHash=String(location.hash||'').replace(/^#/,'')||'/';
+    if(currentHash===target) return;
+    location.hash=target;
+    return;
+  }
+  if(location.pathname===target) return;
+  try{history.pushState({pageId},'',target);}catch(_e){}
+}
+function syncOrdersRoute(status){
+  const seg=ORDER_STATUS_ROUTE_SEGMENT[String(status||'all')]||'all';
+  const target=seg==='all'?'/orders':(`/orders/${seg}`);
+  if(shouldUseHashRouting()){
+    const currentHash=String(location.hash||'').replace(/^#/,'')||'/';
+    if(currentHash===target) return;
+    location.hash=target;
+    return;
+  }
+  if(location.pathname===target) return;
+  try{history.pushState({pageId:'pg-orders'},'',target);}catch(_e){}
+}
+async function loadAuxDataOnly(){
+  const api=await ensureWorkingApiBase({silent:true});
+  const dataRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
+  if(!dataRes.ok) return false;
+  const payload=await dataRes.json();
+  const data=payload&&payload.data?payload.data:{};
+  const KEYS=['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed'];
+  for(const key of KEYS){
+    if(data[key]===undefined) continue;
+    if(hasKeyLocalMutation(key)) continue;
+    if(key==='jb_feed'){
+      const mergedFeed=mergeFeedByVersion(getFeedPostsFromCache(),Array.isArray(data[key])?data[key]:[])
+        .map(function(post){return normalizeFeedPost(post,post);});
+      setFeedCache(mergedFeed,Date.now());
+      continue;
+    }
+    applyRemoteKeyToLocal(key,data[key],'page_aux');
+  }
+  return true;
+}
+async function syncDataForActivePage(reason){
+  const pageId=getCurrentPageId();
+  if(!pageId || !me || !navigator.onLine) return;
+  const now=Date.now();
+  if(reason!=='force' && (now-_pageDataLastSyncAt)<PAGE_DATA_SYNC_COOLDOWN_MS) return;
+  if(_pageDataSyncInFlight) return;
+  _pageDataSyncInFlight=true;
+  try{
+    if(ORDER_HEAVY_PAGES.has(pageId)){
+      await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
+      await runSilentLoadWithLock().catch(()=>{});
+    }else if(AUX_DATA_PAGES.has(pageId)){
+      await loadAuxDataOnly().catch(()=>{});
+    }
+    _pageDataLastSyncAt=Date.now();
+  }finally{
+    _pageDataSyncInFlight=false;
+  }
+}
+function handlePathRoute(){
+  if(!me) return false;
+  const currentPath=parseRouteLocation();
+  const pageId=pageIdFromPath(currentPath);
+  if(!pageId) return false;
+  if(me.role==='Reseller'){
+    goReseller();
+    return true;
+  }
+  showPage(pageId);
+  const titleMap={
+    'pg-dash':'Dashboard','pg-alerts':'Alerts','pg-orders':'Orders','pg-catalog':'Product Catalog',
+    'pg-activity':'Activity Log','pg-barcode':'Depot Scanner','pg-bulk-cn':'Bulk CN Tracking',
+    'pg-import':'Import Tracking','pg-customers':'Customers','pg-suppliers':'Factories','pg-users':'Users',
+    'pg-settings':'Settings','pg-chat':'Messages','pg-feed':'Reseller Feed','pg-depot':'Depot Status',
+    'pg-sup-perf':'Factory Performance','pg-reorder':'Reorder Reminders'
+  };
+  const titleEl=document.getElementById('pg-title');
+  if(titleEl) titleEl.textContent=titleMap[pageId]||'Dashboard';
+  if(pageId==='pg-orders'){
+    const lowerPath=currentPath.toLowerCase();
+    const seg=lowerPath.replace(/^\/orders\/?/,'').trim();
+    const resolved=ORDER_ROUTE_SEGMENT_STATUS.hasOwnProperty(seg)?ORDER_ROUTE_SEGMENT_STATUS[seg]:'all';
+    fStatus=resolved;
+    showOrderTop();
+    if(resolved==='pending') renderPendingInTable();
+    else render();
+  }else{
+    hideTop();
+  }
+  syncDataForActivePage('force').catch(()=>{});
+  return true;
+}
+window.addEventListener('popstate',function(){
+  if(_routeSyncLock) return;
+  _routeSyncLock=true;
+  try{handlePathRoute();}finally{_routeSyncLock=false;}
+});
+window.addEventListener('hashchange',function(){
+  if(!shouldUseHashRouting()) return;
+  if(_routeSyncLock) return;
+  _routeSyncLock=true;
+  try{handlePathRoute();}finally{_routeSyncLock=false;}
+});
 
 // ── AUTH ──
 async function login(){
@@ -2913,6 +3095,7 @@ async function login(){
   }
   me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
   const firebaseEmail=String(me.email||em||'').trim().toLowerCase();
+  saveLoginSession(firebaseEmail,pw);
   cacheFirebaseLoginCreds(firebaseEmail,pw);
   if(getFirebaseEnabled()){
     try{
@@ -2964,6 +3147,14 @@ async function login(){
   else if(me.role==='Staff') goDepotStaff();
   else{document.getElementById('topbar-right').style.display='none';goDash(document.querySelector('.ni'));startPendingPoll();
   startGlobalChatPoll();initPushForAdmin();initOfflineIndicator();startAutoSync();}
+  if(me.role==='Admin'){
+    setTimeout(function(){
+      const routed=handlePathRoute();
+      if(!routed) restoreSavedMenuPageForAdmin();
+    },0);
+  }else{
+    setTimeout(function(){handlePathRoute();},0);
+  }
   scheduleFirebaseAutoConnect('login');
   bootstrapAuthoritativeOrders().catch(()=>{});
   setTimeout(async function(){
@@ -2984,6 +3175,7 @@ async function login(){
           }
         });
         // Prefer authoritative /api/orders on login; fallback to /api/data snapshot only if needed.
+        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
         let cloudOrders=[];
         try{
           const ordRes=await fetch(getApiBase()+'/api/orders',{headers:getAuthHeaders()});
@@ -2997,7 +3189,8 @@ async function login(){
         // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'login',forceRemote:true});
         if(!applied.applied){
-          console.warn('[OrderSync][login] authoritative snapshot skipped due to pending mutations');
+          orders=normalizeOrderSnapshotList(Array.isArray(localOrders)?localOrders:[]);
+          persistOrdersLocalSafe(orders);
         }
         flushLocalSyncFallback().catch(function(){});
         catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
@@ -3037,6 +3230,7 @@ async function logout(){
   try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}
   clearFirebaseAuthNeedsFreshLogin();
   resetHealthCounters();
+  clearLoginSession();
   me=null;
   selId=null;
   document.getElementById('login-screen').style.display='flex';
@@ -3168,6 +3362,13 @@ function showPage(id){
       pg.style.overflowY='auto';
     } else {
       pg.style.flexDirection='column';
+      if(pg.classList.contains('scrl')){
+        // Keep long pages scrollable (notably Settings after fragment split).
+        pg.style.overflowY='auto';
+        pg.style.overflowX='hidden';
+        pg.style.height='100%';
+        pg.style.minHeight='0';
+      }
     }
     pg.scrollTop=0;
     requestAnimationFrame(()=>pg.classList.add('page-enter'));
@@ -3175,6 +3376,9 @@ function showPage(id){
   if(id!=='pg-orders') closeDetail();
   if(id!=='pg-barcode') stopCamera();
   if(id!=='pg-bulk-cn') stopBCNCamera();
+  saveActivePageId(id);
+  syncUrlPathForPage(id);
+  syncDataForActivePage('navigate').catch(()=>{});
 }
 function setNav(el){document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));if(el&&el.classList)el.classList.add('on');}
 function hideTop(){document.getElementById('pg-badge').style.display='none';document.getElementById('topbar-right').style.display='none';}
@@ -3234,6 +3438,7 @@ async function rejectOrder(id){
 }
 
 async function navOrders(status,el){
+  resetOrdersPage();
   if(status==='pending'){
     fStatus='pending';
     setNav(el);
@@ -3263,6 +3468,7 @@ async function navOrders(status,el){
         }
       }catch(e){}
       renderPendingInTable();
+      syncOrdersRoute('pending');
     })();
     return;
   }
@@ -3274,16 +3480,21 @@ async function navOrders(status,el){
   tabs.forEach(t=>t.classList.remove('on'));
   if(m[status]!==undefined)tabs[m[status]].classList.add('on');
   render();
+  syncOrdersRoute(status);
 }
 function renderPendingInTable(){
   const pending=orders.filter(o=>normalizeBooleanFlag(o&&o.pendingApproval));
   const tb=document.getElementById('tbody');
   if(!tb)return;
   if(!pending.length){
+    renderOrdersPagination(0);
     tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">✅ No pending approvals</div></td></tr>';
     return;
   }
-  tb.innerHTML=pending.map(o=>{
+  const pageBounds=getOrdersPageBounds(pending.length);
+  const pageRows=pending.slice(pageBounds.start,pageBounds.end);
+  renderOrdersPagination(pending.length);
+  tb.innerHTML=pageRows.map(o=>{
     const prods=(o.products||[]).map(p=>esc(p.name)+(p.qty>1?' ×'+p.qty:'')).join(', ');
     const u=users.find(u=>u.id===o.resellerId);
     const resellerName=u?.dname||u?.email||'Unknown';
@@ -3312,10 +3523,10 @@ function goCatalog(el){setNav(el);showPage('pg-catalog');document.getElementById
 function goActivity(el){setNav(el);showPage('pg-activity');document.getElementById('pg-title').textContent='Activity Log';hideTop();renderActivityLog();}
 function goBarcode(el){setNav(el);showPage('pg-barcode');document.getElementById('pg-title').textContent='Depot Scanner';hideTop();stopBCNCamera();setScanMode('find');}
 function goImport(el){setNav(el);showPage('pg-import');document.getElementById('pg-title').textContent='Import Tracking';hideTop();}
-function goCustomers(el){setNav(el);showPage('pg-customers');document.getElementById('pg-title').textContent='Customers';hideTop();renderCustomers('');}
-function goSuppliers(el){setNav(el);showPage('pg-suppliers');document.getElementById('pg-title').textContent='Factories';hideTop();renderSuppliers();}
+function goCustomers(el){setNav(el);showPage('pg-customers');document.getElementById('pg-title').textContent='Customers';hideTop();_customersPage=1;renderCustomers('');}
+function goSuppliers(el){setNav(el);showPage('pg-suppliers');document.getElementById('pg-title').textContent='Factories';hideTop();_suppliersPage=1;renderSuppliers();}
 function goMessages(el){setNav(el);showPage('pg-messages');document.getElementById('pg-title').textContent='Templates & Notifications';hideTop();}
-function goUsers(el){setNav(el);showPage('pg-users');document.getElementById('pg-title').textContent='Users';hideTop();try{renderUsers();}catch(e){console.error("[goUsers]",e);}}
+function goUsers(el){setNav(el);showPage('pg-users');document.getElementById('pg-title').textContent='Users';hideTop();_usersPage=1;try{renderUsers();}catch(e){console.error("[goUsers]",e);}}
 function goSettings(el){setNav(el);showPage('pg-settings');document.getElementById('pg-title').textContent='Settings';hideTop();}
 function goChat(el){setNav(el);showPage('pg-chat');document.getElementById('pg-title').textContent='Messages';hideTop();try{renderChatList();}catch(e){console.error("[goChat]",e);}}
 function goFeed(el){
@@ -3589,8 +3800,11 @@ function render(){
   const badge=document.getElementById('pg-badge');if(badge)badge.textContent=list.length+' order'+(list.length!==1?'s':'');
   updateBadges();
   const tb=document.getElementById('tbody');if(!tb)return;
-  if(!list.length){tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">No orders found</div></td></tr>';return;}
-  tb.innerHTML=list.map(o=>{
+  if(!list.length){renderOrdersPagination(0);tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">No orders found</div></td></tr>';return;}
+  const pageBounds=getOrdersPageBounds(list.length);
+  const pageRows=list.slice(pageBounds.start,pageBounds.end);
+  renderOrdersPagination(list.length);
+  tb.innerHTML=pageRows.map(o=>{
     const prods=o.products||[];
     // Show all product images stacked
     const imgsH=prods.length===0?`<div class="prod-thumb-ph">📦</div>`:
@@ -5395,15 +5609,42 @@ function sendAllEmails(){_emailQueue.filter(o=>o.email).forEach((o,i)=>setTimeou
 function renderCustomers(filter){
   const map={};orders.forEach(o=>{const key=(o.email||o.name||'').toLowerCase()||o.id;if(!map[key])map[key]={name:o.name,email:o.email,phone:o.phone,fblink:o.fblink,orders:[],totalSpend:0};map[key].orders.push(o);map[key].totalSpend+=(o.products||[]).reduce((s,p)=>s+(parseFloat(p.value)||0),0);});
   let custs=Object.values(map).sort((a,b)=>b.orders.length-a.orders.length);
-  if(filter){const q=filter.toLowerCase();custs=custs.filter(c=>(c.name||'').toLowerCase().includes(q)||(c.email||'').toLowerCase().includes(q));}
+  _customersFilterQuery=String(filter||'').trim();
+  if(_customersFilterQuery){
+    const q=_customersFilterQuery.toLowerCase();
+    custs=custs.filter(c=>(c.name||'').toLowerCase().includes(q)||(c.email||'').toLowerCase().includes(q));
+    _customersPage=1;
+  }
   const list=document.getElementById('customers-list');
+  const pagerId='customers-pagination';
+  const pagerEl=document.getElementById(pagerId);
   if(!custs.length){list.innerHTML='<div style="padding:24px;text-align:center;color:var(--muted);">No customers yet.</div>';return;}
-  list.innerHTML=custs.map(c=>{const last=c.orders.sort((a,b)=>b.ts-a.ts)[0];return`<div class="card-row"><div style="width:36px;height:36px;border-radius:50%;background:var(--accent-light);border:1px solid var(--accent-border);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:var(--accent);flex-shrink:0;">${(c.name||'?')[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:700;">${c.name||'Unknown'}</div><div style="font-size:11px;color:var(--muted);">${c.email||''} ${c.phone?'· '+c.phone:''}</div><div style="font-size:11px;color:var(--muted);">Last: ${fmtDate(last?.ts)}</div></div><div style="text-align:right;flex-shrink:0;"><div style="font-size:13px;font-weight:700;font-family:var(--mono);">${c.orders.length}</div>${c.totalSpend?`<div style="font-size:11px;color:var(--green);font-weight:600;">£${c.totalSpend.toFixed(2)}</div>`:''}${c.orders.length>=3?`<div style="font-size:10px;background:var(--accent-light);color:var(--accent);border:1px solid var(--accent-border);border-radius:10px;padding:1px 6px;margin-top:2px;display:inline-block;">⭐ Loyal</div>`:''}</div></div>`;}).join('');
+  const pg=paginateCollection(custs,_customersPage,LIST_PAGE_SIZE);
+  _customersPage=pg.page;
+  list.innerHTML=pg.items.map(c=>{const last=c.orders.sort((a,b)=>b.ts-a.ts)[0];return`<div class="card-row"><div style="width:36px;height:36px;border-radius:50%;background:var(--accent-light);border:1px solid var(--accent-border);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:var(--accent);flex-shrink:0;">${(c.name||'?')[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:700;">${c.name||'Unknown'}</div><div style="font-size:11px;color:var(--muted);">${c.email||''} ${c.phone?'· '+c.phone:''}</div><div style="font-size:11px;color:var(--muted);">Last: ${fmtDate(last?.ts)}</div></div><div style="text-align:right;flex-shrink:0;"><div style="font-size:13px;font-weight:700;font-family:var(--mono);">${c.orders.length}</div>${c.totalSpend?`<div style="font-size:11px;color:var(--green);font-weight:600;">£${c.totalSpend.toFixed(2)}</div>`:''}${c.orders.length>=3?`<div style="font-size:10px;background:var(--accent-light);color:var(--accent);border:1px solid var(--accent-border);border-radius:10px;padding:1px 6px;margin-top:2px;display:inline-block;">⭐ Loyal</div>`:''}</div></div>`;}).join('');
+  if(pagerEl){
+    renderInlineListPagination({targetId:pagerId,page:pg.page,total:pg.total,totalPages:pg.totalPages,pageSize:pg.pageSize,onPage:'setCustomersPage'});
+  }
 }
 function filterCustomers(v){renderCustomers(v);}
 
 // ── FACTORIES ──
-function renderSuppliers(){const list=document.getElementById('suppliers-list');if(!suppliers.length){list.innerHTML='<div style="padding:24px;text-align:center;color:var(--muted);">No factories yet.</div>';return;}list.innerHTML=suppliers.map(s=>`<div class="card-row"><div style="width:34px;height:34px;border-radius:10px;background:var(--green-bg);border:1px solid var(--green-border);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">🏭</div><div style="flex:1;"><div style="font-size:13px;font-weight:700;">${esc(s.name)}</div><div style="font-size:11px;color:var(--muted);">${s.category||'General'}</div><div style="font-size:11px;color:var(--green);font-family:var(--mono);">${esc(s.wechat)}</div>${s.notes?`<div style="font-size:11px;color:var(--muted);">${esc(s.notes)}</div>`:''}</div><button class="btn btn-danger btn-xs" onclick="removeSupplier('${s.id}')">Remove</button></div>`).join('');}
+function renderSuppliers(){
+  const list=document.getElementById('suppliers-list');
+  const pagerId='suppliers-pagination';
+  const pagerEl=document.getElementById(pagerId);
+  if(!suppliers.length){
+    list.innerHTML='<div style="padding:24px;text-align:center;color:var(--muted);">No factories yet.</div>';
+    if(pagerEl) pagerEl.innerHTML='';
+    return;
+  }
+  const pg=paginateCollection(suppliers,_suppliersPage,LIST_PAGE_SIZE);
+  _suppliersPage=pg.page;
+  list.innerHTML=pg.items.map(s=>`<div class="card-row"><div style="width:34px;height:34px;border-radius:10px;background:var(--green-bg);border:1px solid var(--green-border);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">🏭</div><div style="flex:1;"><div style="font-size:13px;font-weight:700;">${esc(s.name)}</div><div style="font-size:11px;color:var(--muted);">${s.category||'General'}</div><div style="font-size:11px;color:var(--green);font-family:var(--mono);">${esc(s.wechat)}</div>${s.notes?`<div style="font-size:11px;color:var(--muted);">${esc(s.notes)}</div>`:''}</div><button class="btn btn-danger btn-xs" onclick="removeSupplier('${s.id}')">Remove</button></div>`).join('');
+  if(pagerEl){
+    renderInlineListPagination({targetId:pagerId,page:pg.page,total:pg.total,totalPages:pg.totalPages,pageSize:pg.pageSize,onPage:'setSuppliersPage'});
+  }
+}
 function openSupModal(){document.getElementById('sup-modal').classList.add('open');}
 function closeSupModal(){document.getElementById('sup-modal').classList.remove('open');['s-name','s-wechat','s-category','s-notes'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});}
 function addSupplier(){const name=document.getElementById('s-name').value.trim(),wechat=document.getElementById('s-wechat').value.trim();if(!name||!wechat){toast('⚠️ Name and Contact ID required','err');return;}suppliers.push({id:'s'+Date.now(),name,wechat,category:document.getElementById('s-category').value.trim(),notes:document.getElementById('s-notes').value.trim()});saveSuppliers();closeSupModal();renderSuppliers();toast('✅ Supplier added','ok');}
@@ -5432,7 +5673,17 @@ function saveNotifSettings(){
 }
 
 // ── USERS ──
-function renderUsers(){document.getElementById('users-list').innerHTML=users.map(u=>{const rc={Admin:'background:var(--accent-light);color:var(--accent);',Reseller:'background:var(--blue-bg);color:var(--blue);',Staff:'background:var(--green-bg);color:var(--green);'}[u.role]||'';return`<div class="card-row"><div style="width:32px;height:32px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:13px;flex-shrink:0;">${(u.dname||u.email)[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:600;">${esc(u.email)}${u.dname?` <span style="color:var(--muted);font-size:11px;">(${esc(u.dname)})</span>`:''}</div><div style="margin-top:3px;"><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;${rc}">${u.role}</span></div></div><div>${u.id==='u1'?'<span style="font-size:11px;color:var(--muted);">Super Admin</span>':`<button class="btn btn-danger btn-xs" onclick="removeUser('${u.id}')">Remove</button>`}</div></div>`;}).join('');}
+function renderUsers(){
+  const list=document.getElementById('users-list');
+  const pagerId='users-pagination';
+  const pagerEl=document.getElementById(pagerId);
+  const pg=paginateCollection(users,_usersPage,LIST_PAGE_SIZE);
+  _usersPage=pg.page;
+  list.innerHTML=pg.items.map(u=>{const rc={Admin:'background:var(--accent-light);color:var(--accent);',Reseller:'background:var(--blue-bg);color:var(--blue);',Staff:'background:var(--green-bg);color:var(--green);'}[u.role]||'';return`<div class="card-row"><div style="width:32px;height:32px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:13px;flex-shrink:0;">${(u.dname||u.email)[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:600;">${esc(u.email)}${u.dname?` <span style="color:var(--muted);font-size:11px;">(${esc(u.dname)})</span>`:''}</div><div style="margin-top:3px;"><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;${rc}">${u.role}</span></div></div><div>${u.id==='u1'?'<span style="font-size:11px;color:var(--muted);">Super Admin</span>':`<button class="btn btn-danger btn-xs" onclick="removeUser('${u.id}')">Remove</button>`}</div></div>`;}).join('');
+  if(pagerEl){
+    renderInlineListPagination({targetId:pagerId,page:pg.page,total:pg.total,totalPages:pg.totalPages,pageSize:pg.pageSize,onPage:'setUsersPage'});
+  }
+}
 function openUserModal(){document.getElementById('user-modal').classList.add('open');}
 function closeUserModal(){document.getElementById('user-modal').classList.remove('open');document.getElementById('u-em').value='';document.getElementById('u-pw').value='';document.getElementById('u-dname').value='';}
 function addUser(){const em=document.getElementById('u-em').value.trim(),pw=document.getElementById('u-pw').value,rl=document.getElementById('u-role').value,dn=document.getElementById('u-dname').value.trim();if(!em||!pw){toast('⚠️ Email and password required','err');return;}if(pw.length<6){toast('⚠️ Min 6 characters','err');return;}if(users.find(u=>u.email.toLowerCase()===em.toLowerCase())){toast('⚠️ Email exists','err');return;}users.push({id:'u'+Date.now(),email:em,password:pw,role:rl,dname:dn});saveUsers();closeUserModal();renderUsers();toast('✅ User added','ok');}
@@ -5729,6 +5980,7 @@ function saveSettings(){
   const g=id=>document.getElementById(id);
   settings.alertDays=parseInt(g('cfg-alert-days')?.value)||3;
   settings.sessionTimeout=parseInt(g('cfg-session-timeout')?.value)||30;
+  settings.bulkChunkSize=Math.max(20,Math.min(500,parseInt(g('cfg-bulk-chunk-size')?.value)||120));
   settings.messengerLink=g('cfg-messenger-link')?.value.trim()||'';
   const cloudApi=(g('cfg-cloud-api')?.value||'').trim();
   const cloudKey=(g('cfg-cloud-key')?.value||'').trim();
@@ -5748,6 +6000,7 @@ function loadSettings(){
   const g=id=>document.getElementById(id);
   if(g('cfg-alert-days')) g('cfg-alert-days').value=settings.alertDays||3;
   if(g('cfg-session-timeout')) g('cfg-session-timeout').value=settings.sessionTimeout||30;
+  if(g('cfg-bulk-chunk-size')) g('cfg-bulk-chunk-size').value=Math.max(20,Math.min(500,parseInt(settings.bulkChunkSize)||120));
   if(g('cfg-messenger-link')) g('cfg-messenger-link').value=settings.messengerLink||'';
   if(g('cfg-cloud-api')) g('cfg-cloud-api').value=localStorage.getItem('jb_cloud_api')||location.origin;
   if(g('cfg-cloud-key')) g('cfg-cloud-key').value=localStorage.getItem('jb_cloud_key')||'';
@@ -5811,6 +6064,45 @@ function extractBackupPayload(raw){
     settings:pickObject([data.settings,data.jb_settings,nested.jb_settings,nested.settings])||{},
     notifSettings:pickObject([data.notifSettings,data.jb_notif,nested.jb_notif,nested.notifSettings])||{}
   };
+}
+async function pushBackupToCloudInChunks(api, payload, opts){
+  const options=opts||{};
+  const chunkSize=Math.max(1, Math.min(500, Number(options.chunkSize)||500));
+  const allOrders=Array.isArray(payload&&payload.orders)?payload.orders:[];
+  const totals={chunks:0,saved:0,stale:0,orders:allOrders.length};
+  for(let i=0;i<allOrders.length;i+=chunkSize){
+    const chunkOrders=allOrders.slice(i,i+chunkSize);
+    const chunkPayload={orders:chunkOrders,ts:Date.now()};
+    if(i===0){
+      chunkPayload.users=payload.users;
+      chunkPayload.suppliers=payload.suppliers;
+      chunkPayload.catalog=payload.catalog;
+      chunkPayload.templates=payload.templates;
+      chunkPayload.settings=payload.settings;
+      chunkPayload.notifSettings=payload.notifSettings;
+    }
+    const bulkRes=await fetchWithTimeout(
+      api+'/api/orders/bulk',
+      {
+        method:'POST',
+        headers:getAuthHeaders({'Content-Type':'application/json'}),
+        body:JSON.stringify(chunkPayload)
+      },
+      25000
+    );
+    if(!bulkRes.ok){
+      throw new Error('backup_import_http_'+bulkRes.status);
+    }
+    let bulkPayload={};
+    try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
+    if(!(bulkPayload&&bulkPayload.ok)){
+      throw new Error(String((bulkPayload&&bulkPayload.error)||'backup_import_failed'));
+    }
+    totals.chunks+=1;
+    totals.saved+=Number(bulkPayload.saved)||0;
+    totals.stale+=Number(bulkPayload.staleIgnored)||0;
+  }
+  return totals;
 }
 function importBackup(input){
   if(!input.files||!input.files[0]) return;
@@ -5876,27 +6168,11 @@ function importBackup(input){
       try{
         const api=await ensureWorkingApiBase({silent:true,force:true});
         const backupPayload={orders,users,suppliers,catalog,templates,settings,notifSettings,ts:Date.now()};
-        const bulkRes=await fetchWithTimeout(
-          api+'/api/orders/bulk',
-          {
-            method:'POST',
-            headers:getAuthHeaders({'Content-Type':'application/json'}),
-            body:JSON.stringify(backupPayload)
-          },
-          25000
-        );
-        if(!bulkRes.ok){
-          throw new Error('backup_import_http_'+bulkRes.status);
-        }
-        let bulkPayload={};
-        try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
-        if(!(bulkPayload&&bulkPayload.ok)){
-          throw new Error(String((bulkPayload&&bulkPayload.error)||'backup_import_failed'));
-        }
+        const chunkStats=await pushBackupToCloudInChunks(api, backupPayload, {chunkSize:500});
         await flushLocalSyncFallback().catch(()=>{});
         await loadFromCloudSilent().catch(()=>{});
-        const syncedOrders=Number(bulkPayload.orders)||orders.length;
-        toast(`✅ Backup saved to Cloudflare (${syncedOrders} orders)`,'ok');
+        const syncedOrders=Number(chunkStats.saved)||orders.length;
+        toast(`✅ Backup saved to Cloudflare (${syncedOrders}/${chunkStats.orders} orders, ${chunkStats.chunks} chunks)`,'ok');
       }catch(syncErr){
         console.error('[backup import cloud sync]', syncErr);
         // Fallback to legacy row-by-row push if bulk endpoint is temporarily unavailable.
@@ -7800,7 +8076,7 @@ async function trackOrder(){
 
 
 // ── REMOTE SYNC (Firebase bridge first) ──
-const CLOUD_API_DEFAULT=getPreferredApiBaseDefault();
+const CLOUD_API_DEFAULT=getDefaultApiBaseByLocation();
 const SYNC_KEYS=['jb_orders','jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories'];
 let _syncTimeouts={};
 let _apiBaseCheckInFlight=null;
@@ -7810,28 +8086,19 @@ const LOCAL_REPLICA_SYNC_STATE_KEY='jb_replica_sync_state';
 // Production mode: order mutations are considered successful only after cloud ACK.
 const STRICT_ORDER_CLOUD_COMMIT=true;
 function getApiBase(){
-  const raw=(localStorage.getItem('jb_cloud_api')||'').trim();
-  if(getFirebaseEnabled()) return location.origin;
-  if(/^https?:\/\//i.test(raw)){
-    const normalized=raw.replace(/\/$/,'');
-    try{
-      const u=new URL(normalized);
-      const host=String(u.hostname||'').toLowerCase();
-      const isLocalHost=(host==='127.0.0.1'||host==='localhost');
-      if(isLocalHost && String(u.port||'')==='5500' && CLOUD_API_DEFAULT!==location.origin){
-        try{localStorage.setItem('jb_cloud_api',CLOUD_API_DEFAULT);}catch(_e){}
-        return CLOUD_API_DEFAULT;
-      }
-    }catch(_e){}
-    return normalized;
-  }
-  return CLOUD_API_DEFAULT;
+  return normalizeConfiguredApiBase(localStorage.getItem('jb_cloud_api'));
 }
-function isApiEndpointReachableResponse(res){
+async function isApiEndpointReachableResponse(res){
   if(!res) return false;
-  // Treat only successful responses as healthy API endpoints.
-  // 5xx (especially 503) must trigger origin fallback.
-  return !!res.ok;
+  if(!res.ok) return false;
+  try{
+    const ct=String(res.headers&&res.headers.get('content-type')||'').toLowerCase();
+    if(ct && !ct.includes('application/json')) return false;
+    const body=await res.clone().json();
+    return !!(body && body.ok===true);
+  }catch(_e){
+    return false;
+  }
 }
 async function ensureWorkingApiBase(opts={}){
   const force=!!opts.force;
@@ -7843,15 +8110,14 @@ async function ensureWorkingApiBase(opts={}){
   _apiBaseCheckInFlight=(async function(){
     const configured=getApiBase();
     const origin=location.origin.replace(/\/$/,'');
-    const preferred=CLOUD_API_DEFAULT.replace(/\/$/,'');
     try{
-      if(configured===preferred){
+      if(configured===origin){
         return configured;
       }
       let configuredReachable=false;
       try{
         const r=await fetchWithTimeout(configured+'/api/test',{headers:getAuthHeaders()},4000);
-        configuredReachable=isApiEndpointReachableResponse(r);
+        configuredReachable=await isApiEndpointReachableResponse(r);
       }catch(_e){}
       if(configuredReachable){
         return configured;
@@ -7859,21 +8125,8 @@ async function ensureWorkingApiBase(opts={}){
       let originReachable=false;
       try{
         const r2=await fetchWithTimeout(origin+'/api/test',{headers:getAuthHeaders()},4000);
-        originReachable=isApiEndpointReachableResponse(r2);
+        originReachable=await isApiEndpointReachableResponse(r2);
       }catch(_e){}
-      let preferredReachable=false;
-      if(preferred!==origin){
-        try{
-          const r3=await fetchWithTimeout(preferred+'/api/test',{headers:getAuthHeaders()},4000);
-          preferredReachable=isApiEndpointReachableResponse(r3);
-        }catch(_e){}
-      }
-      if(preferredReachable){
-        try{localStorage.setItem('jb_cloud_api',preferred);}catch(_e){}
-        renderCloudApiSummary();
-        if(!opts.silent) toast('ℹ️ API URL auto-corrected to local worker','info');
-        return preferred;
-      }
       if(originReachable){
         try{localStorage.setItem('jb_cloud_api',origin);}catch(_e){}
         renderCloudApiSummary();
@@ -7891,12 +8144,12 @@ async function ensureWorkingApiBase(opts={}){
 function renderCloudApiSummary(){
   const el=document.getElementById('cfg-cloud-active');
   if(!el) return;
-  const api=(localStorage.getItem('jb_cloud_api')||'').trim()||CLOUD_API_DEFAULT;
+  const api=getApiBase();
   const hasKey=!!(localStorage.getItem('jb_cloud_key')||'').trim();
   el.textContent=`Active API base: ${api} · API key: ${hasKey?'set':'not set'}`;
 }
 function apiUrl(path){
-  return ((localStorage.getItem('jb_cloud_api')||'').trim()||CLOUD_API_DEFAULT)+String(path||'');
+  return getApiBase()+String(path||'');
 }
 function createClientRequestId(prefix){
   const p=String(prefix||'rq').replace(/[^a-z0-9_-]/gi,'').slice(0,8)||'rq';
@@ -8338,11 +8591,48 @@ function buildSyncCursor(){
 }
 function getAuthHeaders(extra){
   const headers={...(extra||{})};
-  const k=(localStorage.getItem('jb_cloud_key')||'').trim();
+  const normalizeCloudKey=function(raw){
+    let v=String(raw||'').trim();
+    if(!v) return '';
+    // Avoid accidental "Bearer Bearer <token>" auth header.
+    v=v.replace(/^bearer\s+/i,'').trim();
+    // Strip wrapping single/double quotes when copied from console logs.
+    if((v.startsWith('"')&&v.endsWith('"'))||(v.startsWith("'")&&v.endsWith("'"))){
+      v=v.slice(1,-1).trim();
+    }
+    return v;
+  };
+  const apiBase=(localStorage.getItem('jb_cloud_api')||'').trim()||getDefaultApiBaseByLocation();
+  const isLocalApi=/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(apiBase.replace(/\/$/,''));
+  const savedKey=normalizeCloudKey(localStorage.getItem('jb_cloud_key'));
+  // Local worker runs with API_AUTH_TOKEN=local-dev-token in this project.
+  // Force it to avoid stale/incorrect saved keys causing endless 401 loops.
+  let k=savedKey || (isLocalApi ? getDefaultCloudKeyByLocation() : '');
+  if(isLocalApi){
+    const localKey='local-dev-token';
+    k=localKey;
+    try{
+      if(savedKey!==localKey){
+        localStorage.setItem('jb_cloud_key',localKey);
+      }
+    }catch(_e){}
+  }
   if(k) headers.Authorization='Bearer '+k;
   if(!headers['X-Client-Timestamp']) headers['X-Client-Timestamp']=String(Date.now());
   if(!headers['X-Request-Id']) headers['X-Request-Id']=createClientRequestId('api');
   return headers;
+}
+function emergencyResetOrderSyncGuards(){
+  // Safe local repair utility for stuck mutation/fallback guards.
+  try{localStorage.removeItem(LOCAL_MUTATION_TS_KEY);}catch(_e){}
+  try{
+    const map=readLocalSyncFallback();
+    if(map&&map.jb_order_ops) delete map.jb_order_ops;
+    localStorage.setItem(LOCAL_SYNC_FALLBACK_KEY,JSON.stringify(map||{}));
+  }catch(_e){}
+  try{_apiBaseCheckedAt=0;}catch(_e){}
+  toast('🛠️ Local order sync guards reset. Refreshing…','info');
+  setTimeout(function(){location.reload();},250);
 }
 function appendIncrementalCursorToApiUrl(baseUrl){
   try{
@@ -8657,7 +8947,13 @@ function readLocalDataMap(){
   return out;
 }
 function readLocalOrders(){
-  return [];
+  try{
+    const raw=localStorage.getItem('jb_orders');
+    const arr=raw?JSON.parse(raw):[];
+    return Array.isArray(arr)?arr:[];
+  }catch(_e){
+    return [];
+  }
 }
 function writeLocalJson(key,value){
   if(!key) return;
@@ -8895,6 +9191,46 @@ async function uploadToCloud(){
       persistOrdersLocalSafe(orders);
       toast(`ℹ️ Fixed ${fixedOrderIds} duplicate/missing order IDs before sync`,'info');
     }
+    // Prefer chunked bulk endpoint for large snapshots (much faster than row-by-row upload
+    // and avoids request-body 413 errors on local/proxy environments).
+    const getBulkChunkSizeFromSettings=function(){
+      const raw=Number(settings&&settings.bulkChunkSize);
+      return Math.max(20,Math.min(500,raw||120));
+    };
+    async function pushOrdersInBulkChunks(apiBase,rows){
+      const list=Array.isArray(rows)?rows:[];
+      if(!list.length) return {ok:true,saved:0,failedOrderIds:[],lastError:''};
+      let chunkSize=getBulkChunkSizeFromSettings();
+      let savedCount=0;
+      const failedIds=[];
+      for(let i=0;i<list.length;i+=chunkSize){
+        const chunk=list.slice(i,i+chunkSize);
+        const bulkRes=await fetchWithTimeout(
+          apiBase+'/api/orders/bulk',
+          {
+            method:'POST',
+            headers:getAuthHeaders({'Content-Type':'application/json'}),
+            body:JSON.stringify({orders:chunk})
+          },
+          45000
+        );
+        let bulkPayload={};
+        try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
+        if(bulkRes.status===413){
+          const reason='bulk_payload_too_large';
+          chunk.forEach(function(o){failedIds.push(String(o&&o.id||''));});
+          return {ok:false,saved:savedCount,failedOrderIds:failedIds,lastError:reason};
+        }
+        if(!(bulkRes.ok && bulkPayload && bulkPayload.ok)){
+          const reason=String((bulkPayload&&bulkPayload.error)||('HTTP '+bulkRes.status)||'bulk_sync_failed');
+          chunk.forEach(function(o){failedIds.push(String(o&&o.id||''));});
+          return {ok:false,saved:savedCount,failedOrderIds:failedIds,lastError:reason};
+        }
+        savedCount+=Math.max(0,Number(bulkPayload.saved)||chunk.length);
+      }
+      return {ok:true,saved:savedCount,failedOrderIds:[],lastError:''};
+    }
+
     // Prefer bulk endpoint for large snapshots (much faster than row-by-row upload).
     let saved=0;
     let lastOrderErr='';
@@ -8902,25 +9238,13 @@ async function uploadToCloud(){
     let usedBulk=false;
     if(normalizedOrders.length){
       try{
-        const bulkRes=await fetchWithTimeout(
-          api+'/api/orders/bulk',
-          {
-            method:'POST',
-            headers:getAuthHeaders({'Content-Type':'application/json'}),
-            body:JSON.stringify({orders:normalizedOrders})
-          },
-          45000
-        );
-        let bulkPayload={};
-        try{bulkPayload=await bulkRes.json();}catch(_e){bulkPayload={};}
-        if(bulkRes.ok && bulkPayload && bulkPayload.ok){
+        const bulkState=await pushOrdersInBulkChunks(api,normalizedOrders);
+        if(bulkState.ok){
           usedBulk=true;
-          saved=Math.max(
-            0,
-            Number(bulkPayload.saved)||Number(bulkPayload.orders)||normalizedOrders.length
-          );
+          saved=Math.max(0,Number(bulkState.saved)||normalizedOrders.length);
         }else{
-          lastOrderErr=String((bulkPayload&&bulkPayload.error)||('HTTP '+bulkRes.status)||'bulk_sync_failed');
+          lastOrderErr=String(bulkState.lastError||'bulk_sync_failed');
+          failedOrderIds=Array.isArray(bulkState.failedOrderIds)?bulkState.failedOrderIds:[];
         }
       }catch(e){
         lastOrderErr=String((e&&e.message)||e||'bulk_sync_error');
@@ -9030,10 +9354,17 @@ async function loadFromCloudSilent(){
     return !!applied.applied;
   }catch(e){
     const fallbackMetrics=getLocalSyncFallbackMetrics();
+    let storageOrdersCount=0;
+    try{
+      const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+      storageOrdersCount=Array.isArray(localOrders)?localOrders.length:0;
+    }catch(_e){
+      storageOrdersCount=0;
+    }
     console.warn('[OrderSync][silent_load_failed]',{
       error:String(e&&e.message||e||'unknown'),
       memoryOrdersCount:Array.isArray(orders)?orders.length:0,
-      storageOrdersCount:0,
+      storageOrdersCount,
       pendingMutations:getActiveLocalOrderMutationIds().length,
       pendingFallbackOps:Number(fallbackMetrics&&fallbackMetrics.ops)||0,
       pendingFallbackKeys:Number(fallbackMetrics&&fallbackMetrics.keys)||0,
@@ -9130,8 +9461,9 @@ async function saveAllToCloud(){
   const uploadResult=await uploadToCloud();
   const allIds=(Array.isArray(orders)?orders:[]).map(function(o){return o&&o.id;}).filter(Boolean);
   const failedIds=uploadResult&&Array.isArray(uploadResult.failedOrderIds)?uploadResult.failedOrderIds.filter(Boolean):[];
-  const shouldQueueFallback=(!uploadResult||!uploadResult.ok) && allIds.length>0;
-  const targetIds=failedIds.length?failedIds:(shouldQueueFallback?allIds:[]);
+  // Do not mark every order as locally-mutated when a backup attempt fails globally
+  // (e.g. transient auth/413). That causes mutation-guard lock and /api/orders spam loops.
+  const targetIds=failedIds.length?failedIds:[];
   if(targetIds.length){
     // Queue failed row writes through saveOrders so fallback retry can replay them.
     await saveOrders(targetIds);
@@ -9225,6 +9557,8 @@ let _firebasePasswordRetryAt=0;
 let _firebaseRateLimitRetryAt=0;
 let _lastHealthErrorKey='';
 let _lastHealthErrorAt=0;
+let _syncAuthErrorStreak=0;
+let _syncCircuitPauseUntil=0;
 let _firebaseAuthNeedsFreshLogin=(function(){
   try{return localStorage.getItem(FIREBASE_AUTH_FRESH_LOGIN_KEY)==='1';}catch(_e){return false;}
 })();
@@ -9339,6 +9673,22 @@ function getPendingFallbackOrderIds(){
   });
   return ids;
 }
+function getRecentPendingFallbackOrderCount(maxAgeMs){
+  const fallback=readLocalSyncFallback();
+  const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+    ? fallback.jb_order_ops.value
+    : [];
+  const now=Date.now();
+  const ageLimit=Math.max(1000,Number(maxAgeMs)||FORCE_REMOTE_MUTATION_BLOCK_MS);
+  let count=0;
+  pendingOps.forEach(function(op){
+    const ts=Number(op&&op.ts)||Number(op&&op.updatedAt)||0;
+    // Legacy entries may miss timestamps; do not block authoritative replace forever.
+    if(!ts) return;
+    if((now-ts)<ageLimit) count++;
+  });
+  return count;
+}
 function hasActiveUpsertOrderMutation(){
   const map=cleanupLocalOrderMutations();
   const hasLocalUpsert=Object.keys(map).some(function(id){
@@ -9362,7 +9712,8 @@ function hasRecentUpsertOrderMutation(maxAgeMs){
     const row=map[id]||{};
     if(String(row.type||'upsert')==='delete') return false;
     const ts=Number(row.ts)||0;
-    if(!ts) return true;
+    // Missing timestamp on legacy rows should not block remote reconciliation forever.
+    if(!ts) return false;
     return (now-ts)<ageLimit;
   });
 }
@@ -9375,7 +9726,8 @@ function getRecentUpsertOrderMutationCount(maxAgeMs){
     const row=map[id]||{};
     if(String(row.type||'upsert')==='delete') return;
     const ts=Number(row.ts)||0;
-    if(!ts || (now-ts)<ageLimit) count++;
+    if(!ts) return;
+    if((now-ts)<ageLimit) count++;
   });
   return count;
 }
@@ -9802,6 +10154,16 @@ function markError(err){
   _health.apiErrors++;
   _health.lastError=msg;
   _health.lastErrorAt=now;
+  const lower=String(msg||'').toLowerCase();
+  const isAuthIssue=lower.includes('shared_token_invalid')||lower.includes('unauthorized')||lower.includes('401');
+  if(isAuthIssue){
+    _syncAuthErrorStreak++;
+    if(_syncAuthErrorStreak>=3){
+      _syncCircuitPauseUntil=Date.now()+60000;
+    }
+  }else{
+    _syncAuthErrorStreak=0;
+  }
   if(isFirebasePermissionError(err,msg)){
     enforceLocalModeOnFirebasePermission(msg);
   }
@@ -11971,20 +12333,30 @@ function installPWA(){
 // Register service worker for offline support
 if('serviceWorker' in navigator){
   window.addEventListener('load',()=>{
-  // Auto-fill remembered credentials
+  // Auto login using remember/session credentials.
+  let autoCreds=null;
   if(localStorage.getItem('jb_remember')==='1'){
     const em=localStorage.getItem('jb_remember_email');
     const pw=localStorage.getItem('jb_remember_pw');
     if(em&&pw){
-      const emEl=document.getElementById('l-em');
-      const pwEl=document.getElementById('l-pw');
-      const remEl=document.getElementById('l-remember');
-      if(emEl)emEl.value=em;
-      if(pwEl)pwEl.value=pw;
-      if(remEl)remEl.checked=true;
-      // Auto login after slight delay to ensure DOM ready
-      setTimeout(()=>login(),500);
+      autoCreds={email:em,password:pw,remember:true};
     }
+  }
+  if(!autoCreds){
+    const sessionCreds=getLoginSession();
+    if(sessionCreds){
+      autoCreds={email:sessionCreds.email,password:sessionCreds.password,remember:false};
+    }
+  }
+  if(autoCreds){
+    const emEl=document.getElementById('l-em');
+    const pwEl=document.getElementById('l-pw');
+    const remEl=document.getElementById('l-remember');
+    if(emEl)emEl.value=autoCreds.email;
+    if(pwEl)pwEl.value=autoCreds.password;
+    if(remEl)remEl.checked=!!autoCreds.remember;
+    // Auto login after slight delay to ensure DOM ready
+    setTimeout(()=>login(),500);
   }
 
     navigator.serviceWorker.register('./sw.js').then(reg=>{
@@ -12584,6 +12956,8 @@ async function startPendingPoll(){
   const pendingMs=(getFirebaseEnabled()&&_health.ordersRealtime)?30000:CLOUD_FAST_SYNC_MS;
   _pendingPollInterval=setInterval(async()=>{
     if(!me)return;
+    const activePage=getCurrentPageId();
+    if(me.role!=='Reseller' && !ORDER_HEAVY_PAGES.has(activePage)) return;
     try{
       const api=await ensureWorkingApiBase({silent:true});
       // Try dedicated orders endpoint first
@@ -13609,14 +13983,24 @@ function startAutoSync(){
   // Sync interval adapts when realtime is active.
   _autoSyncInterval = setInterval(async() => {
     if(me && navigator.onLine){
+      if(_syncCircuitPauseUntil>Date.now()){
+        return;
+      }
+      const activePage=getCurrentPageId();
       await ensureWorkingApiBase({silent:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
-      await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
-      await runSilentLoadWithLock().catch(()=>{});
-      await maybeSelfHealOrderDrift({reason:'auto_sync'}).catch(()=>{});
+      if(ORDER_HEAVY_PAGES.has(activePage)){
+        await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
+        await runSilentLoadWithLock().catch(()=>{});
+        await maybeSelfHealOrderDrift({reason:'auto_sync'}).catch(()=>{});
+      }else if(AUX_DATA_PAGES.has(activePage)){
+        await loadAuxDataOnly().catch(()=>{});
+      }
       if(isFirebaseEnabled()){
         initFirebaseRealtime({silent:true}).catch(()=>{});
       }
+      _syncAuthErrorStreak=0;
+      _syncCircuitPauseUntil=0;
     }
   }, syncMs);
   
@@ -13624,9 +14008,7 @@ function startAutoSync(){
   if(!_autoSyncVisibilityBound){
     document.addEventListener('visibilitychange', () => {
       if(document.visibilityState === 'visible' && me && navigator.onLine){
-        fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
-        loadFromCloud().catch(()=>{});
-        maybeSelfHealOrderDrift({reason:'visibility'}).catch(()=>{});
+        syncDataForActivePage('force').catch(()=>{});
         if(me.role==='Admin' && typeof pollAllChats==='function'){
           pollAllChats().catch(()=>{});
         }
@@ -15738,9 +16120,13 @@ function checkAutoBackup(){
   const oneDayMs=24*60*60*1000;
   if(!lastBackup||now-parseInt(lastBackup)>oneDayMs){
     // Auto backup to cloud
-    saveAllToCloud().then(()=>{
-      localStorage.setItem('jb_last_backup',String(now));
-      console.log('Auto backup completed');
+    saveAllToCloud().then((ok)=>{
+      if(ok){
+        localStorage.setItem('jb_last_backup',String(now));
+        console.log('Auto backup completed');
+      }else{
+        console.warn('Auto backup skipped last_backup update due to sync issues');
+      }
     }).catch(()=>{});
   }
 }
@@ -16462,7 +16848,12 @@ function orderCompareSnapshot(order){
 }
 async function saveOrders(changedOrderIds,opts={}){
   const nowTs=Date.now();
-  const previousOrders=getOrdersCloudSnapshot();
+  let previousOrders=[];
+  try{
+    previousOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+  }catch(_e){
+    previousOrders=[];
+  }
   const prevById=new Map((Array.isArray(previousOrders)?previousOrders:[]).filter(o=>o&&o.id).map(o=>[o.id,o]));
   const currentIds=new Set((orders||[]).filter(o=>o&&o.id).map(o=>o.id));
   // Never infer deletes from memory-vs-storage mismatch by default.
@@ -16519,6 +16910,10 @@ async function saveOrders(changedOrderIds,opts={}){
         v:nextV
       };
     }).filter(o=>o&&o.id&&!isOrderDeleted(o));
+    const persistedBeforeSync=persistOrdersLocalSafe(orders);
+    if(!persistedBeforeSync){
+      console.warn('[saveOrders] local persist failed before sync', {count:Array.isArray(orders)?orders.length:0});
+    }
 
     await syncBootstrapReplicaState().catch(()=>{});
     let queuedFallback=false;
@@ -16610,7 +17005,6 @@ async function saveOrders(changedOrderIds,opts={}){
       orders=[...nextMap.values()]
         .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
         .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
-      setOrdersCloudSnapshot(orders);
       persistOrdersLocalSafe(orders);
       updateBadges();
       render();
@@ -16626,10 +17020,11 @@ async function saveOrders(changedOrderIds,opts={}){
     }
     if(queuedFallback){
       console.warn('[saveOrders] queued order events for retry');
-    }else{
-      setOrdersCloudSnapshot(orders);
     }
-    persistOrdersLocalSafe(orders);
+    const persistedAfterSync=persistOrdersLocalSafe(orders);
+    if(!persistedAfterSync){
+      console.warn('[saveOrders] local persist failed after sync', {count:Array.isArray(orders)?orders.length:0});
+    }
     markSync('orders_save');
     writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
     return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:!!queuedFallback};

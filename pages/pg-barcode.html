@@ -1,0 +1,34 @@
+<div class="page scrl" id="pg-barcode" style="overflow-y:auto !important;overflow-x:hidden !important;min-height:0;height:100%;">
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
+    <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;">🏭 Depot Scanner</h3>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Scan CN barcode when package arrives — marks item arrived and shows address.</p>
+    <button class="btn btn-primary" id="btn-camera" onclick="startCamera()" style="width:100%;justify-content:center;padding:11px;margin-bottom:11px;">📷 Open Camera</button>
+    <div id="camera-wrap" style="display:none;margin-bottom:11px;position:relative;border-radius:10px;overflow:hidden;background:#000;">
+      <video id="camera-video" autoplay playsinline muted style="width:100%;max-height:240px;display:block;object-fit:cover;"></video>
+      <button onclick="stopCamera()" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:8px;padding:5px 10px;font-size:12px;cursor:pointer;">✕</button>
+      <div id="camera-status" style="position:absolute;bottom:6px;left:0;right:0;text-align:center;color:#fff;font-size:11px;background:rgba(0,0,0,.5);padding:4px;">Scanning…</div>
+    </div>
+    <div style="display:flex;gap:7px;margin-bottom:9px;">
+      <input type="text" class="fi" id="barcode-input" placeholder="CN tracking, Ref #, or name…" style="font-family:var(--mono);" onkeydown="if(event.key==='Enter')barcodeSearch()">
+      <button class="btn btn-primary" onclick="barcodeSearch()">🔍</button>
+    </div>
+    <div id="barcode-result"></div>
+    <div id="depot-photo-section" style="display:none;margin-top:13px;border-top:2px solid var(--accent);padding-top:13px;">
+      <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:10px;">📷 Step 2 — Add Depot Photo</div>
+      <div id="depot-photo-preview" style="margin-bottom:10px;"></div>
+      <div id="depot-photo-btns">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+          <label class="btn btn-primary" style="cursor:pointer;flex:1;justify-content:center;">📷 Take Photo<input type="file" accept="image/*" capture="environment" id="depot-photo-input" style="display:none;" onchange="saveDepotPhoto(this)"></label>
+          <label class="btn btn-secondary" style="cursor:pointer;flex:1;justify-content:center;">🖼️ Gallery<input type="file" accept="image/*" id="depot-gallery-input" style="display:none;" onchange="saveDepotPhoto(this)"></label>
+        </div>
+      </div>
+      <div id="depot-action-btns" style="display:none;flex-direction:column;gap:8px;margin-top:10px;">
+        <button class="btn btn-primary" style="width:100%;justify-content:center;padding:13px;" onclick="copyAndMarkLogistics()">📋 Copy Address & Mark Sent to Logistics</button>
+        <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center;" onclick="copyAddressOnly()">📋 Copy Address Only</button>
+      </div>
+      <div id="depot-skip-btn" style="margin-top:8px;">
+        <button class="btn btn-secondary" style="width:100%;justify-content:center;padding:11px;" onclick="showDepotActions()">⏭️ Skip Photo & Continue</button>
+      </div>
+    </div>
+  </div>
+</div>

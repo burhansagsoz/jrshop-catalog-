@@ -1,0 +1,22 @@
+<div class="page scrl" id="pg-import" style="overflow-y:auto !important;overflow-x:hidden !important;min-height:0;height:100%;">
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
+    <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;">📥 Import UK Tracking</h3>
+    <div style="border:2px dashed var(--border);border-radius:12px;padding:28px;text-align:center;cursor:pointer;background:#fafafa;" id="drop-zone">
+      <div style="font-size:28px;margin-bottom:7px;">📊</div>
+      <p style="font-size:13px;color:var(--muted);">Drag & drop or <label for="excel-input" style="color:var(--accent);font-weight:600;cursor:pointer;">browse</label></p>
+      <input type="file" id="excel-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleExcel(this)">
+    </div>
+    <div id="import-result" style="background:var(--green-bg);border:1px solid var(--green-border);border-radius:9px;padding:11px;display:none;margin-top:11px;"><h4 style="font-size:13px;font-weight:700;color:var(--green);margin-bottom:4px;">✅ Import Successful</h4><div id="import-result-body"></div></div>
+    <div id="import-err" style="background:var(--red-bg);border:1px solid var(--red-border);border-radius:9px;padding:11px;display:none;margin-top:11px;"><h4 style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:4px;">❌ Failed</h4><div id="import-err-body"></div></div>
+    <div id="email-send-section" style="display:none;margin-top:13px;">
+      <div style="background:var(--green-bg);border:1px solid var(--green-border);border-radius:11px;padding:13px;">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:9px;" id="email-send-info"></div>
+        <div id="email-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:9px;max-height:220px;overflow-y:auto;"></div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" onclick="sendAllEmails()">📧 Send All</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('email-send-section').style.display='none'">Dismiss</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

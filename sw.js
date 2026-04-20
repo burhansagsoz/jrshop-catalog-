@@ -1,5 +1,5 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260412-order-rollback-hotfix-v1';
+const CACHE_VERSION = 'jrshop-v20260419-api-pass-through-v2';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
@@ -38,17 +38,13 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
-  // API istekleri - cache'leme, her zaman network
+  // API ve cross-origin istekler: SW fallback üretmesin, network'e bırak.
   if (
     url.pathname.startsWith('/api/') ||
+    url.origin !== self.location.origin ||
     e.request.method !== 'GET'
   ) {
-    e.respondWith(
-      fetch(e.request).catch(() => new Response(JSON.stringify({error:'Offline'}), {
-        status: 503,
-        headers: {'Content-Type':'application/json'}
-      }))
-    );
+    e.respondWith(fetch(e.request));
     return;
   }
 

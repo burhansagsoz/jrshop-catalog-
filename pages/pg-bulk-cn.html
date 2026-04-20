@@ -1,0 +1,30 @@
+<div class="page scrl" id="pg-bulk-cn" style="overflow-y:auto !important;overflow-x:hidden !important;min-height:0;height:100%;">
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;margin-bottom:13px;">
+    <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;">📸 AI Bulk CN Scanner</h3>
+    <label class="btn btn-primary" style="cursor:pointer;width:100%;justify-content:center;padding:13px;">
+      📸 Upload Shipping Labels
+      <input type="file" accept="image/*" multiple id="bulk-img-input" style="display:none;" onchange="processBulkImages(this)">
+    </label>
+    <div id="bulk-img-status" style="display:none;margin-top:11px;"></div>
+    <div id="bulk-img-results" style="margin-top:11px;"></div>
+  </div>
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;">
+    <div style="display:flex;gap:7px;margin-bottom:5px;">
+      <input type="text" class="fi" id="bcn-search" placeholder="Customer name, ref # or product name…" style="flex:1;" oninput="renderBulkCN(this.value)">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('bcn-search').value='';renderBulkCN('')">✕</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:13px;">
+      <button class="btn btn-primary btn-sm" id="bcn-tab-pending" onclick="setBCNTab('pending',this)">⏳ Pending</button>
+      <button class="btn btn-ghost btn-sm" id="bcn-tab-all" onclick="setBCNTab('all',this)">📋 All Active</button>
+    </div>
+    <div id="bulk-cn-list"></div>
+    <div id="camera-wrap-bcn" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:999;background:#000;border-radius:16px 16px 0 0;overflow:hidden;">
+      <video id="camera-video-bcn" autoplay playsinline muted style="width:100%;max-height:260px;display:block;object-fit:cover;"></video>
+      <div style="padding:14px;background:var(--card);display:flex;align-items:center;justify-content:space-between;">
+        <div><div style="font-size:13px;font-weight:700;" id="bcn-camera-target-label">—</div></div>
+        <button onclick="stopBCNCamera()" class="btn btn-danger btn-sm">✕ Cancel</button>
+      </div>
+      <div id="camera-status-bcn" style="position:absolute;top:8px;left:0;right:0;text-align:center;color:#fff;font-size:11px;background:rgba(0,0,0,.5);padding:4px;">Point camera at CN barcode…</div>
+    </div>
+  </div>
+</div>
