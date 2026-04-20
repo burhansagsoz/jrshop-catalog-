@@ -2484,6 +2484,9 @@ async function getData(db, requestUrl = null) {
   const keyFilterRaw = String(
     requestUrl && requestUrl.searchParams ? (requestUrl.searchParams.get('keys') || '') : ''
   ).trim();
+  const fullMode = String(
+    requestUrl && requestUrl.searchParams ? (requestUrl.searchParams.get('full') || '') : ''
+  ).trim() === '1';
   const requestedKeys = keyFilterRaw
     ? Array.from(new Set(
         keyFilterRaw
@@ -2500,7 +2503,28 @@ async function getData(db, requestUrl = null) {
       .bind(...requestedKeys)
       .all();
   } else {
-    rows = await db.prepare('SELECT key, value FROM kv_store').all();
+    // Safety default for production: avoid loading unbounded keys (especially large chat/media blobs)
+    // unless caller explicitly asks for full payload with ?full=1.
+    if (fullMode) {
+      rows = await db.prepare('SELECT key, value FROM kv_store').all();
+    } else {
+      const defaultKeys = [
+        'jb_users',
+        'jb_suppliers',
+        'jb_catalog',
+        'jb_settings',
+        'jb_templates',
+        'jb_notif',
+        'jb_activity',
+        'jb_cat_categories',
+        'jb_feed'
+      ];
+      const placeholders = defaultKeys.map(() => '?').join(',');
+      rows = await db
+        .prepare(`SELECT key, value FROM kv_store WHERE key IN (${placeholders})`)
+        .bind(...defaultKeys)
+        .all();
+    }
   }
   const data = {};
   for (const row of rows.results) {
