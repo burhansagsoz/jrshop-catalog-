@@ -1,9 +1,9 @@
-name = "jrshop-api-local"
+name = "jrshop-api"
 main = "worker.js"
 compatibility_date = "2026-04-07"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "jrshop-db-local"
-database_id = "00000000-0000-0000-0000-000000000001"
-preview_database_id = "00000000-0000-0000-0000-000000000001"
+database_name = "jrshop-db"
+database_id = "d59fbf45-ccb2-4fc5-b89d-65f7bb1125ba"
+preview_database_id = "d59fbf45-ccb2-4fc5-b89d-65f7bb1125ba"
