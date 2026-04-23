@@ -9493,7 +9493,6 @@ async function recoverOrdersNow(){
   }
 }
 function saveFirebaseSettings(){
-  localStorage.setItem(FIREBASE_ENABLED_KEY,'0');
   stopFirebaseRealtime();
   toast('ℹ️ Cloudflare backend modu aktif (Firebase kapalı).','info');
 }
@@ -9513,7 +9512,6 @@ const FIREBASE_CONFIG_DEFAULT={
   measurementId:"G-B1RG9Z0D79"
 };
 const FIREBASE_CONFIG_KEY='jb_firebase_config';
-const FIREBASE_ENABLED_KEY='jb_firebase_enabled';
 const FIREBASE_COLLECTION_ORDERS='orders';
 const FIREBASE_COLLECTION_DATA='app_data';
 const FIREBASE_COLLECTION_MEDIA='media';
@@ -9622,9 +9620,6 @@ function recordDataKeyFetchMetrics(ok,latencyMs,keyCount){
 function ensureFirebaseConfigDefaults(){
   if(!localStorage.getItem(FIREBASE_CONFIG_KEY)){
     localStorage.setItem(FIREBASE_CONFIG_KEY,JSON.stringify(FIREBASE_CONFIG_DEFAULT));
-  }
-  if(!localStorage.getItem(FIREBASE_ENABLED_KEY)){
-    localStorage.setItem(FIREBASE_ENABLED_KEY,'1');
   }
   // Signed-in transport auth only (no anonymous fallback).
   if(localStorage.getItem(FIREBASE_EMAIL_AUTH_TOGGLE_KEY)===null){
