@@ -6073,8 +6073,12 @@ async function pushBackupToCloudInChunks(api, payload, opts){
   }
   return totals;
 }
+function triggerBackupFileInput(){
+  const input=document.getElementById('backup-file-input');
+  if(input) input.click();
+}
 function importBackup(input){
-  if(!input.files||!input.files[0]) return;
+  if(!input||!input.files||!input.files[0]) return;
   const reader=new FileReader();
   reader.onload=async e=>{
     let raw=null;
@@ -6131,6 +6135,7 @@ function importBackup(input){
       safeSet('jb_notif',notifSettings);
 
       loadSettings();loadTemplates();loadNotifSettings();
+      await saveOrders();
       updateBadges();render();
       markSync('backup_import');
       toast(`✅ Backup imported: ${orders.length} orders`,'ok');
@@ -6158,6 +6163,12 @@ function importBackup(input){
     }
   };
   reader.readAsText(input.files[0]);
+}
+if(document.getElementById('backup-file-input')){
+  document.getElementById('backup-file-input').addEventListener('change',function(e){
+    importBackup(this);
+  });
+}
 }
 
 // ── ACTIVITY LOG ──
@@ -8968,6 +8979,9 @@ async function bootstrapAuthoritativeOrders(){
     const updatesChanged=await fetchOrderUpdatesWithCursor({silent:true,maxBatches:4,limit:250}).catch(()=>false);
     const healed=await maybeSelfHealOrderDrift({force:true,reason:'bootstrap'}).catch(()=>false);
     if(changed||updatesChanged||healed){
+      updateBadges();
+      render();
+    }else if(Array.isArray(orders)&&orders.length){
       updateBadges();
       render();
     }
