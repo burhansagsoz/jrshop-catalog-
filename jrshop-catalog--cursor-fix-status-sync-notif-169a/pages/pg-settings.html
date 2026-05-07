@@ -1,0 +1,43 @@
+<div class="page scrl" id="pg-settings" style="overflow-y:auto !important;overflow-x:hidden !important;min-height:0;height:100%;">
+  <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;max-width:560px;flex-shrink:0;">
+    <h3 style="font-size:14px;font-weight:700;margin-bottom:3px;">⚙️ Settings</h3>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;">General configuration.</p>
+    <div class="form-grid" style="grid-template-columns:1fr;gap:10px;">
+      <div class="fg"><label class="fl">Alert after (days)</label><input type="number" class="fi" id="cfg-alert-days" value="3" min="1" max="30"></div>
+      <div class="fg"><label class="fl">Session timeout (minutes)</label><input type="number" class="fi" id="cfg-session-timeout" value="30" min="5" max="120"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Auto-lock when inactive</div></div>
+      <div class="fg"><label class="fl">Your Messenger / Facebook Link</label><input type="text" class="fi" id="cfg-messenger-link" placeholder="https://m.me/yourpage or facebook.com/yourpage"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Used in customer catalog — "Send Order" button opens this</div></div>
+      <div class="fg"><label class="fl">Cloudflare Worker API URL</label><input type="text" class="fi" id="cfg-cloud-api" placeholder="https://jrshop-api.<subdomain>.workers.dev"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Leave empty to use current site origin.</div></div>
+      <div class="fg"><label class="fl">Cloudflare API Key (optional)</label><input type="text" class="fi" id="cfg-cloud-key" placeholder="Bearer token (if your Worker requires auth)"></div>
+      <div class="fg"><label class="fl">Bulk sync chunk size</label><input type="number" class="fi" id="cfg-bulk-chunk-size" value="120" min="20" max="500"><div style="font-size:11px;color:var(--muted);margin-top:3px;">Lower value helps avoid 413 payload errors.</div></div>
+      <div class="fg"><label class="fl">Sound notifications</label><button class="btn btn-secondary btn-sm" onclick="toggleSound()" id="sound-toggle-btn">🔔 Sounds On</button></div>
+    </div>
+    <div style="margin-top:13px;"><button class="btn btn-primary" onclick="saveSettings()">💾 Save</button></div>
+    <div id="cfg-cloud-active" style="margin-top:8px;font-size:11px;color:var(--muted);"></div>
+    <div class="info-card" style="margin-top:16px;">
+      <div style="padding:13px 16px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;">☁️ Cloudflare Sync</div>
+      <div style="padding:13px 16px;">
+        <div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:8px;">
+          Runtime is now Cloudflare Worker API mode. Firebase realtime bridge is disabled.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-ghost" onclick="saveAllToCloud()">⬆️ Push to Cloudflare</button>
+          <button class="btn btn-blue" onclick="recoverOrdersNow()">⬇️ Recover Orders</button>
+          <button class="btn btn-danger btn-sm" onclick="emergencyResetOrderSyncGuards()">🛠️ Repair Sync Queue</button>
+        </div>
+        <div id="sync-health-panel" style="margin-top:10px;"></div>
+      </div>
+    </div>
+    <div style="background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:17px;max-width:560px;margin-top:14px;flex-shrink:0;">
+      <h3 style="font-size:14px;font-weight:700;margin-bottom:3px;">💾 Data Backup</h3>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Export or import all data.</p>
+      <div id="last-backup-info" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-green" onclick="exportBackup()">📤 Export Backup</button>
+        <button class="btn btn-blue" onclick="saveAllToCloud().then(()=>{localStorage.setItem('jb_last_backup',String(Date.now()));updateLastBackupInfo();})">☁️ Cloudflare Backup</button>
+        <label class="btn btn-ghost" style="cursor:pointer;">📥 Import<input type="file" accept=".json" onchange="importBackup(this)" style="display:none;"></label>
+        <button class="btn btn-danger btn-sm" onclick="clearCache()">🧹 Clear Cache</button>
+      </div>
+    </div>
+  </div>
+  <div style="height:18px;flex-shrink:0;"></div>
+</div>

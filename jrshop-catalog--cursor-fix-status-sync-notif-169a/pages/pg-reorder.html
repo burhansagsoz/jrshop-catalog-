@@ -1,0 +1,14 @@
+<div class="page scrl" id="pg-reorder" style="overflow-y:auto !important;overflow-x:hidden !important;min-height:0;height:100%;">
+  <div class="info-card">
+    <div class="card-head">
+      <h3>🔁 Reorder Reminders</h3>
+      <select class="fi" id="reorder-days" style="width:auto;padding:5px 10px;font-size:12px;" onchange="renderReorderReminders()">
+        <option value="30">30 days inactive</option>
+        <option value="14">14 days inactive</option>
+        <option value="60">60 days inactive</option>
+      </select>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:13px;">Customers who haven't ordered recently. Send a WhatsApp reminder.</p>
+    <div id="reorder-list"></div>
+  </div>
+</div>
