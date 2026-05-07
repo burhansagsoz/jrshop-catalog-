@@ -3149,16 +3149,13 @@ async function login(){
             localStorage.setItem(k,JSON.stringify(res.data[k]));
           }
         });
-        // Prefer authoritative /api/orders on login; do not restore jb_orders from localStorage.
+        // Prefer authoritative /api/orders on login; fetch full paginated snapshot to avoid partial page flashes.
         let cloudOrders=[];
         try{
-          const ordRes=await fetch(getApiBase()+'/api/orders',{headers:getAuthHeaders()});
-          if(ordRes.ok){
-            const ordPayload=await ordRes.json();
-            cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
-          }
+          const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:20}).catch(()=>({orders:[]}));
+          cloudOrders = Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
         }catch(_e){
-          cloudOrders=[];
+          cloudOrders = [];
         }
         // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'login',forceRemote:true});
