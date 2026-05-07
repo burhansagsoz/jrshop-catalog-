@@ -6228,8 +6228,13 @@ function logActivity(type, msg, orderId=''){
 
   function onFirstUserGesture(e){
     if(!deferredPrompt) return;
+    if(localStorage.getItem('jb_pwa_prompt_shown')==='1' || localStorage.getItem('pwa-installed')==='1'){
+      cleanupGestureListeners();
+      return;
+    }
     try{
       deferredPrompt.prompt();
+      try{ localStorage.setItem('jb_pwa_prompt_shown','1'); }catch(_e){}
       // prompt must be during a user gesture; remove listeners now
     }catch(_e){ }
     cleanupGestureListeners();
@@ -6249,6 +6254,7 @@ function logActivity(type, msg, orderId=''){
   }
 
   window.addEventListener('beforeinstallprompt', (e) => {
+    if(localStorage.getItem('jb_pwa_prompt_shown')==='1' || localStorage.getItem('pwa-installed')==='1') return;
     try{ e.preventDefault(); }catch(_e){}
     deferredPrompt = e;
     // show a visible install button and prepare to auto-prompt on first gesture
@@ -9047,19 +9053,19 @@ async function bootstrapAuthoritativeOrders(){
     purgeLegacyOrderStorage();
     showLoading('Syncing orders...');
     await syncBootstrapReplicaState().catch(()=>{});
+    // Use the paginated snapshot fetcher to avoid applying a single-page
+    // response (e.g. 200 items) which can briefly replace the full
+    // authoritative set and cause the UI to flash smaller counts.
     const api=await ensureWorkingApiBase({silent:true});
     let changed=false;
-    const fullRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()}).catch(()=>null);
-    if(fullRes&&fullRes.ok){
-      const fullPayload=await fullRes.json().catch(()=>({}));
-      if(!(fullPayload&&fullPayload.localOnly)){
-        const cloudOrders=Array.isArray(fullPayload&&fullPayload.orders)?fullPayload.orders:[];
-        const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'bootstrap_full',forceRemote:true});
-        changed=changed||!!applied.changed;
+    try{
+      const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:50}).catch(()=>({orders:[]}));
+      const cloudOrders = Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
+      if(cloudOrders.length){
+        const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'bootstrap_paginated',forceRemote:true});
+        changed = changed || !!applied.changed;
       }
-      const nextCursor=String(fullPayload&&fullPayload.nextCursor||'').trim();
-      if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
-    }
+    }catch(_e){}
     const updatesChanged=await fetchOrderUpdatesWithCursor({silent:true,maxBatches:4,limit:250}).catch(()=>false);
     const healed=await maybeSelfHealOrderDrift({force:true,reason:'bootstrap'}).catch(()=>false);
     if(changed||updatesChanged||healed){
@@ -12392,6 +12398,7 @@ function updateConnectNowCooldownUi(waitMs){
 // ── PWA ──
 let _pwaPrompt=null,_pwaPromptReady=false;
 window.addEventListener('beforeinstallprompt',e=>{
+  if(localStorage.getItem('jb_pwa_prompt_shown')==='1' || localStorage.getItem('pwa-installed')==='1') return;
   e.preventDefault();_pwaPrompt=e;_pwaPromptReady=true;
   // Show install button on login page
   const btn=document.getElementById('login-install-btn');
@@ -12405,12 +12412,13 @@ function installPWA(){
     return;
   }
   _pwaPrompt.prompt();
+  try{ localStorage.setItem('jb_pwa_prompt_shown','1'); }catch(_e){}
   _pwaPrompt.userChoice.then(r=>{
     if(r.outcome==='accepted'){
       toast('✅ App installed!','ok');
       const lb=document.getElementById('login-install-btn');
       if(lb)lb.style.display='none';
-      localStorage.setItem('pwa-installed','1');
+      try{ localStorage.setItem('pwa-installed','1'); }catch(_e){}
     }
     _pwaPrompt=null;
     const btn=document.getElementById('pwa-install-btn');
