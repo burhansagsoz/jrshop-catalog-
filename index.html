@@ -3149,7 +3149,7 @@ async function login(){
         // Prefer authoritative /api/orders on login; fetch full paginated snapshot to avoid partial page flashes.
         let cloudOrders=[];
         try{
-          const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:20}).catch(()=>({orders:[]}));
+          const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[]}));
           cloudOrders = Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
         }catch(_e){
           cloudOrders = [];
@@ -3410,18 +3410,22 @@ async function navOrders(status,el){
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
-        // Use paginated fetcher to avoid applying single-page (200) snapshot
-        const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:50}).catch(()=>({orders:[]}));
-        const cloudOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
-        if(cloudOrders.length){
-          const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'pending_nav',forceRemote:true});
-          if(applied.applied){
-            updateBadges();
-          }else{
-            console.warn('[Pending] Authoritative replace skipped due to local mutation guard');
-          }
+        if(_ordersSnapshotLocked){
+          await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
         }else{
-          console.warn('[Pending] Failed to load full order snapshot, keeping local');
+          // Use paginated fetcher to avoid applying single-page (200) snapshot
+          const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[]}));
+          const cloudOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
+          if(cloudOrders.length){
+            const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'pending_nav',forceRemote:true});
+            if(applied.applied){
+              updateBadges();
+            }else{
+              console.warn('[Pending] Authoritative replace skipped due to local mutation guard');
+            }
+          }else{
+            console.warn('[Pending] Failed to load full order snapshot, keeping local');
+          }
         }
       }catch(e){}
       renderPendingInTable();
@@ -8381,8 +8385,13 @@ async function sendOrderOperationsBatch(operations){
 }
 
 const ORDER_DRIFT_CHECK_INTERVAL_MS=45000;
+let _ordersSnapshotLocked=false;
 let _lastOrderDriftCheckAt=0;
 let _orderDriftHealInFlight=null;
+
+function lockOrdersSnapshot(){
+  _ordersSnapshotLocked=true;
+}
 function buildOrderStatusDigest(orderList){
   const normalized=normalizeOrderSnapshotList(orderList);
   const counts={New:0,'Sent to Factory':0,'At Depot':0,'Sent to Logistics':0,Shipped:0,Completed:0,pendingApproval:0,rejected:0};
@@ -8421,6 +8430,7 @@ function hasOrderSnapshotDrift(localOrders,remoteOrders){
 }
 async function maybeSelfHealOrderDrift(opts={}){
   const force=!!opts.force;
+  if(_ordersSnapshotLocked) return false;
   if(!me||!navigator.onLine) return false;
   const now=Date.now();
   if(!force && (now-_lastOrderDriftCheckAt)<ORDER_DRIFT_CHECK_INTERVAL_MS){
@@ -8437,7 +8447,7 @@ async function maybeSelfHealOrderDrift(opts={}){
     try{
       const beforeCount=Array.isArray(orders)?orders.length:0;
       // Use paginated fetcher to avoid single-page (200 item) snapshot
-      const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:50}).catch(()=>({orders:[],fetchedPages:0}));
+      const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[],fetchedPages:0}));
       const remoteOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
       if(!remoteOrders.length) return false;
       const hasDrift=hasOrderSnapshotDrift(orders,remoteOrders);
@@ -8976,7 +8986,7 @@ async function bootstrapAuthoritativeOrders(){
     const api=await ensureWorkingApiBase({silent:true});
     let changed=false;
     try{
-      const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:50}).catch(()=>({orders:[]}));
+      const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[]}));
       const cloudOrders = Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
       if(cloudOrders.length){
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'bootstrap_paginated',forceRemote:true});
@@ -8991,6 +9001,9 @@ async function bootstrapAuthoritativeOrders(){
     }else if(Array.isArray(orders)&&orders.length){
       updateBadges();
       render();
+    }
+    if(Array.isArray(orders) && orders.length){
+      lockOrdersSnapshot();
     }
     hideLoading();
     return true;
@@ -9335,7 +9348,11 @@ async function loadFromCloudSilent(){
       applyRemoteKeyToLocal(key,data[key],'load_silent');
     }
 
-    const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:20});
+    if(_ordersSnapshotLocked){
+      return true;
+    }
+
+    const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
     const cloudOrders=Array.isArray(orderSnapshot&&orderSnapshot.orders)?orderSnapshot.orders:[];
     const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load_silent',forceRemote:true});
     if(applied.applied&&applied.changed){
@@ -9397,7 +9414,13 @@ async function loadFromCloud(){
           }
           applyRemoteKeyToLocal(k,data[k],'load_aux');
         });
-        const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:20});
+        if(_ordersSnapshotLocked){
+          // Skip full orders snapshot after initial bootstrap.
+          loadSettings();loadTemplates();loadNotifSettings();
+          updateBadges();render();
+          return true;
+        }
+        const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
         const cloudOrders=Array.isArray(orderSnapshot&&orderSnapshot.orders)?orderSnapshot.orders:[];
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load',forceRemote:true});
         if(!applied.applied){
@@ -11403,82 +11426,8 @@ async function initFirebaseRealtime(opts={}){
   if(!getFirebaseEnabled()) return false;
   if(!force && Date.now()<_firebaseRetryAt) return false;
   if(_firebaseInitPromise) return _firebaseInitPromise;
-  _firebaseInitPromise=(async()=>{
-    const cfg=getFirebaseConfig();
-    if(!cfg||!cfg.projectId||!cfg.apiKey||!cfg.appId){
-      if(!silent) toast('⚠️ Firebase config eksik','err');
-      return false;
-    }
-    try{
-      const ok=await ensureFirebaseScripts();
-      if(!ok) throw new Error('Firebase scripts unavailable');
-      if(window.firebase.apps && window.firebase.apps.length){
-        _firebaseApp=window.firebase.app();
-      }else{
-        _firebaseApp=window.firebase.initializeApp(cfg);
-      }
-      _firebaseDb=window.firebase.firestore(_firebaseApp);
-      _firebaseAuth=window.firebase.auth(_firebaseApp);
-      _firebaseStorage=window.firebase.storage(_firebaseApp);
-      try{
-        await _firebaseAuth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL);
-      }catch(_e){}
-      await ensureFirebaseAuthSession();
-      ensureFirebaseAuthWatcher();
-      const authedUser=await ensureFirebaseOnlineAuth();
-      if(!authedUser){
-        disconnectFirebaseRealtime();
-        const authWait=getFirebaseAuthRetryRemainingMs();
-        _firebaseRetryAt=Date.now()+Math.max(5000,Math.min(15000,authWait||0));
-        if(!silent){
-          const hint=firebaseAuthHint({code:_health.authState,message:_health.lastError||''});
-          toast('⚠️ Firebase auth gerekli. '+(hint?('Hint: '+hint):'Tekrar giriş yapın.'),'err');
-        }
-        return false;
-      }
-      if(_firebaseUnsubOrders){try{_firebaseUnsubOrders();}catch(e){}}
-      _firebaseUnsubOrders=_firebaseDb.collection(FIREBASE_COLLECTION_ORDERS).onSnapshot(snap=>{
-        const incomingRaw=snap.docs.map(firebaseDocToOrder);
-        ackLocalMutationsFromIncoming(incomingRaw);
-        const incomingLive=getLiveOrdersOnly(incomingRaw);
-        const merged=mergeOrdersByFreshness(orders,incomingLive,{source:'realtime',pruneMissing:true});
-        orders=pruneLocalOrdersAgainstRemote(merged,incomingLive);
-        restoreOrderImagesFromLocalSources(orders,{source:'realtime'});
-        persistOrdersLocalSafe(Array.isArray(orders)?orders:[]);
-        _health.ordersRealtime=true;
-        markSync('orders_snapshot');
-        if(me){
-          if(_realtimeRenderTimer) clearTimeout(_realtimeRenderTimer);
-          _realtimeRenderTimer=setTimeout(()=>{
-            updateBadges();
-            refreshLiveCounters();
-            refreshRealtimeBadges();
-            render();
-          },120);
-        }
-      },err=>{
-        _health.ordersRealtime=false;
-        markError(err);
-        console.warn('[Firebase snapshot]',err.message);
-      });
-      await subscribeFeedRealtime({silent:true});
-      await subscribeDataRealtime({silent:true});
-      _firebaseReady=true;
-      _health.firebaseConnected=true;
-      _firebaseRetryAt=0;
-      flushLocalSyncFallback().catch(()=>{});
-      if(!silent) toast('✅ Firebase realtime connected','ok');
-      return true;
-    }catch(e){
-      _firebaseReady=false;
-      _health.firebaseConnected=false;
-      _firebaseRetryAt=Date.now()+60000;
-      markError(e);
-      if(!silent) toast('❌ Firebase bağlantı hatası: '+e.message,'err');
-      return false;
-    }finally{
-      _firebaseInitPromise=null;
-    }
+  _firebaseInitPromise=(async function(){
+    return true;
   })();
   return _firebaseInitPromise;
 }
@@ -14010,9 +13959,8 @@ function startAutoSync(){
       await ensureWorkingApiBase({silent:true}).catch(()=>{});
       await flushLocalSyncFallback().catch(()=>{});
       if(ORDER_HEAVY_PAGES.has(activePage)){
+        // Only pull incremental updates; avoid repeated full snapshots.
         await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
-        await runSilentLoadWithLock().catch(()=>{});
-        await maybeSelfHealOrderDrift({reason:'auto_sync'}).catch(()=>{});
       }else if(AUX_DATA_PAGES.has(activePage)){
         await loadAuxDataOnly().catch(()=>{});
       }
