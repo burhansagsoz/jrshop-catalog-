@@ -2025,8 +2025,11 @@ export default {
       if (path === '/api/orders' && method === 'GET') {
         const sinceTs = Math.max(0, Number(url.searchParams.get('sinceTs')) || 0);
         const sinceV = Math.max(0, Number(url.searchParams.get('sinceV')) || 0);
+        const limitParam = url.searchParams.get('limit');
+        const limit = limitParam === null ? 0 : Math.max(1, Math.min(500, Number(limitParam) || 200));
+        const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         await runOrderCommandDrainCycle(db, authContext, { limit: 6, env });
-        return await getOrders(db, authContext, { sinceTs, sinceV });
+        return await getOrders(db, authContext, { sinceTs, sinceV, limit, offset });
       }
       if (path.startsWith('/api/order-command/') && method === 'GET') {
         const commandId = decodeURIComponent(path.split('/').pop() || '').trim();
@@ -2889,6 +2892,9 @@ async function getOrders(db, authContext = null, opts = {}) {
   const startedAt = Date.now();
   const sinceTs = Math.max(0, Number(opts && opts.sinceTs) || 0);
   const sinceV = Math.max(0, Number(opts && opts.sinceV) || 0);
+  const hasExplicitLimit = opts && Object.prototype.hasOwnProperty.call(opts, 'limit');
+  const limit = hasExplicitLimit ? Math.max(1, Math.min(500, Number(opts && opts.limit) || 200)) : 0;
+  const offset = Math.max(0, Number(opts && opts.offset) || 0);
   try {
     await ensureOrderTables(db);
     const rows = await withD1Retry(
@@ -2912,22 +2918,30 @@ async function getOrders(db, authContext = null, opts = {}) {
           return ots > sinceTs;
         })
       : orders;
+    const pagedOrders = incremental ? filteredOrders : (limit > 0 ? filteredOrders.slice(offset, offset + limit) : filteredOrders);
+    const hasMore = !incremental && limit > 0 && (offset + limit) < filteredOrders.length;
     logWorker('info', 'orders_list_served', {
       tableCount: tableOrders.length,
       mergedCount: orders.length,
-      resultCount: filteredOrders.length,
+      resultCount: pagedOrders.length,
       incremental,
       sinceTs,
       sinceV,
+      limit,
+      offset,
+      hasMore,
       latencyMs: Date.now() - startedAt
     });
     await bumpSecurityMetric(db, 'orders_list_served', 1);
     const nextCursor = await getLatestSyncCursor(db);
     return json({
-      orders: filteredOrders,
+      orders: pagedOrders,
       incremental,
       sinceTs,
       sinceV,
+      limit,
+      offset,
+      hasMore,
       nextCursor
     });
   } catch(e) {

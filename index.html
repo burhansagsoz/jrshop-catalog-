@@ -175,6 +175,10 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--ac
 .scrl::-webkit-scrollbar-track{background:transparent;}
 .page.scrl.on::-webkit-scrollbar{width:10px;}
 .page.scrl.on::-webkit-scrollbar-thumb{background:rgba(100,116,139,.65);border-radius:8px;}
+#customers-list{max-height:calc(100dvh - 235px);overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-gutter:stable;}
+#customers-list::-webkit-scrollbar{width:10px;}
+#customers-list::-webkit-scrollbar-thumb{background:rgba(148,163,184,.55);border-radius:8px;}
+#customers-list::-webkit-scrollbar-track{background:transparent;}
 
 /* ORDERS */
 .orders-page{flex-direction:row;overflow:hidden;}
@@ -1929,116 +1933,147 @@ const ORDER_STATUS_ALIASES=Object.freeze({
 
 // ── STATE ──
 let orders    = (()=>{
-  const raw = JSON.parse(localStorage.getItem('jb_orders') || '[]');
-  return normalizeOrderSnapshotList(Array.isArray(raw)?raw:[]);
+  return [];
 })();
-let settings  = JSON.parse(localStorage.getItem('jb_settings')  || '{}');
+let settings  = {};
+let templates = {};
+let users = [];
+let suppliers = [];
+let notifSettings = {shipped:true};
+let activityLog = [];
+let catalog = [];
+let catalogCategories = ['Shoes','Bags','Accessories'];
+let fStatus = 'all';
+let fSearch = '';
+const ORDERS_PAGE_SIZE = 40;
+let _ordersPage = 1;
+let _selectMode = false;
+let _selected = new Set();
+
+async function applyRemoteKeyToLocal(key, value, source){
+  try{
+    if(!key) return;
+    // Users
+    if(key === 'jb_users'){
+      users = persistUsersLocalSafe(value,'remote');
+      return;
+    }
+    if(key === 'jb_suppliers'){
+      suppliers = Array.isArray(value) ? value : [];
+      renderSuppliers();
+      if(typeof renderSupPerf==='function') renderSupPerf();
+      return;
+    }
+    // Templates
+    if(key === 'jb_templates'){
+      templates = (value && typeof value === 'object') ? value : {};
+      if(typeof loadTemplates === 'function') loadTemplates();
+      return;
+    }
+    // Settings
+    if(key === 'jb_settings'){
+      settings = (value && typeof value === 'object') ? value : {};
+      if(typeof loadSettings === 'function') loadSettings();
+      return;
+    }
+    if(key === 'jb_notif'){
+      notifSettings = (value && typeof value === 'object') ? value : {shipped:true};
+      if(typeof loadNotifSettings === 'function') loadNotifSettings();
+      return;
+    }
+    if(key === 'jb_activity'){
+      activityLog = Array.isArray(value) ? value : [];
+      if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
+      return;
+    }
+    if(key === 'jb_catalog'){
+      catalog = Array.isArray(value) ? value : [];
+      if(typeof renderCatalog === 'function') renderCatalog();
+      return;
+    }
+    if(key === 'jb_cat_categories'){
+      catalogCategories = Array.isArray(value) && value.length ? value : ['Shoes','Bags','Accessories'];
+      if(typeof renderCatalogCatBar === 'function') renderCatalogCatBar();
+      return;
+    }
+    if(key === 'jb_feed'){
+      if(typeof setFeedCache === 'function') setFeedCache(Array.isArray(value)?value:[], Date.now());
+      return;
+    }
+    // Orders (basic handling)
+    if(key === 'jb_orders'){
+      orders = Array.isArray(value) ? value : orders;
+      return;
+    }
+    // Generic fallback: persist to localStorage
+    try{ localStorage.setItem(key, JSON.stringify(value)); }catch(_e){}
+  }catch(e){
+    console.error('[applyRemoteKeyToLocal] error', e && e.message ? e.message : e);
+  }
+}
+
+async function hydrateSharedStateServerFirst(source='bootstrap'){
+  const keys=['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed'];
+  try{
+    const data=await fetchDataMapByKeys(keys);
+    if(!data || typeof data!=='object' || !Object.keys(data).length) return false;
+    for(const key of keys){
+      if(data[key]===undefined) continue;
+      if(key==='jb_feed'){
+        const mergedFeed=mergeFeedByVersion(getFeedPostsFromCache(),Array.isArray(data[key])?data[key]:[])
+          .map(function(post){return normalizeFeedPost(post,post);});
+        setFeedCache(mergedFeed,Date.now());
+        continue;
+      }
+      applyRemoteKeyToLocal(key,data[key],source);
+    }
+    return true;
+  }catch(e){
+    console.warn('[hydrateSharedStateServerFirst]', e && e.message ? e.message : e);
+    return false;
+  }
+}
 const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
+const LIST_PAGE_SIZE = 20;
 function normalizeUsersList(raw){
   try{
     let list=raw;
     if(list===null||list===undefined) list=[];
-    if(!Array.isArray(list) && list && typeof list==='object'){
-      list=Object.values(list).filter(v=>v&&typeof v==='object');
+    if(Array.isArray(list)) return list;
+    if(list && typeof list==='object'){
+      if(Array.isArray(list.users)) return list.users;
+      if(Array.isArray(list.data)) return list.data;
     }
-    if(!Array.isArray(list)) list=[];
-    const out=list
-      .filter(u=>u&&typeof u==='object')
-      .map(u=>({
-        ...u,
-        id:String(u.id||('u'+Date.now()+Math.random().toString(36).slice(2,6))),
-        email:String(u.email||'').trim(),
-        // Backward compatibility for older backup/user formats.
-        password:String(u.password||u.pw||u.pass||u.userPassword||''),
-        role:String(u.role||'Reseller'),
-        dname:String(u.dname||'').trim()
-      }))
-      .filter(u=>u.email&&u.password);
-    return out.length?out:[...DEFAULT_BOOT_USERS];
+    return [];
   }catch(_e){
-    return [...DEFAULT_BOOT_USERS];
+    return [];
   }
-}
-function userIdentityKey(u){
-  const email=String(u&&u.email||'').trim().toLowerCase();
-  if(email) return 'em:'+email;
-  return 'id:'+String(u&&u.id||'');
-}
-function mergeUsersSafely(localRaw,remoteRaw){
-  const local=normalizeUsersList(localRaw);
-  const remote=normalizeUsersList(remoteRaw);
-  // Guard: ignore suspicious remote payloads that only include default admin.
-  if(
-    local.length>=2 &&
-    remote.length===1 &&
-    String(remote[0]&&remote[0].email||'').toLowerCase()==='joobuyadmin@gmail.com'
-  ){
-    return local;
-  }
-  const byKey=new Map();
-  for(const u of local){
-    byKey.set(userIdentityKey(u),u);
-  }
-  for(const u of remote){
-    const key=userIdentityKey(u);
-    const prev=byKey.get(key)||{};
-    byKey.set(key,{...prev,...u});
-  }
-  const merged=[...byKey.values()];
-  return normalizeUsersList(merged.length?merged:[...DEFAULT_BOOT_USERS]);
-}
-function applyRemoteKeyToLocal(key,value,source='remote'){
-  const k=String(key||'').trim();
-  if(!k || k==='jb_orders') return;
-  if(k==='jb_users'){
-    persistUsersLocalSafe(Array.isArray(value)?value:[],source);
-    return;
-  }
-  try{localStorage.setItem(k,JSON.stringify(value));}catch(_e){}
 }
 function persistUsersLocalSafe(remoteUsers,source=''){
-  let localUsers=[];
-  try{localUsers=JSON.parse(localStorage.getItem('jb_users')||'[]');}catch(_e){localUsers=[];}
-  const merged=mergeUsersSafely(localUsers,remoteUsers);
-  try{localStorage.setItem('jb_users',JSON.stringify(merged));}catch(_e){}
-  users=merged;
-  if(source) debugLog('[Users] merged from',source,'local',Array.isArray(localUsers)?localUsers.length:0,'remote',Array.isArray(remoteUsers)?remoteUsers.length:0,'final',merged.length);
-  return merged;
+  users=normalizeUsersList(remoteUsers);
+  return users;
 }
-function findUserForLogin(identifier,password){
-  const id=String(identifier||'').trim().toLowerCase();
-  const pw=String(password||'');
-  if(!id||!pw) return null;
-  const list=normalizeUsersList(users);
-  return list.find(function(u){
-    const em=String(u.email||'').trim().toLowerCase();
-    const dn=String(u.dname||'').trim().toLowerCase();
-    return (em===id || (dn&&dn===id)) && String(u.password||'')===pw;
-  })||null;
+function findUserForLogin(email,password){
+  try{
+    const em=String(email||'').trim().toLowerCase();
+    const pw=String(password||'');
+    if(!em) return null;
+    // Merge with default admin if no users
+    const pool = (Array.isArray(users) && users.length)? users.slice() : DEFAULT_BOOT_USERS.slice();
+    for(const u of pool){
+      if(!u || typeof u !== 'object') continue;
+      const ue = String(u.email||'').trim().toLowerCase();
+      const up = String(u.password||'');
+      if(ue === em && up === pw) return u;
+    }
+    return null;
+  }catch(_e){return null;}
 }
-let users     = normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')     || JSON.stringify(DEFAULT_BOOT_USERS)));
-let suppliers = JSON.parse(localStorage.getItem('jb_suppliers') || '[]');
-let templates = JSON.parse(localStorage.getItem('jb_templates') || JSON.stringify({
-  order_confirmation:"Hi {{name}} 👋\n\nYour order is confirmed! ✅\nRef: {{ref}}\nProducts: {{products}}\n\nWe'll send your tracking soon. Thank you! 🎉",
-  tracking:"Hi {{name}} 👋\n\nYour order has shipped! 🚚\nTracking: {{tracking}}\nProducts: {{products}}\n\nTrack: http://193.112.161.59:8082/trackIndex.htm\n\nThank you! 📦",
-  supplier:"Hi,\n\nNew order:\nRef: {{ref}}\nCustomer: {{name}}\nAddress: {{address}}\nProducts: {{products}}\n\nPlease process ASAP. Thanks!"
-}));
-let notifSettings = JSON.parse(localStorage.getItem('jb_notif') || '{"shipped":true}');
-let me=null, selId=null, fStatus='all', fSearch='';
-let prodCount=0, prodImages={};
-let _editOrderId=null, _editProdImages={};
 let _resImgEditOrderId=null, _resImgEditDraft={};
 let chartDaily=null, chartStatus=null;
 let _emailQueue=[], _scanMode='add', _cameraStream=null, _barcodeInterval=null;
 let _barcodeDetectBusy=false, _bcnDetectBusy=false, _staffDetectBusy=false;
 const SCAN_DETECT_INTERVAL_MS=650;
-let _selectMode=false, _selected=new Set();
-let _singleScanGuard=null;
-const PAGE_STATE_KEY='jb_active_page';
-const SESSION_LOGIN_KEY='jb_login_session';
-const ORDERS_PAGE_SIZE=30;
-const LIST_PAGE_SIZE=30;
-let _ordersPage=1;
 let _customersPage=1;
 let _suppliersPage=1;
 let _usersPage=1;
@@ -2274,6 +2309,8 @@ function getDefaultApiBaseByLocation(){
   try{
     const h=String(location.hostname||'').toLowerCase();
     const p=String(location.port||'');
+    // Static dev servers should talk to the local Worker, not to their own origin.
+    if((h==='localhost'||h==='127.0.0.1') && (p==='8000'||p==='5500')) return 'http://127.0.0.1:8787';
     if(h==='127.0.0.1' && p==='5500') return 'http://127.0.0.1:8788';
     if(h==='127.0.0.1' && p==='8788') return 'http://127.0.0.1:8888';
   }catch(_e){}
@@ -2286,6 +2323,7 @@ function normalizeConfiguredApiBase(raw){
   if(!/^https?:\/\//i.test(value)) return fallback;
   value=value.replace(/\/$/,'');
   // Prevent pointing API to local static frontend servers.
+  if(/^https?:\/\/(127\.0\.0\.1|localhost):8000$/i.test(value)) return 'http://127.0.0.1:8787';
   if(/^https?:\/\/(127\.0\.0\.1|localhost):5500$/i.test(value)) return 'http://127.0.0.1:8788';
   if(/^https?:\/\/(127\.0\.0\.1|localhost):8788$/i.test(value)) return 'http://127.0.0.1:8888';
   return value;
@@ -2317,178 +2355,37 @@ function getApiBaseEarly(){
       if(defKey) localStorage.setItem('jb_cloud_key',defKey);
     }
   }catch(_e){}
-  const savedUsers=localStorage.getItem('jb_users');
-  const hasUsers=savedUsers&&JSON.parse(savedUsers||'[]').length>0;
-  if(!hasUsers){
-    setTimeout(function(){
-      const loginBtn=document.querySelector('.login-btn');
-      if(loginBtn)loginBtn.textContent='Loading...';
-      fetch(getApiBaseEarly()+'/api/data')
-      .then(function(r){return r.json();})
-      .then(function(res){
-        if(res.data){
-          Object.keys(res.data).forEach(function(k){
-            if(k==='jb_users'){
-              persistUsersLocalSafe(res.data[k],'boot');
-            }else{
-              localStorage.setItem(k,JSON.stringify(res.data[k]));
-            }
-          });
-          users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
+  // Server-first bootstrap: always try to fetch `/api/data` to populate keys.
+  setTimeout(async function(){
+    const loginBtn=document.querySelector('.login-btn');
+    if(loginBtn)loginBtn.textContent='Loading...';
+    try{
+      const res = await fetch(getApiBaseEarly()+'/api/data',{headers:getAuthHeaders(), cache:'no-store'});
+      const payload = await res.json().catch(()=>({}));
+      if(payload && payload.data){
+        await hydrateSharedStateServerFirst('boot');
+        users=normalizeUsersList(users);
         scheduleFirebaseAutoConnect('boot');
-          const savedEm=localStorage.getItem('jb_saved_email');
-          const savedPwRaw=localStorage.getItem('jb_saved_pw');const savedPw=savedPwRaw?decodeURIComponent(atob(savedPwRaw)):'';
-          const emEl=document.getElementById('l-em');
-          const pwEl=document.getElementById('l-pw');
-          if(savedEm&&emEl)emEl.value=savedEm;
-          if(savedPw&&pwEl)pwEl.value=savedPw;
-          if(savedEm&&savedPw&&users.length){
-            const u=users.find(function(u){return u.email.toLowerCase()===savedEm&&u.password===savedPw;});
-            if(u){login();return;}
-          }
+        const savedEm=localStorage.getItem('jb_saved_email');
+        const savedPwRaw=localStorage.getItem('jb_saved_pw');const savedPw=savedPwRaw?decodeURIComponent(atob(savedPwRaw)):'';
+        const emEl=document.getElementById('l-em');
+        const pwEl=document.getElementById('l-pw');
+        if(savedEm&&emEl)emEl.value=savedEm;
+        if(savedPw&&pwEl)pwEl.value=savedPw;
+        if(savedEm&&savedPw&&users.length){
+          const u=users.find(function(u){return u.email.toLowerCase()===savedEm&&u.password===savedPw;});
+          if(u){login();return;}
         }
-        if(loginBtn)loginBtn.textContent='Sign In →';
-      }).catch(function(){if(loginBtn)loginBtn.textContent='Sign In →';});
-    },500);
-  }
+      }
+    }catch(_e){
+      // offline or API error: retain localStorage as-is
+    }finally{
+      if(loginBtn)loginBtn.textContent='Sign In →';
+    }
+  },500);
 // Auto-load from cloud
 })();
 (function(){if(localStorage.getItem('jb_dark')==='1'){document.body.classList.add('dark');setTimeout(()=>{const b=document.getElementById('dark-btn');if(b)b.textContent='☀️';},100);}})();
-
-// ── SHELF HELPERS ──
-// Each product in an order can have a 'arrived' flag
-// Order is "Ready" when all products have arrived at depot
-function getShelfStatus(o){
-  const prods=o.products||[];
-  if(!prods.length) return {arrived:0,total:0,ready:false};
-  const arrived=prods.filter(p=>p.arrived).length;
-  return {arrived,total:prods.length,ready:arrived===prods.length&&prods.length>0};
-}
-function isReady(o){return orderStatus(o)==='At Depot'&&getShelfStatus(o).ready;}
-let _ordersStorageWarnAt=0;
-function compactOrdersForStorage(list,opts={}){
-  const arr=Array.isArray(list)?list:[];
-  const aggressive=!!(opts&&opts.aggressive);
-  const keepRemoteable=function(v){
-    if(typeof v!=='string') return null;
-    const s=v.trim();
-    if(!s) return null;
-    // Never keep blob/data URLs in localStorage compaction; they are quota-heavy
-    // and are a common cause of "saved then disappeared after refresh" regressions.
-    if(/^https?:/i.test(s)) return s;
-    if(/^\/?api\/image\/[a-z0-9_-]+$/i.test(s)) return s.startsWith('/')?s:('/'+s);
-    return null;
-  };
-  return arr.map(function(o){
-    const products=(o&&o.products||[]).map(function(p){
-      const base={
-        ...p,
-        img:keepRemoteable(p&&p.img),
-        depotPhoto:keepRemoteable(p&&p.depotPhoto)
-      };
-      if(!aggressive) return base;
-      return {
-        name:base&&base.name?String(base.name):'',
-        qty:Math.max(1,Number(base&&base.qty)||1),
-        arrived:!!(base&&base.arrived),
-        cnTracking:base&&base.cnTracking?String(base.cnTracking):'',
-        ukTracking:base&&base.ukTracking?String(base.ukTracking):'',
-        img:base&&base.img?base.img:null,
-        depotPhoto:base&&base.depotPhoto?base.depotPhoto:null
-      };
-    });
-    if(!aggressive){
-      return {
-        ...o,
-        products
-      };
-    }
-    return {
-      id:o&&o.id?String(o.id):'',
-      ref:o&&o.ref?String(o.ref):'',
-      name:o&&o.name?String(o.name):'',
-      resellerId:o&&o.resellerId?String(o.resellerId):'',
-      supplierId:o&&o.supplierId?String(o.supplierId):'',
-      status:normalizeStatus(o&&o.status),
-      pendingApproval:normalizeBooleanFlag(o&&o.pendingApproval),
-      rejected:normalizeBooleanFlag(o&&o.rejected),
-      rejectNote:o&&o.rejectNote?String(o.rejectNote):'',
-      cnTracking:o&&o.cnTracking?String(o.cnTracking):'',
-      ukTracking:o&&o.ukTracking?String(o.ukTracking):'',
-      ts:Number(o&&o.ts)||Date.now(),
-      updatedAt:Number(o&&o.updatedAt||o&&o.ts)||Date.now(),
-      v:Math.max(1,Number(o&&o.v)||1),
-      opId:o&&o.opId?String(o.opId):'',
-      lastOpId:o&&o.lastOpId?String(o.lastOpId):'',
-      products
-    };
-  });
-}
-function persistOrdersLocalSafe(list){
-  const arr=Array.isArray(list)?list:[];
-  try{
-    localStorage.setItem('jb_orders',JSON.stringify(arr));
-    return true;
-  }catch(_e){
-    try{
-      const compact=compactOrdersForStorage(arr,{aggressive:false});
-      localStorage.setItem('jb_orders',JSON.stringify(compact));
-      const now=Date.now();
-      if(now-_ordersStorageWarnAt>20000){
-        _ordersStorageWarnAt=now;
-        toast('⚠️ Order images compacted to protect updates','info');
-      }
-      return true;
-    }catch(err2){
-      try{
-        const compactAggressive=compactOrdersForStorage(arr,{aggressive:true});
-        localStorage.setItem('jb_orders',JSON.stringify(compactAggressive));
-        const now=Date.now();
-        if(now-_ordersStorageWarnAt>20000){
-          _ordersStorageWarnAt=now;
-          toast('⚠️ Storage was full; compacted order cache to protect changes','info');
-        }
-        return true;
-      }catch(err3){
-        console.error('[persistOrdersLocalSafe]',err3&&err3.message?err3.message:err3);
-        return false;
-      }
-    }
-  }
-}
-function shouldAcceptRemoteOrders(remoteOrders){
-  if(!Array.isArray(remoteOrders)) return false;
-  const remoteCount=remoteOrders.length;
-  let localCount=Array.isArray(orders)?orders.length:0;
-  try{
-    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    const storageCount=Array.isArray(localOrders)?localOrders.length:0;
-    localCount=Math.max(localCount,storageCount);
-  }catch(_e){
-    localCount=Math.max(localCount,0);
-  }
-  const hasPendingLocalMutations=hasActiveUpsertOrderMutation();
-  if(remoteCount>0){
-    // If we have pending local writes, reject any snapshot shrink to avoid dropping
-    // newly-created orders that have not been acknowledged yet.
-    if(hasPendingLocalMutations && remoteCount<localCount){
-      console.warn('[Cloud] Remote orders snapshot rejected: pending local mutations', { localCount, remoteCount });
-      return false;
-    }
-    // Guard against partial remote snapshots wiping a much larger local dataset.
-    if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
-      console.warn('[Cloud] Remote orders snapshot rejected: suspicious drop', { localCount, remoteCount });
-      return false;
-    }
-    return true;
-  }
-  try{
-    const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-    return !Array.isArray(localOrders)||localOrders.length===0;
-  }catch(_e){
-    return true;
-  }
-}
 function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
   // In Cloudflare mode, /api/orders is the only authoritative source for orders.
   // /api/data may contain stale jb_orders snapshots and can reintroduce old states
@@ -2504,8 +2401,50 @@ function shouldUseOrdersDataFallback(fallbackOrders,localOrders){
 function persistOrdersState(nextOrders){
   const arr=Array.isArray(nextOrders)?nextOrders:[];
   orders=arr;
-  persistOrdersLocalSafe(arr);
   return arr;
+}
+async function fetchOrdersSnapshotFromWorker(opts={}){
+  const api=await ensureWorkingApiBase({silent:true});
+  const pageSize=Math.max(50,Math.min(500,Number(opts&&opts.pageSize)||200));
+  const maxPages=Math.max(1,Math.min(50,Number(opts&&opts.maxPages)||20));
+  const sinceTs=Math.max(0,Number(opts&&opts.sinceTs)||0);
+  const sinceV=Math.max(0,Number(opts&&opts.sinceV)||0);
+  const incremental=!!(sinceTs>0||sinceV>0);
+  const mergedById=new Map();
+  let offset=Math.max(0,Number(opts&&opts.offset)||0);
+  let fetchedPages=0;
+  while(fetchedPages<maxPages){
+    const params=new URLSearchParams();
+    params.set('limit',String(pageSize));
+    params.set('offset',String(offset));
+    if(incremental){
+      if(sinceTs>0) params.set('sinceTs',String(sinceTs));
+      if(sinceV>0) params.set('sinceV',String(sinceV));
+    }
+    const res=await fetch(api+'/api/orders?'+params.toString(),{headers:getAuthHeaders()});
+    if(!res.ok) break;
+    const payload=await res.json().catch(()=>({}));
+    const chunk=Array.isArray(payload&&payload.orders)?payload.orders:[];
+    for(const row of chunk){
+      if(!row||!row.id) continue;
+      mergedById.set(String(row.id),normalizeOrderSnapshotRow(row));
+    }
+    fetchedPages++;
+    const hasMore=!!(payload&&payload.hasMore);
+    if(incremental || !hasMore || chunk.length<pageSize) break;
+    offset+=pageSize;
+  }
+  const list=[...mergedById.values()]
+    .sort((a,b)=>(Number(b&&b.ts)||0)-(Number(a&&a.ts)||0));
+  return {
+    orders:normalizeOrderSnapshotList(list),
+    fetchedPages,
+    pageSize,
+    hasMore:false,
+    incremental,
+    sinceTs,
+    sinceV
+  };
 }
 function normalizeOrderProductNameKey(name){
   return String(name||'').toLowerCase().replace(/\s*—.*$/,'').trim();
@@ -2546,22 +2485,37 @@ function normalizeImageUrlForRender(url){
 function getRenderableImageUrl(url){
   const normalized=normalizeImageUrlForRender(url);
   if(!normalized) return '';
-  if(_brokenImageCache.has(normalized)) return '';
+  // Check multiple variants against the broken-image cache to avoid retries
+  const variants=[normalized, normalized.replace(/^\/+/,''), (location && location.origin? (location.origin+normalized) : normalized)];
+  for(const v of variants){ if(_brokenImageCache.has(v)) return ''; }
   return normalized;
 }
 function handleBrokenImage(el){
   if(!el) return;
   const src=String(el.getAttribute('src')||el.dataset.src||'').trim();
   if(src){
-    _brokenImageCache.add(src);
+    // Store multiple variants so future renders tolerate both absolute and relative forms
+    try{ _brokenImageCache.add(src); }catch(_e){}
+    try{ _brokenImageCache.add(src.replace(/^https?:\/\/[^\/]+/i,'')); }catch(_e){}
+    try{ _brokenImageCache.add(src.replace(/^\/+/,'')); }catch(_e){}
     persistBrokenImageCache();
   }
   el.style.display='none';
 }
+
+// Persist orders lightly and safely. Intentionally avoid writing full order snapshots
+// to localStorage to prevent "storage full" errors. Store only small metadata.
+function persistOrdersLocalSafe(orders){
+  try{
+    const count = Array.isArray(orders)? orders.length : 0;
+    const meta = {count, ts: Date.now()};
+    localStorage.setItem('jb_orders_meta', JSON.stringify(meta));
+  }catch(_e){ /* swallow errors to avoid breaking sync loop */ }
+}
 function buildCatalogImageLookup(){
   const byName=new Map();
   try{
-    const list=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
+    const list=Array.isArray(catalog)?catalog:[];
     (Array.isArray(list)?list:[]).forEach(function(item){
       const key=normalizeOrderProductNameKey(item&&item.name);
       if(!key) return;
@@ -2727,7 +2681,7 @@ function shouldAcceptRemoteFeed(remoteFeed){
   if(!Array.isArray(remoteFeed)) return false;
   if(remoteFeed.length>0) return true;
   try{
-    const localFeed=JSON.parse(localStorage.getItem('jb_feed')||'[]');
+    const localFeed=Array.isArray(window._feedCache)?window._feedCache:[];
     return !Array.isArray(localFeed)||localFeed.length===0;
   }catch(_e){
     return true;
@@ -2740,8 +2694,11 @@ function readFeedUpdatedAt(){
 function setFeedCache(posts,updatedAt){
   const ts=Number(updatedAt)||Date.now();
   try{
-    localStorage.setItem('jb_feed',JSON.stringify(Array.isArray(posts)?posts:[]));
-    localStorage.setItem('jb_feed_updated_at',String(ts));
+    // Keep full posts in-memory only to avoid filling localStorage.
+    window._feedCache=Array.isArray(posts)?posts.slice():[];
+    window._feedCacheUpdatedAt=ts;
+    // Persist only the updated timestamp locally for cross-tab awareness.
+    try{ localStorage.setItem('jb_feed_updated_at',String(ts)); }catch(_e){}
   }catch(_e){}
 }
 function mergeFeedByTs(localFeed,remoteFeed){
@@ -3174,8 +3131,7 @@ async function login(){
             localStorage.setItem(k,JSON.stringify(res.data[k]));
           }
         });
-        // Prefer authoritative /api/orders on login; fallback to /api/data snapshot only if needed.
-        const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
+        // Prefer authoritative /api/orders on login; do not restore jb_orders from localStorage.
         let cloudOrders=[];
         try{
           const ordRes=await fetch(getApiBase()+'/api/orders',{headers:getAuthHeaders()});
@@ -3188,16 +3144,8 @@ async function login(){
         }
         // Do not fallback to /api/data.jb_orders in Cloudflare mode; that snapshot can be stale.
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'login',forceRemote:true});
-        if(!applied.applied){
-          orders=normalizeOrderSnapshotList(Array.isArray(localOrders)?localOrders:[]);
-          persistOrdersLocalSafe(orders);
-        }
         flushLocalSyncFallback().catch(function(){});
-        catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
-        users=normalizeUsersList(JSON.parse(localStorage.getItem('jb_users')||'[]'));
-        suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
-        settings=JSON.parse(localStorage.getItem('jb_settings')||'{}');
-        catalogCategories=JSON.parse(localStorage.getItem('jb_cat_categories')||'[]');
+        users=normalizeUsersList(users);
         updateBadges();render();
       }
     }).catch(function(){});
@@ -3479,6 +3427,7 @@ async function navOrders(status,el){
   const m={all:0,New:1,'Sent to Factory':2,'At Depot':3,Ready:4,'Sent to Logistics':5,Shipped:6,Completed:7};
   tabs.forEach(t=>t.classList.remove('on'));
   if(m[status]!==undefined)tabs[m[status]].classList.add('on');
+  syncDataForActivePage('force').catch(()=>{});
   render();
   syncOrdersRoute(status);
 }
@@ -3765,6 +3714,21 @@ function clearAcknowledgedAlerts(){
   updateBadges();
   toast('✅ All alerts marked as read','ok');
 }
+function getShelfStatus(o){
+  try{
+    const prods = (o && Array.isArray(o.products))? o.products : [];
+    if(!prods.length) return {arrived:0,total:0,ready:false};
+    const arrived = prods.filter(p=>p && !!p.arrived).length;
+    return {arrived,total:prods.length,ready:arrived===prods.length&&prods.length>0};
+  }catch(_e){
+    return {arrived:0,total:0,ready:false};
+  }
+}
+function isReady(o){
+  try{
+    return orderStatus(o)==='At Depot' && getShelfStatus(o).ready;
+  }catch(_e){return false;}
+}
 
 // ── RENDER TABLE ──
 function filtered(){
@@ -3969,12 +3933,18 @@ function markProductArrived(orderId, prodIdx){
 }
 
 // ── ADVANCE STATUS ──
-function advanceStatus(){
+async function advanceStatus(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();
   const next=S_NEXT[o.status];if(!next)return;
   const oldStatus=o.status;
-  o.status=next;if(next==='Completed'&&!o.completedAt)o.completedAt=Date.now();saveOrders();selectOrder(o.id);
+  o.status=next;if(next==='Completed'&&!o.completedAt)o.completedAt=Date.now();
+  const saveResult=await saveOrders([o.id]);
+  if(!saveResult||!saveResult.ok){
+    toast('⚠️ Status could not be saved to cloud','err');
+    return;
+  }
+  selectOrder(o.id);
   logActivity('status',`Status: ${oldStatus} → ${next} | ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   toast('✅ Status: '+next,'ok');
   // Reseller notifications
@@ -5607,7 +5577,9 @@ function sendAllEmails(){_emailQueue.filter(o=>o.email).forEach((o,i)=>setTimeou
 
 // ── CUSTOMERS ──
 function renderCustomers(filter){
-  const map={};orders.forEach(o=>{const key=(o.email||o.name||'').toLowerCase()||o.id;if(!map[key])map[key]={name:o.name,email:o.email,phone:o.phone,fblink:o.fblink,orders:[],totalSpend:0};map[key].orders.push(o);map[key].totalSpend+=(o.products||[]).reduce((s,p)=>s+(parseFloat(p.value)||0),0);});
+  const ordersList=Array.isArray(orders)?orders:[];
+  if(!Array.isArray(orders)) console.warn('[Customers] orders array missing or invalid', orders);
+  const map={};ordersList.forEach(o=>{const key=(o.email||o.name||'').toLowerCase()||o.id;if(!map[key])map[key]={name:o.name,email:o.email,phone:o.phone,fblink:o.fblink,orders:[],totalSpend:0};map[key].orders.push(o);map[key].totalSpend+=(o.products||[]).reduce((s,p)=>s+(parseFloat(p.value)||0),0);});
   let custs=Object.values(map).sort((a,b)=>b.orders.length-a.orders.length);
   _customersFilterQuery=String(filter||'').trim();
   if(_customersFilterQuery){
@@ -5618,7 +5590,8 @@ function renderCustomers(filter){
   const list=document.getElementById('customers-list');
   const pagerId='customers-pagination';
   const pagerEl=document.getElementById(pagerId);
-  if(!custs.length){list.innerHTML='<div style="padding:24px;text-align:center;color:var(--muted);">No customers yet.</div>';return;}
+  if(!list) return;
+  if(!custs.length){list.innerHTML='<div style="padding:24px;text-align:center;color:var(--muted);">No customers yet.</div>';if(pagerEl) pagerEl.innerHTML='';return;}
   const pg=paginateCollection(custs,_customersPage,LIST_PAGE_SIZE);
   _customersPage=pg.page;
   list.innerHTML=pg.items.map(c=>{const last=c.orders.sort((a,b)=>b.ts-a.ts)[0];return`<div class="card-row"><div style="width:36px;height:36px;border-radius:50%;background:var(--accent-light);border:1px solid var(--accent-border);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:var(--accent);flex-shrink:0;">${(c.name||'?')[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:700;">${c.name||'Unknown'}</div><div style="font-size:11px;color:var(--muted);">${c.email||''} ${c.phone?'· '+c.phone:''}</div><div style="font-size:11px;color:var(--muted);">Last: ${fmtDate(last?.ts)}</div></div><div style="text-align:right;flex-shrink:0;"><div style="font-size:13px;font-weight:700;font-family:var(--mono);">${c.orders.length}</div>${c.totalSpend?`<div style="font-size:11px;color:var(--green);font-weight:600;">£${c.totalSpend.toFixed(2)}</div>`:''}${c.orders.length>=3?`<div style="font-size:10px;background:var(--accent-light);color:var(--accent);border:1px solid var(--accent-border);border-radius:10px;padding:1px 6px;margin-top:2px;display:inline-block;">⭐ Loyal</div>`:''}</div></div>`;}).join('');
@@ -5654,12 +5627,11 @@ function removeSupplier(id){if(!confirm('Remove?'))return;suppliers=suppliers.fi
 function loadTemplates(){document.getElementById('tpl-order_confirmation').value=templates.order_confirmation||'';document.getElementById('tpl-tracking').value=templates.tracking||'';document.getElementById('tpl-supplier').value=templates.supplier||'';}
 function saveTpl(key){
   templates[key]=document.getElementById('tpl-'+key).value;
-  localStorage.setItem('jb_templates',JSON.stringify(templates));
-  syncGenericKeyToCloud('jb_templates',templates,{opId:createLocalMutationOpId('templates')}).catch(function(){});
+  writeLocalJson('jb_templates',templates);
   toast('✅ Saved!','ok');
 }
 function insertVar(key,v){const ta=document.getElementById('tpl-'+key);const s=ta.selectionStart,e=ta.selectionEnd;ta.value=ta.value.substring(0,s)+v+ta.value.substring(e);ta.selectionStart=ta.selectionEnd=s+v.length;ta.focus();}
-function loadNotifSettings(){notifSettings=JSON.parse(localStorage.getItem('jb_notif')||'{"shipped":true}');const g=id=>document.getElementById(id);if(g('notif-depot')){g('notif-depot').checked=!!notifSettings.depot;g('notif-logistics').checked=!!notifSettings.logistics;g('notif-shipped').checked=!!notifSettings.shipped;g('notif-completed').checked=!!notifSettings.completed;}}
+function loadNotifSettings(){notifSettings=(notifSettings&&typeof notifSettings==='object')?notifSettings:{shipped:true};const g=id=>document.getElementById(id);if(g('notif-depot')){g('notif-depot').checked=!!notifSettings.depot;g('notif-logistics').checked=!!notifSettings.logistics;g('notif-shipped').checked=!!notifSettings.shipped;g('notif-completed').checked=!!notifSettings.completed;}}
 function saveNotifSettings(){
   notifSettings={
     depot:document.getElementById('notif-depot').checked,
@@ -5667,17 +5639,20 @@ function saveNotifSettings(){
     shipped:document.getElementById('notif-shipped').checked,
     completed:document.getElementById('notif-completed').checked
   };
-  localStorage.setItem('jb_notif',JSON.stringify(notifSettings));
-  syncGenericKeyToCloud('jb_notif',notifSettings,{opId:createLocalMutationOpId('notif')}).catch(function(){});
+  writeLocalJson('jb_notif',notifSettings);
   toast('✅ Notification settings saved!','ok');
 }
 
 // ── USERS ──
 function renderUsers(){
+  const usersList=Array.isArray(users)?users:[];
+  if(!Array.isArray(users)) console.warn('[Users] users array missing or invalid', users);
   const list=document.getElementById('users-list');
   const pagerId='users-pagination';
   const pagerEl=document.getElementById(pagerId);
-  const pg=paginateCollection(users,_usersPage,LIST_PAGE_SIZE);
+  if(!list) return;
+  if(!usersList.length){list.innerHTML='<div style="padding:24px;text-align:center;color:var(--muted);">No users yet.</div>';if(pagerEl) pagerEl.innerHTML='';return;}
+  const pg=paginateCollection(usersList,_usersPage,LIST_PAGE_SIZE);
   _usersPage=pg.page;
   list.innerHTML=pg.items.map(u=>{const rc={Admin:'background:var(--accent-light);color:var(--accent);',Reseller:'background:var(--blue-bg);color:var(--blue);',Staff:'background:var(--green-bg);color:var(--green);'}[u.role]||'';return`<div class="card-row"><div style="width:32px;height:32px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:13px;flex-shrink:0;">${(u.dname||u.email)[0].toUpperCase()}</div><div style="flex:1;"><div style="font-size:13px;font-weight:600;">${esc(u.email)}${u.dname?` <span style="color:var(--muted);font-size:11px;">(${esc(u.dname)})</span>`:''}</div><div style="margin-top:3px;"><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;${rc}">${u.role}</span></div></div><div>${u.id==='u1'?'<span style="font-size:11px;color:var(--muted);">Super Admin</span>':`<button class="btn btn-danger btn-xs" onclick="removeUser('${u.id}')">Remove</button>`}</div></div>`;}).join('');
   if(pagerEl){
@@ -5686,8 +5661,8 @@ function renderUsers(){
 }
 function openUserModal(){document.getElementById('user-modal').classList.add('open');}
 function closeUserModal(){document.getElementById('user-modal').classList.remove('open');document.getElementById('u-em').value='';document.getElementById('u-pw').value='';document.getElementById('u-dname').value='';}
-function addUser(){const em=document.getElementById('u-em').value.trim(),pw=document.getElementById('u-pw').value,rl=document.getElementById('u-role').value,dn=document.getElementById('u-dname').value.trim();if(!em||!pw){toast('⚠️ Email and password required','err');return;}if(pw.length<6){toast('⚠️ Min 6 characters','err');return;}if(users.find(u=>u.email.toLowerCase()===em.toLowerCase())){toast('⚠️ Email exists','err');return;}users.push({id:'u'+Date.now(),email:em,password:pw,role:rl,dname:dn});saveUsers();closeUserModal();renderUsers();toast('✅ User added','ok');}
-function removeUser(id){if(!confirm('Remove?'))return;users=users.filter(u=>u.id!==id);saveUsers();renderUsers();}
+function addUser(){const em=document.getElementById('u-em').value.trim(),pw=document.getElementById('u-pw').value,rl=document.getElementById('u-role').value,dn=document.getElementById('u-dname').value.trim();if(!em||!pw){toast('⚠️ Email and password required','err');return;}if(pw.length<6){toast('⚠️ Min 6 characters','err');return;}if(users.find(u=>u.email.toLowerCase()===em.toLowerCase())){toast('⚠️ Email exists','err');return;}users.unshift({id:'u'+Date.now(),email:em,password:pw,role:rl,dname:dn});saveUsers();closeUserModal();_usersPage=1;renderUsers();toast('✅ User added','ok');}
+function removeUser(id){if(!confirm('Remove?'))return;users=users.filter(u=>u.id!==id);saveUsers();if(_usersPage>1&&(!Array.isArray(users)||users.length<=(_usersPage-1)*LIST_PAGE_SIZE)) _usersPage=1;renderUsers();}
 
 // ── ORDER MODAL ──
 function openOrderModal(){
@@ -5990,13 +5965,12 @@ function saveSettings(){
     else localStorage.removeItem('jb_cloud_key');
   }catch(_e){}
   renderCloudApiSummary();
-  localStorage.setItem('jb_settings',JSON.stringify(settings));
-  syncGenericKeyToCloud('jb_settings',settings,{opId:createLocalMutationOpId('settings')}).catch(function(){});
+  writeLocalJson('jb_settings',settings);
   _sessionTimeout=(settings.sessionTimeout)*60*1000;
   updateBadges();toast('✅ Saved!','ok');
 }
 function loadSettings(){
-  settings=JSON.parse(localStorage.getItem('jb_settings')||'{}');
+  settings=(settings&&typeof settings==='object')?settings:{};
   const g=id=>document.getElementById(id);
   if(g('cfg-alert-days')) g('cfg-alert-days').value=settings.alertDays||3;
   if(g('cfg-session-timeout')) g('cfg-session-timeout').value=settings.sessionTimeout||30;
@@ -6021,29 +5995,24 @@ function applyUsersRealtime(nextUsers){
 }
 function applySuppliersRealtime(nextSuppliers){
   suppliers=Array.isArray(nextSuppliers)?nextSuppliers:[];
-  try{localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));}catch(_e){}
   renderSuppliers();
   if(typeof renderSupPerf==='function') renderSupPerf();
 }
 function applyTemplatesRealtime(nextTemplates){
   templates=(nextTemplates&&typeof nextTemplates==='object')?nextTemplates:{};
-  try{localStorage.setItem('jb_templates',JSON.stringify(templates));}catch(_e){}
   loadTemplates();
 }
 function applyNotifRealtime(nextNotif){
   notifSettings=(nextNotif&&typeof nextNotif==='object')?nextNotif:{shipped:true};
-  try{localStorage.setItem('jb_notif',JSON.stringify(notifSettings));}catch(_e){}
   loadNotifSettings();
 }
 function applySettingsRealtime(nextSettings){
   settings=(nextSettings&&typeof nextSettings==='object')?nextSettings:{};
-  try{localStorage.setItem('jb_settings',JSON.stringify(settings));}catch(_e){}
   loadSettings();
   _sessionTimeout=(parseInt(settings.sessionTimeout)||30)*60*1000;
 }
 function applyActivityRealtime(nextActivity){
   activityLog=Array.isArray(nextActivity)?nextActivity:[];
-  try{localStorage.setItem('jb_activity',JSON.stringify(activityLog));}catch(_e){}
   if(document.getElementById('pg-activity')?.classList.contains('on')) renderActivityLog();
 }
 
@@ -6146,6 +6115,7 @@ function importBackup(input){
       // Persist locally first so restore is instant even if cloud/auth is degraded.
       const safeSet=function(key,val){
         try{
+          if(key==='jb_orders') return true;
           localStorage.setItem(key,JSON.stringify(val));
           return true;
         }catch(err){
@@ -6153,7 +6123,6 @@ function importBackup(input){
           return false;
         }
       };
-      safeSet('jb_orders',orders);
       safeSet('jb_users',users);
       safeSet('jb_suppliers',suppliers);
       safeSet('jb_catalog',catalog);
@@ -6192,12 +6161,11 @@ function importBackup(input){
 }
 
 // ── ACTIVITY LOG ──
-let activityLog = JSON.parse(localStorage.getItem('jb_activity') || '[]');
 function logActivity(type, msg, orderId=''){
   const entry={id:'a'+Date.now(),type,msg,orderId,user:me?.email||'system',ts:Date.now()};
   activityLog.unshift(entry);
   if(activityLog.length>500) activityLog=activityLog.slice(0,500);
-  localStorage.setItem('jb_activity',JSON.stringify(activityLog));
+  writeLocalJson('jb_activity',activityLog);
   writeAuditEvent('activity',entry).catch(()=>{});
 }
 function renderActivityLog(){
@@ -6208,20 +6176,18 @@ function renderActivityLog(){
   const icons={created:'✅',status:'🔄',tracking:'📦',edited:'✏️',deleted:'🗑️',order_request:'📤',issue:'⚠️',notification:'🔔'};
   el.innerHTML=list.map(a=>`<div class="card-row" style="cursor:${a.orderId?'pointer':'default'};" ${a.orderId?`onclick="navOrders('all',null);selectOrder('${a.orderId}')"`:''}><div style="width:28px;height:28px;border-radius:8px;background:var(--bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;">${icons[a.type]||'📌'}</div><div style="flex:1;"><div style="font-size:13px;">${a.msg}</div><div style="font-size:11px;color:var(--muted);">${a.user} · ${fmtDateTime(a.ts)}</div></div></div>`).join('');
 }
-function clearActivityLog(){if(!confirm('Clear all activity logs?'))return;activityLog=[];localStorage.setItem('jb_activity',JSON.stringify(activityLog));renderActivityLog();toast('🗑️ Log cleared','info');}
+function clearActivityLog(){if(!confirm('Clear all activity logs?'))return;activityLog=[];writeLocalJson('jb_activity',activityLog);renderActivityLog();toast('🗑️ Log cleared','info');}
 function fmtDateTime(ts){if(!ts)return'-';const d=new Date(ts);return`${fmtDate(ts)} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
 
 // ── PRODUCT CATALOG ──
-let catalog = JSON.parse(localStorage.getItem('jb_catalog') || '[]');
-let catalogCategories = JSON.parse(localStorage.getItem('jb_cat_categories') || '["Shoes","Bags","Accessories"]');
 let _activeCatalogCat = 'All';
 let roProdCount=0;
 let _catEditId=null, _catVariants=[], _catImg=null;
 let _catGallery=[];
 
-function saveCatalogCategories(){localStorage.setItem('jb_cat_categories',JSON.stringify(catalogCategories));}
+function saveCatalogCategories(){writeLocalJson('jb_cat_categories',catalogCategories);}
 
-function saveCatalog(){cloudSave('jb_catalog',JSON.stringify(catalog));}
+function saveCatalog(){writeLocalJson('jb_catalog',catalog);}
 
 function renderCatalogCatBar(){
   const bar=document.getElementById('catalog-cat-bar');
@@ -6749,11 +6715,10 @@ async function shareCatalog(){
       const res=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(res.ok){
         const {data}=await res.json();
-        if(data.jb_catalog&&data.jb_catalog.length){catalog=data.jb_catalog;localStorage.setItem('jb_catalog',JSON.stringify(catalog));}
+        if(data.jb_catalog&&data.jb_catalog.length){catalog=data.jb_catalog;}
         if(data.jb_cat_categories)catalogCategories=data.jb_cat_categories;
       }
     }catch(e){}
-    catalog=catalog||JSON.parse(localStorage.getItem('jb_catalog')||'[]');
     if(!catalog||!catalog.length){toast('Add products first!','err');return;}
     
     const api=await ensureWorkingApiBase({silent:true});
@@ -6781,7 +6746,7 @@ async function shareCatalog(){
             const idx = catalog.findIndex(x=>x.id===p.id);
             if(idx > -1){
               catalog[idx].img = imgUrl;
-              localStorage.setItem('jb_catalog',JSON.stringify(catalog));
+              writeLocalJson('jb_catalog',catalog);
             }
           }
         }catch(e){
@@ -6810,8 +6775,7 @@ async function shareCatalog(){
     saveCatalog();
     
     // Get messenger link
-    const freshSettings=JSON.parse(localStorage.getItem('jb_settings')||'{}');
-    const messengerLink=freshSettings.messengerLink||settings.messengerLink||'https://www.messenger.com';
+    const messengerLink=(settings&&settings.messengerLink)||'https://www.messenger.com';
     
     const cleanCategories=catalogCategories||[];
     // Build catalog HTML from template with embedded products
@@ -7647,7 +7611,7 @@ function previewImportOrder(data){
   const total=data.total||(data.products||[]).reduce((s,p)=>s+(p.price||0)*(p.qty||1),0);
   
   // Load catalog to match images
-  const savedCatalog = JSON.parse(localStorage.getItem('jb_catalog')||'[]');
+  const savedCatalog = Array.isArray(catalog)?catalog:[];
   
   el.innerHTML=`
     <div style="background:var(--green-bg);border:1px solid var(--green-border);border-radius:12px;padding:14px;">
@@ -8947,20 +8911,30 @@ function readLocalDataMap(){
   return out;
 }
 function readLocalOrders(){
-  try{
-    const raw=localStorage.getItem('jb_orders');
-    const arr=raw?JSON.parse(raw):[];
-    return Array.isArray(arr)?arr:[];
-  }catch(_e){
-    return [];
-  }
+  return Array.isArray(orders)?orders.slice():[];
 }
 function writeLocalJson(key,value){
   if(!key) return;
-  if(key==='jb_orders'){
-    persistOrdersLocalSafe(Array.isArray(value)?value:[]);
+  if(key==='jb_orders') return;
+
+  const SERVER_KEYS = ['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed','jb_catalog_orders_map'];
+
+  // For server-backed keys, attempt to persist to Worker (/api/data). Fall back to localStorage on any error.
+  if(SERVER_KEYS.includes(key)){
+    try{
+      // fire-and-forget async write to API; keep local fallback if network fails
+      ensureWorkingApiBase({silent:true}).then(api=>{
+        try{
+          const h = getAuthHeaders() || {};
+          fetch(api+"/api/data",{method:'POST',headers:Object.assign({'Content-Type':'application/json'},h),body:JSON.stringify({[key]:value})}).catch(()=>{
+            try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
+          });
+        }catch(_e){ try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){} }
+      }).catch(()=>{ try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){} });
+    }catch(_e){ try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){} }
     return;
   }
+
   try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
 }
 function cloudSave(key,value){
@@ -8975,6 +8949,7 @@ function cloudSave(key,value){
 
 async function bootstrapAuthoritativeOrders(){
   try{
+    purgeLegacyOrderStorage();
     showLoading('Syncing orders...');
     await syncBootstrapReplicaState().catch(()=>{});
     const api=await ensureWorkingApiBase({silent:true});
@@ -9338,15 +9313,8 @@ async function loadFromCloudSilent(){
       applyRemoteKeyToLocal(key,data[key],'load_silent');
     }
 
-    // Otoriter sipariş snapshot'u: bu yol mutlaka tam liste çekmeli.
-    // Incremental cursor burada stale/eksik görünüm üretip local state'i geri düşürebilir.
-    const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-    if(!ordRes.ok) return false;
-    const ordPayload=await ordRes.json();
-    const cloudOrders=Array.isArray(ordPayload&&ordPayload.orders)?ordPayload.orders:[];
-    if(ordPayload&&ordPayload.localOnly){
-      return false;
-    }
+    const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:20});
+    const cloudOrders=Array.isArray(orderSnapshot&&orderSnapshot.orders)?orderSnapshot.orders:[];
     const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load_silent',forceRemote:true});
     if(applied.applied&&applied.changed){
       render();
@@ -9354,17 +9322,9 @@ async function loadFromCloudSilent(){
     return !!applied.applied;
   }catch(e){
     const fallbackMetrics=getLocalSyncFallbackMetrics();
-    let storageOrdersCount=0;
-    try{
-      const localOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-      storageOrdersCount=Array.isArray(localOrders)?localOrders.length:0;
-    }catch(_e){
-      storageOrdersCount=0;
-    }
     console.warn('[OrderSync][silent_load_failed]',{
       error:String(e&&e.message||e||'unknown'),
       memoryOrdersCount:Array.isArray(orders)?orders.length:0,
-      storageOrdersCount,
       pendingMutations:getActiveLocalOrderMutationIds().length,
       pendingFallbackOps:Number(fallbackMetrics&&fallbackMetrics.ops)||0,
       pendingFallbackKeys:Number(fallbackMetrics&&fallbackMetrics.keys)||0,
@@ -9415,33 +9375,14 @@ async function loadFromCloud(){
           }
           applyRemoteKeyToLocal(k,data[k],'load_aux');
         });
-        // Load full authoritative order list. Incremental cursor is intentionally
-        // avoided here to prevent stale merges that can roll back recent edits.
-        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-        let cloudOrders=[];
-        if(ordRes.ok){
-          const od=await ordRes.json();
-          const isLocalOnly=!!(od&&od.localOnly);
-          cloudOrders=Array.isArray(od&&od.orders)?od.orders:[];
-          if(isLocalOnly){
-            // Never wipe local orders on local-only responses.
-            console.warn('[Remote] Skipping merge from localOnly orders payload');
-            return false;
-          }
-        } else {
-          // Deterministic behavior: never ingest jb_orders from /api/data fallback.
-          return false;
-        }
+        const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:20});
+        const cloudOrders=Array.isArray(orderSnapshot&&orderSnapshot.orders)?orderSnapshot.orders:[];
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load',forceRemote:true});
         if(!applied.applied){
           console.warn('[Remote] Authoritative replace skipped due to local mutation guard');
           return false;
         }
         // Reload variables from localStorage
-        suppliers=JSON.parse(localStorage.getItem('jb_suppliers')||'[]');
-        catalog=JSON.parse(localStorage.getItem('jb_catalog')||'[]');
-        templates=JSON.parse(localStorage.getItem('jb_templates')||'{}');
-        notifSettings=JSON.parse(localStorage.getItem('jb_notif')||'{"shipped":true}');
         loadSettings();loadTemplates();loadNotifSettings();
         updateBadges();render();
         debugLog(`[Remote] Loaded ${applied.count} orders`);
@@ -9933,10 +9874,45 @@ function mergeByEntityVersion(localArr,remoteArr,extractEntityId){
   return [...byId.values()];
 }
 function mergeFeedByVersion(localFeed,remoteFeed){
-  const merged=mergeByEntityVersion(localFeed,remoteFeed,function(item){
-    if(!item||!item.id) return '';
-    return String(item.id);
-  });
+  const local=Array.isArray(localFeed)?localFeed:[];
+  const remote=Array.isArray(remoteFeed)?remoteFeed:[];
+  
+  // Map by ID for deduplication (ID is the source of truth)
+  const byId=new Map();
+  
+  // Add local posts first
+  for(const item of local){
+    if(!item||!item.id) continue;
+    byId.set(String(item.id),item);
+  }
+  
+  // Merge with remote posts (keep newer versions)
+  for(const item of remote){
+    if(!item||!item.id) continue;
+    const id=String(item.id);
+    const existing=byId.get(id);
+    
+    if(!existing){
+      byId.set(id,item);
+      continue;
+    }
+    
+    // Compare versions: remote version takes precedence if newer
+    const itemV=Math.max(0,Number(item.v)||0);
+    const existingV=Math.max(0,Number(existing.v)||0);
+    const itemTs=Number(item.updatedAt||item.ts||0);
+    const existingTs=Number(existing.updatedAt||existing.ts||0);
+    
+    // Keep remote if it has higher version OR same version but newer timestamp
+    if(itemV>existingV || (itemV===existingV && itemTs>existingTs)){
+      byId.set(id,item);
+    }
+  }
+  
+  const merged=[...byId.values()];
+  console.log('[Feed Merge] Local:'+local.length+' + Remote:'+remote.length+' = Merged:'+merged.length);
+  
+  // Sort by timestamp (oldest first, will be reversed for display)
   return merged.sort((a,b)=>((a&&a.ts)||0)-((b&&b.ts)||0));
 }
 function mergeChatByVersion(localMsgs,remoteMsgs){
@@ -9969,8 +9945,14 @@ function readChatMessagesFromCache(chatKey){
   const key=String(chatKey||'').trim();
   if(!key) return [];
   try{
+    window._chatCache = window._chatCache || {};
+    if(Array.isArray(window._chatCache[key])){
+      return normalizeChatMessages(window._chatCache[key], key);
+    }
     const raw=localStorage.getItem(key);
     const list=raw?JSON.parse(raw):[];
+    // seed in-memory cache
+    window._chatCache[key]=Array.isArray(list)?list.slice():[];
     return normalizeChatMessages(Array.isArray(list)?list:[],key);
   }catch(_e){
     return [];
@@ -9980,7 +9962,10 @@ function writeChatMessagesToCache(chatKey,msgs){
   const key=String(chatKey||'').trim();
   if(!key) return;
   const normalized=normalizeChatMessages(Array.isArray(msgs)?msgs:[],key);
-  try{localStorage.setItem(key,JSON.stringify(normalized));}catch(_e){}
+  try{
+    window._chatCache = window._chatCache || {};
+    window._chatCache[key]=normalized.slice();
+  }catch(_e){}
 }
 function mergeChatMessagesWithCache(chatKey,remoteMsgs,seedLocal){
   const key=String(chatKey||'').trim();
@@ -11636,9 +11621,13 @@ function parseLocalJson(key,fallback){
     return fallback;
   }
 }
+const LEGACY_ORDER_STORAGE_KEY='jb_orders';
+function purgeLegacyOrderStorage(){
+  try{localStorage.removeItem(LEGACY_ORDER_STORAGE_KEY);}catch(_e){}
+}
 function writeLocalJson(key,value){
-  if(String(key||'')==='jb_orders'){
-    persistOrdersLocalSafe(Array.isArray(value)?value:[]);
+  if(String(key||'')===LEGACY_ORDER_STORAGE_KEY){
+    purgeLegacyOrderStorage();
     return;
   }
   try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
@@ -11647,6 +11636,10 @@ function readLocalDataMap(){
   const out={};
   try{
     for(const key of Object.keys(localStorage)){
+      if(key===LEGACY_ORDER_STORAGE_KEY){
+        purgeLegacyOrderStorage();
+        continue;
+      }
       if(!key.startsWith('jb_')) continue;
       out[key]=parseLocalJson(key,null);
     }
@@ -11654,8 +11647,7 @@ function readLocalDataMap(){
   return out;
 }
 function readLocalOrders(){
-  const list=parseLocalJson('jb_orders',[]);
-  return Array.isArray(list)?list:[];
+  return Array.isArray(orders)?orders.slice():[];
 }
 function upsertLocalOrder(order){
   if(!order||!order.id) return;
@@ -11663,11 +11655,10 @@ function upsertLocalOrder(order){
   const idx=list.findIndex(o=>o&&o.id===order.id);
   if(idx>=0) list[idx]=order;
   else list.push(order);
-  writeLocalJson('jb_orders',list);
+  orders=list;
 }
 function deleteLocalOrder(orderId){
-  const list=readLocalOrders().filter(o=>o&&o.id!==orderId);
-  writeLocalJson('jb_orders',list);
+  orders=readLocalOrders().filter(o=>o&&o.id!==orderId);
 }
 function saveLocalMedia(data,type){
   const id='lm'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
@@ -11768,7 +11759,6 @@ async function handleFirebaseApiRequest(url,method,body){
         const remoteOrders=await readFirebaseOrders();
         if(Array.isArray(remoteOrders)){
           merged.jb_orders=remoteOrders;
-          writeLocalJson('jb_orders',remoteOrders);
         }
         return jsonApiResponse({data:merged});
       }catch(err){
@@ -11780,7 +11770,6 @@ async function handleFirebaseApiRequest(url,method,body){
   if(path==='/api/data'&&m==='POST'){
     const map={...(req||{})};
     Object.entries(map).forEach(([k,v])=>writeLocalJson(k,v));
-    if(Array.isArray(map.jb_orders)) writeLocalJson('jb_orders',map.jb_orders);
     if(!firebaseOnline) return jsonApiResponse({ok:true,saved:Object.keys(map).length,localOnly:true});
     try{
       if(Array.isArray(map.jb_orders)){
@@ -11893,7 +11882,6 @@ async function handleFirebaseApiRequest(url,method,body){
               return (sinceV>0 && ov>sinceV) || (sinceTs>0 && ots>sinceTs);
             })
           : allOrders;
-        writeLocalJson('jb_orders',remoteOrders);
         return jsonApiResponse({
           orders:remoteOrders,
           incremental:!!(sinceTs>0||sinceV>0),
@@ -12359,28 +12347,36 @@ if('serviceWorker' in navigator){
     setTimeout(()=>login(),500);
   }
 
-    navigator.serviceWorker.register('./sw.js').then(reg=>{
-      // Check for updates immediately and every 60 seconds
-      reg.update();
-      setInterval(()=>reg.update(), 60000);
-      // When new SW is waiting, activate it immediately
-      reg.addEventListener('updatefound',()=>{
-        const newSW=reg.installing;
-        newSW.addEventListener('statechange',()=>{
-          if(newSW.state==='installed'&&navigator.serviceWorker.controller){
-            newSW.postMessage('skipWaiting');
-          }
+    const isLocalSmokeHost=location.hostname==='127.0.0.1'&&String(location.port||'')==='8000';
+    if(isLocalSmokeHost && navigator.serviceWorker && navigator.serviceWorker.getRegistrations){
+      navigator.serviceWorker.getRegistrations().then(regs=>{
+        regs.forEach(reg=>reg.unregister().catch(()=>{}));
+      }).catch(()=>{});
+    }
+    if(!isLocalSmokeHost){
+      navigator.serviceWorker.register('./sw.js').then(reg=>{
+        // Check for updates immediately and every 60 seconds
+        reg.update();
+        setInterval(()=>reg.update(), 60000);
+        // When new SW is waiting, activate it immediately
+        reg.addEventListener('updatefound',()=>{
+          const newSW=reg.installing;
+          newSW.addEventListener('statechange',()=>{
+            if(newSW.state==='installed'&&navigator.serviceWorker.controller){
+              newSW.postMessage('skipWaiting');
+            }
+          });
         });
+      }).catch(()=>{});
+      // Avoid force-reload while a logged-in user is actively using the app.
+      navigator.serviceWorker.addEventListener('controllerchange',()=>{
+        if(typeof me!=='undefined' && me){
+          toast('🔄 Update ready. It will apply next reopen.','info');
+          return;
+        }
+        window.location.reload();
       });
-    }).catch(()=>{});
-    // Avoid force-reload while a logged-in user is actively using the app.
-    navigator.serviceWorker.addEventListener('controllerchange',()=>{
-      if(me){
-        toast('🔄 Update ready. It will apply next reopen.','info');
-        return;
-      }
-      window.location.reload();
-    });
+    }
   });
 }
 // iOS install hint
@@ -14458,10 +14454,12 @@ function formatVideoDuration(seconds){
 
 function getFeedPostsFromCache(){
   try{
-    const raw=localStorage.getItem('jb_feed');
-    const arr=raw?JSON.parse(raw):[];
-    if(!Array.isArray(arr)) return [];
-    return arr.map(function(post){return normalizeFeedPost(post,post);});
+    // Prefer in-memory cache; server-first paths hydrate this from /api/data.
+    const inMemory=window._feedCache||null;
+    if(Array.isArray(inMemory)){
+      return inMemory.map(function(post){return normalizeFeedPost(post,post);});
+    }
+    return [];
   }catch(_e){
     return [];
   }
@@ -14483,6 +14481,7 @@ function renderResFeed(searchQuery=''){
   
   // Realtime-first: render from local cache updated by Firestore snapshot.
   let posts=getFeedPostsFromCache();
+  console.log('[Render RessFeed] Retrieved '+posts.length+' posts from cache');
       
       // Filter by search query
       if(searchQuery && searchQuery.trim()){
@@ -14492,14 +14491,23 @@ function renderResFeed(searchQuery=''){
           (p.tag||'').toLowerCase().includes(q) ||
           (p.price||'').toString().includes(q)
         );
+        console.log('[Render ResFeed] After search filter: '+posts.length+' posts');
       }
       
       if(!posts.length){
         feedEl.innerHTML='<div style="text-align:center;padding:60px 20px;color:var(--muted);"><div style="font-size:48px;margin-bottom:16px;">'+(searchQuery?'🔍':'📰')+'</div><div style="font-size:15px;font-weight:600;">'+(searchQuery?'No posts found':'No posts yet')+'</div><div style="font-size:13px;margin-top:8px;">'+(searchQuery?'Try a different search':'Admin will share new products here!')+'</div></div>';
+        console.log('[Render ResFeed] No posts to display');
         return;
       }
       const myLikes=JSON.parse(localStorage.getItem('jb_likes_'+me.id)||'{}');
-      feedEl.innerHTML='<div style="padding:0 12px;">'+posts.slice().reverse().map((post,index)=>{
+      const postsReversed=posts.slice().reverse();
+      console.log('[Render ResFeed] Rendering '+postsReversed.length+' posts in reverse order');
+      
+      feedEl.innerHTML='<div style="padding:0 12px;">'+postsReversed.map((post,index)=>{
+        if(!post||!post.id){
+          console.warn('[Render ResFeed] Invalid post at index '+index+':', post);
+          return '';
+        }
         const liked=myLikes[post.id];
         const tagClass={'NEW':'feed-tag-new','HOT':'feed-tag-hot','SALE':'feed-tag-sale','INFO':'feed-tag-info'}[post.tag]||'feed-tag-info';
         const tagEmoji={'NEW':'🆕','HOT':'🔥','SALE':'💰','INFO':'📢'}[post.tag]||'';
@@ -14535,6 +14543,7 @@ function renderResFeed(searchQuery=''){
           </div>
         </div>`;
       }).join('')+'</div>';
+      console.log('[Render ResFeed] Completed rendering');
 }
 
 // Filter Reseller Feed
@@ -15119,8 +15128,11 @@ async function createFeedPost(){
   const imgUrls=allImgs.map(function(imgItem){return imgItem&&imgItem.data?imgItem.data:null;}).filter(Boolean);
   const videoUrl=_feedVideoData||null;
   
+  // Generate unique post ID with random suffix to avoid collisions
+  const postId='post_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
+  
   const post={
-    id:'post_'+Date.now(),
+    id:postId,
     text,
     imgs:imgUrls,           // çoklu görseller
     img:imgUrls[0]||null,   // geriye dönük uyumluluk
@@ -15129,6 +15141,8 @@ async function createFeedPost(){
     price:document.getElementById('feed-post-price').value.trim()||null,
     tag:document.getElementById('feed-post-tag').value||null,
     ts:Date.now(),
+    v:1,
+    updatedAt:Date.now(),
     likes:0,
     by:'admin'
   };
@@ -15136,26 +15150,43 @@ async function createFeedPost(){
   try{
     // Local-first optimistic update to prevent UI rollback feel.
     let posts=getFeedPostsFromCache();
+    console.log('[Feed Debug] Current posts count:', posts.length);
+    
     try{
       const api=await ensureWorkingApiBase({silent:true});
       const feedRes=await fetch(api+'/api/data',{headers:getAuthHeaders()});
       if(feedRes.ok){
         const payload=await feedRes.json();
         const remoteFeed=Array.isArray(payload&&payload.data&&payload.data.jb_feed)?payload.data.jb_feed:[];
+        console.log('[Feed Debug] Remote feed count:', remoteFeed.length);
         posts=mergeFeedByVersion(posts,remoteFeed).map(function(item){return normalizeFeedPost(item,item);});
+        console.log('[Feed Debug] Merged posts count:', posts.length);
       }
-    }catch(_e){}
+    }catch(_e){
+      console.warn('[Feed] Remote fetch failed:', _e&&_e.message?_e.message:_e);
+    }
+    
     posts.push(post);
+    console.log('[Feed Debug] After adding new post, total count:', posts.length);
+    console.log('[Feed Debug] New post ID:', postId);
+    
     setFeedCache(posts,Date.now());
+    
+    // Verify cache was saved
+    const verifyCache=getFeedPostsFromCache();
+    console.log('[Feed Debug] Verified cache count:', verifyCache.length);
+    
     if(me&&me.role==='Reseller') renderResFeed();
     renderAdminFeed();
+    
     // Save back async (localOnly responses are queued by syncToCloud)
     syncGenericKeyToCloud('jb_feed',posts,{opId:createLocalMutationOpId('feedcreate')})
       .catch(function(err){ console.warn('[feed create sync]',err&&err.message?err.message:err); persistLocalSyncFallback('jb_feed',posts); });
+    
     // Convert media to remote URLs in background; user does not wait.
-    upgradeFeedPostMediaAsync(post.id).catch(function(_e){});
+    upgradeFeedPostMediaAsync(postId).catch(function(_e){});
 
-    toast('✅ Post published!','ok');
+    toast('✅ Post published! (ID: '+postId+')','ok');
     document.getElementById('feed-post-text').value='';
     document.getElementById('feed-post-price').value='';
     document.getElementById('feed-post-tag').value='';
@@ -15170,6 +15201,7 @@ async function renderAdminFeed(searchQuery=''){
   if(!el)return;
 
   let posts=getFeedPostsFromCache().slice().reverse();
+  console.log('[Render AdminFeed] Retrieved '+posts.length+' posts from cache');
     
     // Filter by search query
     if(searchQuery && searchQuery.trim()){
@@ -15179,11 +15211,15 @@ async function renderAdminFeed(searchQuery=''){
         (p.tag||'').toLowerCase().includes(q) ||
         (p.price||'').toString().includes(q)
       );
+      console.log('[Render AdminFeed] After search filter: '+posts.length+' posts');
     }
     
-    if(!posts.length){el.innerHTML='<div style="text-align:center;padding:60px 20px;color:var(--muted);"><div style="font-size:48px;margin-bottom:16px;">'+(searchQuery?'🔍':'📝')+'</div><div style="font-size:15px;font-weight:600;">'+(searchQuery?'No posts found':'No posts yet')+'</div><div style="font-size:13px;margin-top:8px;">'+(searchQuery?'Try a different search':'Create your first post above!')+'</div></div>';return;}
+    if(!posts.length){el.innerHTML='<div style="text-align:center;padding:60px 20px;color:var(--muted);"><div style="font-size:48px;margin-bottom:16px;">'+(searchQuery?'🔍':'📝')+'</div><div style="font-size:15px;font-weight:600;">'+(searchQuery?'No posts found':'No posts yet')+'</div><div style="font-size:13px;margin-top:8px;">'+(searchQuery?'Try a different search':'Create your first post above!')+'</div></div>';console.log('[Render AdminFeed] No posts to display');return;}
     
-    el.innerHTML=posts.map((p,index)=>`
+    console.log('[Render AdminFeed] Rendering '+posts.length+' posts');
+    el.innerHTML=posts.map((p,index)=>{
+      if(!p||!p.id){console.warn('[Render AdminFeed] Invalid post at index '+index+':', p);return '';}
+      return `
       <div class="feed-post" style="animation-delay:${index*0.08}s;">
         <div style="padding:14px 16px;display:flex;align-items:center;gap:10px;">
           <div class="feed-avatar" style="width:36px;height:36px;font-size:14px;">J</div>
@@ -15202,7 +15238,9 @@ async function renderAdminFeed(searchQuery=''){
           </span>
           ${p.price?`<span style="font-weight:700;color:#f97316;">£${p.price}</span>`:''}
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
+    console.log('[Render AdminFeed] Completed rendering');
 }
 
 // Filter Admin Feed
@@ -15369,7 +15407,7 @@ async function sendChatImage(input){
           const found=msgs.find(m=>m&&m.id===msg.id);
           if(!found) return;
           found.text='[img]'+uploaded;
-          try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+          writeChatMessagesToCache(chatKey,msgs);
           renderMessages();
           syncChatThreadToCloud(chatKey,msgs,{
             opId:createLocalMutationOpId('chatimgup')
@@ -15588,7 +15626,7 @@ async function sendVoiceMessage(audioBlob, from){
           const chatKey='jb_chat_'+_chatReseller;
           if(!_messages[_chatReseller]) _messages[_chatReseller] = [];
           _messages[_chatReseller].push(msg);
-          try{localStorage.setItem(chatKey,JSON.stringify(_messages[_chatReseller]));}catch(_e){}
+          writeChatMessagesToCache(chatKey,_messages[_chatReseller]||[]);
           renderMessages();
           const syncOk=await syncChatThreadToCloud(chatKey,_messages[_chatReseller],{
             opId:createLocalMutationOpId('voiceadmin')
@@ -15596,10 +15634,9 @@ async function sendVoiceMessage(audioBlob, from){
           if(!syncOk) throw new Error('voice chat sync failed');
         } else {
           const chatKey='jb_chat_'+me.id;
-          let msgs=[];
-          try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
+          let msgs = readChatMessagesFromCache(chatKey);
           msgs.push(msg);
-          try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+          writeChatMessagesToCache(chatKey,msgs);
           const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
             opId:createLocalMutationOpId('voiceres')
           });
@@ -15630,10 +15667,9 @@ async function sendResChatImage(input){
       const compressed=await compressImage(e.target.result,1280,0.88);
       const msg={id:'m'+Date.now(),from:me.id,to:'admin',text:'[img]'+compressed,ts:Date.now()};
       const chatKey='jb_chat_'+me.id;
-      let msgs=[];
-      try{msgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){msgs=[];}
+      let msgs = readChatMessagesFromCache(chatKey);
       msgs.push(msg);
-      try{localStorage.setItem(chatKey,JSON.stringify(msgs));}catch(_e){}
+      writeChatMessagesToCache(chatKey,msgs);
       renderResellerMessages(msgs);
       syncChatThreadToCloud(chatKey,msgs,{
         opId:createLocalMutationOpId('reschatimg')
@@ -15644,12 +15680,11 @@ async function sendResChatImage(input){
         try{
           const uploaded=await uploadImageSmart(compressed,'image/jpeg',{allowDataFallback:true,timeoutMs:1200});
           if(!uploaded || uploaded===compressed) return;
-          let live=[];
-          try{live=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){live=[];}
+          let live = readChatMessagesFromCache(chatKey);
           const found=live.find(m=>m&&m.id===msg.id);
           if(!found) return;
           found.text='[img]'+uploaded;
-          try{localStorage.setItem(chatKey,JSON.stringify(live));}catch(_e){}
+          writeChatMessagesToCache(chatKey,live);
           renderResellerMessages(live);
           syncChatThreadToCloud(chatKey,live,{
             opId:createLocalMutationOpId('reschatimgup')
@@ -15658,8 +15693,7 @@ async function sendResChatImage(input){
       },0);
     }catch(err){
       const chatKey='jb_chat_'+me.id;
-      let fallbackMsgs=[];
-      try{fallbackMsgs=JSON.parse(localStorage.getItem(chatKey)||'[]');}catch(_e){fallbackMsgs=[];}
+      const fallbackMsgs = readChatMessagesFromCache(chatKey);
       persistLocalSyncFallback(chatKey,fallbackMsgs);
       toast('Failed to send image: '+err.message,'err');
     }
@@ -16848,12 +16882,7 @@ function orderCompareSnapshot(order){
 }
 async function saveOrders(changedOrderIds,opts={}){
   const nowTs=Date.now();
-  let previousOrders=[];
-  try{
-    previousOrders=JSON.parse(localStorage.getItem('jb_orders')||'[]');
-  }catch(_e){
-    previousOrders=[];
-  }
+  const previousOrders=Array.isArray(orders)?orders.slice():[];
   const prevById=new Map((Array.isArray(previousOrders)?previousOrders:[]).filter(o=>o&&o.id).map(o=>[o.id,o]));
   const currentIds=new Set((orders||[]).filter(o=>o&&o.id).map(o=>o.id));
   // Never infer deletes from memory-vs-storage mismatch by default.
@@ -16910,10 +16939,6 @@ async function saveOrders(changedOrderIds,opts={}){
         v:nextV
       };
     }).filter(o=>o&&o.id&&!isOrderDeleted(o));
-    const persistedBeforeSync=persistOrdersLocalSafe(orders);
-    if(!persistedBeforeSync){
-      console.warn('[saveOrders] local persist failed before sync', {count:Array.isArray(orders)?orders.length:0});
-    }
 
     await syncBootstrapReplicaState().catch(()=>{});
     let queuedFallback=false;
@@ -17005,7 +17030,6 @@ async function saveOrders(changedOrderIds,opts={}){
       orders=[...nextMap.values()]
         .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
         .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
-      persistOrdersLocalSafe(orders);
       updateBadges();
       render();
       const firstReason=String(strictFailureReasons[0]||'cloud_commit_failed');
@@ -17021,10 +17045,6 @@ async function saveOrders(changedOrderIds,opts={}){
     if(queuedFallback){
       console.warn('[saveOrders] queued order events for retry');
     }
-    const persistedAfterSync=persistOrdersLocalSafe(orders);
-    if(!persistedAfterSync){
-      console.warn('[saveOrders] local persist failed after sync', {count:Array.isArray(orders)?orders.length:0});
-    }
     markSync('orders_save');
     writeAuditEvent('orders_save',{count:targetOrders.length,deleted:deletedOrderIds.length,actor:me&&me.email?me.email:'system',queuedFallback}).catch(()=>{});
     return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:!!queuedFallback};
@@ -17034,12 +17054,10 @@ async function saveOrders(changedOrderIds,opts={}){
   }
 }
 function saveUsers(){
-  localStorage.setItem('jb_users',JSON.stringify(users));
-  syncGenericKeyToCloud('jb_users',users,{opId:createLocalMutationOpId('users')}).catch(function(){});
+  writeLocalJson('jb_users',users);
 }
 function saveSuppliers(){
-  localStorage.setItem('jb_suppliers',JSON.stringify(suppliers));
-  syncGenericKeyToCloud('jb_suppliers',suppliers,{opId:createLocalMutationOpId('suppliers')}).catch(function(){});
+  writeLocalJson('jb_suppliers',suppliers);
 }
 function fmtDate(ts){if(!ts)return'-';const d=new Date(ts);return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
 function shouldSuppressSyncToastForReseller(msg){
