@@ -597,10 +597,7 @@ body.dark .modal-foot{background:#263548;}
 
 <div id="login-screen">
   <div class="login-card">
-    <div id="login-install-hint" style="display:none;background:rgba(249,115,22,.1);border:1px solid rgba(249,115,22,.2);border-radius:10px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:rgba(255,255,255,.7);text-align:center;">
-  📱 iOS: <strong style="color:var(--accent);">Share → Add to Home Screen</strong>
-</div>
-<button id="login-install-btn" onclick="installPWA()" style="display:block;width:100%;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font);margin-bottom:12px;">📱 Add to Home Screen</button>
+    <button id="login-install-btn" onclick="installPWA()" style="display:none;width:100%;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font);margin-bottom:12px;">📱 Add to Home Screen</button>
 <div class="login-brand"><div class="ico">🛍️</div><div><h1>JRSHOP</h1><p>Order Management System</p></div></div>
     <div class="login-err" id="login-err">Incorrect email or password.</div>
     <div class="lf"><label>Email</label><input type="email" id="l-em" onkeydown="if(event.key==='Enter')login()"></div>
@@ -3413,21 +3410,18 @@ async function navOrders(status,el){
     if(tb)tb.innerHTML='<tr><td colspan="8"><div class="cell" style="justify-content:center;padding:40px;color:var(--muted);">🔄 Loading...</div></td></tr>';
     (async()=>{
       try{
-        const api=await ensureWorkingApiBase({silent:true});
-        const headers=getAuthHeaders();
-        const ordRes=await fetch(api+'/api/orders',{headers});
-        if(ordRes.ok){
-          const od=await ordRes.json();
-          if(Array.isArray(od.orders) && !(od&&od.localOnly)){
-            const applied=applyAuthoritativeOrdersSnapshot(od.orders,{source:'pending_nav',forceRemote:true});
-            if(applied.applied){
-              updateBadges();
-            }else{
-              console.warn('[Pending] Authoritative replace skipped due to local mutation guard');
-            }
+        // Use paginated fetcher to avoid applying single-page (200) snapshot
+        const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:50}).catch(()=>({orders:[]}));
+        const cloudOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
+        if(cloudOrders.length){
+          const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'pending_nav',forceRemote:true});
+          if(applied.applied){
+            updateBadges();
+          }else{
+            console.warn('[Pending] Authoritative replace skipped due to local mutation guard');
           }
         }else{
-          console.warn('[Pending] Failed to load /api/orders, keeping local snapshot');
+          console.warn('[Pending] Failed to load full order snapshot, keeping local');
         }
       }catch(e){}
       renderPendingInTable();
@@ -6195,80 +6189,7 @@ function logActivity(type, msg, orderId=''){
 }
 
 // ── PWA Install Prompt Handler ──
-(function(){
-  let deferredPrompt = null;
-  let gestureListenerAttached = false;
 
-  function makeInstallButton(){
-    if(document.getElementById('install-btn')) return document.getElementById('install-btn');
-    const btn = document.createElement('button');
-    btn.id = 'install-btn';
-    btn.className = 'btn btn-primary';
-    btn.style.position = 'fixed';
-    btn.style.right = '16px';
-    btn.style.bottom = '16px';
-    btn.style.zIndex = 20000;
-    btn.textContent = 'Install App';
-    btn.addEventListener('click', async function(){
-      if(!deferredPrompt) return;
-      try{
-        deferredPrompt.prompt();
-        const choice = await deferredPrompt.userChoice;
-        deferredPrompt = null;
-        btn.remove();
-        toast(choice.outcome==='accepted'? '✅ App installed' : 'ℹ️ Install dismissed','ok');
-      }catch(_e){
-        deferredPrompt = null;
-        btn.remove();
-      }
-    });
-    document.body.appendChild(btn);
-    return btn;
-  }
-
-  function onFirstUserGesture(e){
-    if(!deferredPrompt) return;
-    if(localStorage.getItem('jb_pwa_prompt_shown')==='1' || localStorage.getItem('pwa-installed')==='1'){
-      cleanupGestureListeners();
-      return;
-    }
-    try{
-      deferredPrompt.prompt();
-      try{ localStorage.setItem('jb_pwa_prompt_shown','1'); }catch(_e){}
-      // prompt must be during a user gesture; remove listeners now
-    }catch(_e){ }
-    cleanupGestureListeners();
-  }
-
-  function attachGestureListeners(){
-    if(gestureListenerAttached) return;
-    ['click','touchstart','keydown'].forEach(ev=>window.addEventListener(ev,onFirstUserGesture,{once:true,capture:true}));
-    gestureListenerAttached = true;
-  }
-
-  function cleanupGestureListeners(){
-    gestureListenerAttached = false;
-    try{ window.removeEventListener('click', onFirstUserGesture, true); }catch(_){}
-    try{ window.removeEventListener('touchstart', onFirstUserGesture, true); }catch(_){}
-    try{ window.removeEventListener('keydown', onFirstUserGesture, true); }catch(_){}
-  }
-
-  window.addEventListener('beforeinstallprompt', (e) => {
-    if(localStorage.getItem('jb_pwa_prompt_shown')==='1' || localStorage.getItem('pwa-installed')==='1') return;
-    try{ e.preventDefault(); }catch(_e){}
-    deferredPrompt = e;
-    // show a visible install button and prepare to auto-prompt on first gesture
-    makeInstallButton();
-    attachGestureListeners();
-  });
-
-  window.addEventListener('appinstalled', ()=>{
-    deferredPrompt = null;
-    const b=document.getElementById('install-btn'); if(b) b.remove();
-    cleanupGestureListeners();
-    toast('✅ App installed','ok');
-  });
-})();
 function renderActivityLog(){
   const filter=document.getElementById('activity-filter-type')?.value||'';
   const list=filter?activityLog.filter(a=>a.type===filter):activityLog;
@@ -8515,14 +8436,10 @@ async function maybeSelfHealOrderDrift(opts={}){
   _orderDriftHealInFlight=(async function(){
     try{
       const beforeCount=Array.isArray(orders)?orders.length:0;
-      const api=await ensureWorkingApiBase({silent:true});
-      const res=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-      if(!res.ok) return false;
-      const payload=await res.json().catch(()=>({}));
-      if(payload&&payload.localOnly) return false;
-      const remoteOrders=Array.isArray(payload&&payload.orders)?payload.orders:[];
-      const nextCursor=String(payload&&payload.nextCursor||'').trim();
-      if(nextCursor) setReplicaCursor(chooseNewerCursor(nextCursor,getReplicaCursor()));
+      // Use paginated fetcher to avoid single-page (200 item) snapshot
+      const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:200,maxPages:50}).catch(()=>({orders:[],fetchedPages:0}));
+      const remoteOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
+      if(!remoteOrders.length) return false;
       const hasDrift=hasOrderSnapshotDrift(orders,remoteOrders);
       if(hasDrift){
         _health.orderDriftDetections=Number(_health.orderDriftDetections||0)+1;
