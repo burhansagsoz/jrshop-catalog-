@@ -1992,6 +1992,10 @@ export default {
         return json({ ok: true, user });
       }
       if (path === '/api/data' && method === 'GET') return await getData(db, url);
+      if (path === '/api/data-version' && method === 'GET') {
+        const version = await getDbVersion(db);
+        return json({ ok: true, version, ts: Date.now() });
+      }
       if (path === '/api/data' && method === 'POST') {
         const body = await request.json();
         const keys = Object.keys(body);
@@ -1999,11 +2003,14 @@ export default {
           if(key === 'jb_orders') continue; // orders ayrı endpoint'te
           await syncKey(db, key, body[key]);
         }
+        await bumpDbVersion(db);
         return json({ ok: true, saved: keys.length });
       }
       if (path === '/api/sync' && method === 'POST') {
         const { key, value, event } = await request.json();
-        return await syncKey(db, key, value, event);
+        const res = await syncKey(db, key, value, event);
+        await bumpDbVersion(db);
+        return res;
       }
       if (path === '/api/bootstrap' && method === 'GET') {
         return json(await getSyncBootstrapPayload(db, authContext, env));
@@ -2228,24 +2235,32 @@ export default {
       }
       if (path === '/api/order' && method === 'POST') {
         const payload = await request.json();
-        return await saveOrder(db, payload, authContext);
+        const res = await saveOrder(db, payload, authContext);
+        await bumpDbVersion(db);
+        return res;
       }
       if (path === '/api/order-event' && method === 'POST') {
         const event = await request.json();
-        return await saveOrderEvent(db, event, authContext);
+        const res = await saveOrderEvent(db, event, authContext);
+        await bumpDbVersion(db);
+        return res;
       }
       if (path.startsWith('/api/order/') && method === 'DELETE') {
         const id = decodeURIComponent(path.split('/').pop() || '').trim();
         if (!id) return json({ error: 'id missing' }, 400);
         let req = {};
         try { req = await request.json(); } catch { req = {}; }
-        return await saveOrderDelete(db, id, req, authContext);
+        const res = await saveOrderDelete(db, id, req, authContext);
+        await bumpDbVersion(db);
+        return res;
       }
 
       // Images
       if (path === '/api/image' && method === 'POST') {
         const { data, type, id } = await request.json();
-        return await saveImage(db, data, type || 'image/jpeg', id);
+        const res = await saveImage(db, data, type || 'image/jpeg', id);
+        await bumpDbVersion(db);
+        return res;
       }
 
       // Catalog
@@ -2253,11 +2268,14 @@ export default {
         const { html } = await request.json();
         await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
           .bind('catalog_html', JSON.stringify(html)).run();
+        await bumpDbVersion(db);
         return json({ ok: true });
       }
       if (path === '/api/catalog-order' && method === 'POST') {
         const order = await request.json();
-        return await saveCatalogOrder(db, order);
+        const res = await saveCatalogOrder(db, order);
+        await bumpDbVersion(db);
+        return res;
       }
       if (path.startsWith('/api/catalog-order/') && method === 'GET') {
         const code = decodeURIComponent(path.replace('/api/catalog-order/', ''));
@@ -2691,6 +2709,25 @@ async function syncKey(db, key, value, event = null) {
       .bind(metaKey, JSON.stringify({ ...eventMeta, updatedAt: Date.now() })).run();
   }
   return json({ ok: true, key: normalizedKey });
+}
+
+async function bumpDbVersion(db) {
+  try {
+    await db.prepare("INSERT INTO kv_store (key, value) VALUES ('_db_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .bind(String(Date.now())).run();
+  } catch (_e) {}
+}
+
+async function getDbVersion(db) {
+  try {
+    const row = await db.prepare("SELECT value FROM kv_store WHERE key='_db_version'").first();
+    const kvVersion = row ? row.value : '0';
+    const orderRow = await db.prepare("SELECT MAX(ts) as max_ts FROM orders").first();
+    const orderVersion = orderRow && orderRow.max_ts ? String(orderRow.max_ts) : '0';
+    return kvVersion + ':' + orderVersion;
+  } catch (_e) {
+    return '0:0';
+  }
 }
 
 async function readOrderFromTable(db, id) {

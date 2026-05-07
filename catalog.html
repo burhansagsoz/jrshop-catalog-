@@ -315,7 +315,23 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
     }
   }
 
+  let _lastDbVersion=null;
+  async function hasDbChanged(){
+    try{
+      const res=await fetchWithTimeout('/api/data-version',4000,{cache:'no-store'});
+      if(!res.ok) return true;
+      const {version}=await res.json();
+      if(_lastDbVersion===version) return false;
+      _lastDbVersion=version;
+      return true;
+    }catch(e){ return true; }
+  }
+
   async function loadRemoteData(){
+    // Skip heavy load if version hasn't changed
+    const changed = await hasDbChanged();
+    if(!changed) return {catalog:[],settings:{}}; // Return empty but indicate no change needed in caller
+
     const res=await fetchWithTimeout('/api/data',7000,{cache:'no-store',headers:{'Cache-Control':'no-cache'}});
     if(!res.ok) throw new Error('HTTP '+res.status);
     const payload=await res.json();

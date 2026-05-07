@@ -2953,6 +2953,13 @@ async function syncDataForActivePage(reason){
   const now=Date.now();
   if(reason!=='force' && (now-_pageDataLastSyncAt)<PAGE_DATA_SYNC_COOLDOWN_MS) return;
   if(_pageDataSyncInFlight) return;
+
+  // Optimize: skip heavy sync if D1 hasn't changed since last check.
+  if(reason!=='force'){
+    if(_remoteDbVersion && _pageSyncLastVersion === _remoteDbVersion) return;
+    _pageSyncLastVersion = _remoteDbVersion;
+  }
+
   _pageDataSyncInFlight=true;
   try{
     if(ORDER_HEAVY_PAGES.has(pageId)){
@@ -12927,6 +12934,11 @@ async function startPendingPoll(){
     if(!me)return;
     const activePage=getCurrentPageId();
     if(me.role!=='Reseller' && !ORDER_HEAVY_PAGES.has(activePage)) return;
+
+    // Optimization: Skip heavy fetch if DB hasn't changed.
+    if(_remoteDbVersion && _pendingPollLastVersion === _remoteDbVersion) return;
+    _pendingPollLastVersion = _remoteDbVersion;
+
     try{
       const api=await ensureWorkingApiBase({silent:true});
       // Try dedicated orders endpoint first
@@ -13131,6 +13143,9 @@ function startGlobalChatPoll(){
 
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
+  // Skip if nothing changed in D1
+  if(_remoteDbVersion && _chatPollLastVersion === _remoteDbVersion) return;
+  _chatPollLastVersion = _remoteDbVersion;
   try{
     // Check each reseller's chat key
     const resellers=users.filter(u=>u.role==='Reseller');
@@ -13463,6 +13478,9 @@ function startResellerMessagePoll(){
 
 async function checkResellerUnreadMessages(){
   if(!me) return;
+  // Skip if nothing changed in D1
+  if(_remoteDbVersion && _resMsgPollLastVersion === _remoteDbVersion) return;
+  _resMsgPollLastVersion = _remoteDbVersion;
   try{
     const chatKey='jb_chat_'+me.id;
     const data=await fetchDataMapByKeys([chatKey]);
@@ -13932,6 +13950,31 @@ let _autoSyncInterval = null;
 let _autoSyncVisibilityBound=false;
 let _silentLoadInFlight=null;
 
+// Optimized version-based sync
+ let _remoteDbVersion = null;
+ let _versionPollInterval = null;
+ let _autoSyncLastVersion = null;
+ let _pageSyncLastVersion = null;
+ let _pendingPollLastVersion = null;
+ let _chatPollLastVersion = null;
+ let _resMsgPollLastVersion = null;
+
+async function pollDbVersion(){
+  try{
+    const api=getApiBase();
+    const res=await fetch(api+'/api/data-version',{headers:getAuthHeaders()});
+    if(!res.ok) return;
+    const {version}=await res.json();
+    _remoteDbVersion=version;
+  }catch(e){}
+}
+
+function startVersionPolling(){
+  if(_versionPollInterval) clearInterval(_versionPollInterval);
+  _versionPollInterval = setInterval(pollDbVersion, CLOUD_FAST_SYNC_MS);
+  pollDbVersion();
+}
+
 function runSilentLoadWithLock(){
   if(_silentLoadInFlight) return _silentLoadInFlight;
   _silentLoadInFlight=(async function(){
@@ -13947,6 +13990,7 @@ function runSilentLoadWithLock(){
 function startAutoSync(){
   if(_autoSyncInterval) clearInterval(_autoSyncInterval);
   warmFirebaseConnect();
+  startVersionPolling();
   
   const syncMs=(getFirebaseEnabled()&&_health.ordersRealtime)?120000:CLOUD_FAST_SYNC_MS;
   // Sync interval adapts when realtime is active.
@@ -13957,6 +14001,11 @@ function startAutoSync(){
       }
       const activePage=getCurrentPageId();
       await ensureWorkingApiBase({silent:true}).catch(()=>{});
+      
+      // Check if data actually changed before heavy sync
+      if(_remoteDbVersion && _autoSyncLastVersion === _remoteDbVersion) return;
+      _autoSyncLastVersion = _remoteDbVersion;
+
       await flushLocalSyncFallback().catch(()=>{});
       if(ORDER_HEAVY_PAGES.has(activePage)){
         // Only pull incremental updates; avoid repeated full snapshots.
