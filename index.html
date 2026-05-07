@@ -6196,6 +6196,76 @@ function logActivity(type, msg, orderId=''){
   writeLocalJson('jb_activity',activityLog);
   writeAuditEvent('activity',entry).catch(()=>{});
 }
+
+// ── PWA Install Prompt Handler ──
+(function(){
+  let deferredPrompt = null;
+  let gestureListenerAttached = false;
+
+  function makeInstallButton(){
+    if(document.getElementById('install-btn')) return document.getElementById('install-btn');
+    const btn = document.createElement('button');
+    btn.id = 'install-btn';
+    btn.className = 'btn btn-primary';
+    btn.style.position = 'fixed';
+    btn.style.right = '16px';
+    btn.style.bottom = '16px';
+    btn.style.zIndex = 20000;
+    btn.textContent = 'Install App';
+    btn.addEventListener('click', async function(){
+      if(!deferredPrompt) return;
+      try{
+        deferredPrompt.prompt();
+        const choice = await deferredPrompt.userChoice;
+        deferredPrompt = null;
+        btn.remove();
+        toast(choice.outcome==='accepted'? '✅ App installed' : 'ℹ️ Install dismissed','ok');
+      }catch(_e){
+        deferredPrompt = null;
+        btn.remove();
+      }
+    });
+    document.body.appendChild(btn);
+    return btn;
+  }
+
+  function onFirstUserGesture(e){
+    if(!deferredPrompt) return;
+    try{
+      deferredPrompt.prompt();
+      // prompt must be during a user gesture; remove listeners now
+    }catch(_e){ }
+    cleanupGestureListeners();
+  }
+
+  function attachGestureListeners(){
+    if(gestureListenerAttached) return;
+    ['click','touchstart','keydown'].forEach(ev=>window.addEventListener(ev,onFirstUserGesture,{once:true,capture:true}));
+    gestureListenerAttached = true;
+  }
+
+  function cleanupGestureListeners(){
+    gestureListenerAttached = false;
+    try{ window.removeEventListener('click', onFirstUserGesture, true); }catch(_){}
+    try{ window.removeEventListener('touchstart', onFirstUserGesture, true); }catch(_){}
+    try{ window.removeEventListener('keydown', onFirstUserGesture, true); }catch(_){}
+  }
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    try{ e.preventDefault(); }catch(_e){}
+    deferredPrompt = e;
+    // show a visible install button and prepare to auto-prompt on first gesture
+    makeInstallButton();
+    attachGestureListeners();
+  });
+
+  window.addEventListener('appinstalled', ()=>{
+    deferredPrompt = null;
+    const b=document.getElementById('install-btn'); if(b) b.remove();
+    cleanupGestureListeners();
+    toast('✅ App installed','ok');
+  });
+})();
 function renderActivityLog(){
   const filter=document.getElementById('activity-filter-type')?.value||'';
   const list=filter?activityLog.filter(a=>a.type===filter):activityLog;

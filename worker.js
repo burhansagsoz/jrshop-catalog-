@@ -3789,15 +3789,19 @@ async function getCatalogOrder(db, code) {
 }
 
 async function saveImage(db, data, type, customId) {
-  const id = customId || crypto.randomUUID();
+  const supplied = customId || crypto.randomUUID();
+  // Ensure we store with a single 'img_' prefix but return the supplied id unchanged
+  const storeKey = supplied.startsWith('img_') ? supplied : 'img_' + supplied;
   await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-    .bind('img_' + id, JSON.stringify({ data, type })).run();
-  return json({ id });
+    .bind(storeKey, JSON.stringify({ data, type })).run();
+  return json({ id: supplied });
 }
 
 async function getImage(env, id) {
   const db = env.DB;
-  const row = await db.prepare('SELECT value FROM kv_store WHERE key=?').bind('img_' + id).first();
+  // Accept ids with or without the 'img_' prefix
+  const key = (id || '').startsWith('img_') ? id : 'img_' + id;
+  const row = await db.prepare('SELECT value FROM kv_store WHERE key=?').bind(key).first();
   if (!row) return new Response('Not found', { status: 404 });
   const img = JSON.parse(row.value);
   const base64 = img.data.replace(/^data:[^;]+;base64,/, '');
