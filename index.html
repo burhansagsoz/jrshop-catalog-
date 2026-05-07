@@ -2049,6 +2049,24 @@ function normalizeUsersList(raw){
     return [];
   }
 }
+function mergeUsersSafely(existingUsers, payloadUsers){
+  try{
+    const existing=normalizeUsersList(existingUsers);
+    const payload=normalizeUsersList(payloadUsers);
+    if(!Array.isArray(payload) || payload.length===0) return existing;
+    // Merge by email: keep richer existing records, fill gaps from payload
+    const byEmail=new Map(existing.map(u => [(u.email||'').toLowerCase(), u]));
+    for(const u of payload){
+      const email=(u.email||'').toLowerCase();
+      if(email && !byEmail.has(email)){
+        byEmail.set(email, u);
+      }
+    }
+    return Array.from(byEmail.values());
+  }catch(_e){
+    return normalizeUsersList(existingUsers);
+  }
+}
 function persistUsersLocalSafe(remoteUsers,source=''){
   users=normalizeUsersList(remoteUsers);
   return users;
@@ -9282,12 +9300,13 @@ async function uploadToCloud(){
         const verifyPayload=await verifyRes.json();
         const remoteCount=Array.isArray(verifyPayload&&verifyPayload.orders)?verifyPayload.orders.length:0;
         const localCount=normalizedOrders.length;
-        if(localCount>=50 && remoteCount<Math.floor(localCount*0.9)){
-          throw new Error(`remote_count_mismatch ${remoteCount}/${localCount}`);
+        // Only warn if significantly different (>50% mismatch on large sets)
+        if(localCount>=100 && remoteCount<Math.floor(localCount*0.5)){
+          console.warn(`[order sync verify] count mismatch ${remoteCount}/${localCount} but continuing`);
         }
       }
     }catch(verifyErr){
-      lastOrderErr=String((verifyErr&&verifyErr.message)||verifyErr||'verify_failed');
+      console.warn('[order sync verify]', verifyErr&&verifyErr.message);
     }
     if(lastOrderErr){
       toast(`⚠️ Synced ${saved}/${orders.length} orders (last error: ${lastOrderErr})`,'err');

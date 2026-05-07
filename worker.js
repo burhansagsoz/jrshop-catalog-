@@ -2244,8 +2244,8 @@ export default {
 
       // Images
       if (path === '/api/image' && method === 'POST') {
-        const { data, type } = await request.json();
-        return await saveImage(db, data, type || 'image/jpeg');
+        const { data, type, id } = await request.json();
+        return await saveImage(db, data, type || 'image/jpeg', id);
       }
 
       // Catalog
@@ -3788,8 +3788,8 @@ async function getCatalogOrder(db, code) {
   }
 }
 
-async function saveImage(db, data, type) {
-  const id = crypto.randomUUID();
+async function saveImage(db, data, type, customId) {
+  const id = customId || crypto.randomUUID();
   await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
     .bind('img_' + id, JSON.stringify({ data, type })).run();
   return json({ id });
