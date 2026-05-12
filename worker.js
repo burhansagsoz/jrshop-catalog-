@@ -1287,6 +1287,18 @@ function getJwtAuthSecret(env) {
   return String(env.JWT_AUTH_SECRET || env.JWT_SECRET || '').trim();
 }
 
+function getSessionAuthSecret(env) {
+  return String(
+    env.SESSION_AUTH_SECRET ||
+    env.JWT_AUTH_SECRET ||
+    env.JWT_SECRET ||
+    env.API_AUTH_TOKEN ||
+    env.CLOUD_API_KEY ||
+    env.WORKER_SHARED_SECRET ||
+    ''
+  ).trim();
+}
+
 function isSetupEnabled(env) {
   const raw = String(env && env.SETUP_ENABLED !== undefined ? env.SETUP_ENABLED : 'false').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
@@ -1330,6 +1342,7 @@ function isPublicApiRoute(path, method) {
   const m = String(method || '').toUpperCase();
   if (path === '/api/test') return true;
   if (path === '/api/login' && m === 'POST') return true;
+  if (path === '/api/order-track' && m === 'GET') return true;
   if (path.startsWith('/api/image/') && m === 'GET') return true;
   if (path.startsWith('/api/catalog-order/') && m === 'GET') return true;
   if (path === '/api/auth/health' && m === 'GET') return true;
@@ -1346,6 +1359,8 @@ function getRequiredRolesForRoute(path, method) {
   if (path === '/api/order-queue/drain' && m === 'POST') return ['Admin'];
   if (path === '/api/backup' && m === 'GET') return ['Admin'];
   if (path === '/api/backup/import' && m === 'POST') return ['Admin'];
+  if (path === '/api/data' && m === 'POST') return ['Admin', 'Staff'];
+  if (path === '/api/sync' && m === 'POST') return ['Admin', 'Staff'];
   if (path.startsWith('/api/order-command/') && m === 'GET') return ['Admin'];
   if (path.startsWith('/api/order-command/') && m === 'POST') return ['Admin'];
   if (path === '/api/order-deadletters' && m === 'GET') return ['Admin'];
@@ -1354,6 +1369,7 @@ function getRequiredRolesForRoute(path, method) {
   if (path.startsWith('/api/logistics/') && m !== 'GET') return ['Admin', 'Staff'];
   if (path === '/api/push/send' && m === 'POST') return ['Admin', 'Staff'];
   if (path === '/api/catalog-page' && m === 'POST') return ['Admin', 'Staff'];
+  if (path.startsWith('/api/')) return ['Admin', 'Staff', 'Reseller'];
   return null;
 }
 
@@ -1362,6 +1378,20 @@ function roleAllowed(requiredRoles, role) {
   const normalized = String(role || '').trim().toLowerCase();
   if (!normalized) return false;
   return requiredRoles.some((r) => String(r || '').trim().toLowerCase() === normalized);
+}
+
+function isResellerContext(authContext) {
+  return String(authContext && authContext.role || '').trim().toLowerCase() === 'reseller';
+}
+
+function orderBelongsToAuthContext(order, authContext) {
+  if (!isResellerContext(authContext)) return true;
+  const claims = authContext && authContext.claims && typeof authContext.claims === 'object' ? authContext.claims : {};
+  const actorId = String(authContext && authContext.actorId || '').trim();
+  const email = String(claims.email || claims.mail || '').trim().toLowerCase();
+  const resellerId = String(order && order.resellerId || '').trim();
+  const resellerEmail = String(order && order.resellerEmail || order && order.email || '').trim().toLowerCase();
+  return (!!actorId && resellerId === actorId) || (!!email && resellerEmail === email);
 }
 
 function shouldApplyReplayGuard(path, method) {
@@ -1387,6 +1417,47 @@ function decodeBase64UrlJson(segment) {
   } catch {
     return null;
   }
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = '';
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  for (let i = 0; i < arr.length; i++) binary += String.fromCharCode(arr[i]);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function encodeBase64UrlJson(value) {
+  return bytesToBase64Url(new TextEncoder().encode(JSON.stringify(value || {})));
+}
+
+async function signJwtToken(payload, secret) {
+  const headerPart = encodeBase64UrlJson({ alg: 'HS256', typ: 'JWT' });
+  const payloadPart = encodeBase64UrlJson(payload || {});
+  const data = `${headerPart}.${payloadPart}`;
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(String(secret || '')),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data));
+  return `${data}.${bytesToBase64Url(signature)}`;
+}
+
+async function createSessionTokenForUser(user, env) {
+  const secret = getSessionAuthSecret(env);
+  if (!secret || !user) return '';
+  const now = Math.floor(Date.now() / 1000);
+  const email = String(user.email || '').trim().toLowerCase();
+  return await signJwtToken({
+    sub: String(user.id || email || 'user'),
+    email,
+    role: String(user.role || 'Reseller'),
+    name: String(user.dname || ''),
+    iat: now,
+    exp: now + (7 * 24 * 60 * 60)
+  }, secret);
 }
 
 async function verifyJwtToken(token, secret) {
@@ -1451,6 +1522,27 @@ async function authenticateRequest(request, env) {
   const bearer = parseBearerToken(request.headers.get('Authorization'));
   const sharedSecret = getApiAuthSecret(env);
   const jwtSecret = getJwtAuthSecret(env);
+  const sessionSecret = getSessionAuthSecret(env);
+
+  if (bearer && sessionSecret && !(sharedSecret && timingSafeEqual(bearer, sharedSecret))) {
+    const sessionJwt = await verifyJwtToken(bearer, sessionSecret);
+    if (sessionJwt.ok) {
+      const claims = sessionJwt.payload || {};
+      const role = getRoleFromClaims(claims) || 'Reseller';
+      const actorId = String(claims.sub || claims.uid || claims.email || claims.userId || 'session_user');
+      return {
+        ok: true,
+        context: {
+          ...context,
+          authMode: 'session_jwt',
+          isAuthenticated: true,
+          role,
+          actorId,
+          claims
+        }
+      };
+    }
+  }
 
   if (jwtSecret) {
     if (!bearer) return { ok: false, error: 'missing_token', context };
@@ -1705,10 +1797,16 @@ async function enforceEndpointSecurity(request, env, path, method) {
   const context = buildAnonymousContext(request);
   if (!path.startsWith('/api/')) return { response: null, context };
   if (isPublicApiRoute(path, method)) return { response: null, context };
-  if (path === '/api/setup' && String(method || '').toUpperCase() === 'GET' && !isSetupEnabled(env)) {
-    const db = env && env.DB ? env.DB : null;
-    if (db) await bumpSecurityMetric(db, 'setup_blocked', 1);
-    return { response: json({ error: 'setup_disabled' }, 403), context };
+  
+  // Setup endpoint bypass when enabled
+  if (path === '/api/setup' && String(method || '').toUpperCase() === 'GET') {
+    if (!isSetupEnabled(env)) {
+      const db = env && env.DB ? env.DB : null;
+      if (db) await bumpSecurityMetric(db, 'setup_blocked', 1);
+      return { response: json({ error: 'setup_disabled' }, 403), context };
+    }
+    // Allow setup without auth when enabled
+    return { response: null, context };
   }
 
   const auth = await authenticateRequest(request, env);
@@ -1932,6 +2030,9 @@ export default {
     }
     if (path === '/catalog' && method === 'GET') return await getCatalog(env);
     if (path.startsWith('/api/image/') && method === 'GET') return await getImage(env, path.replace('/api/image/', ''));
+    if (path === '/api/order-track' && method === 'GET') {
+      return await getPublicOrderTrack(env.DB, url.searchParams.get('q') || url.searchParams.get('ref') || '');
+    }
 
     const { response: securityFailure, context: authContext } = await enforceEndpointSecurity(request, env, path, method);
     if (securityFailure) return securityFailure;
@@ -1989,9 +2090,10 @@ export default {
         const body = await request.json().catch(() => ({}));
         const user = await loginUserWithCredentials(db, body && body.email, body && body.password);
         if (!user) return json({ ok: false, error: 'invalid_credentials' }, 401);
-        return json({ ok: true, user });
+        const token = await createSessionTokenForUser(user, env);
+        return json({ ok: true, user, token, tokenType: token ? 'Bearer' : '', expiresIn: token ? 7 * 24 * 60 * 60 : 0 });
       }
-      if (path === '/api/data' && method === 'GET') return await getData(db, url);
+      if (path === '/api/data' && method === 'GET') return await getData(db, url, authContext);
       if (path === '/api/data-version' && method === 'GET') {
         const version = await getDbVersion(db);
         return json({ ok: true, version, ts: Date.now() });
@@ -2024,7 +2126,7 @@ export default {
         const cursor = String(url.searchParams.get('cursor') || '').trim();
         const limit = Number(url.searchParams.get('limit')) || ORDER_UPDATES_LIMIT_DEFAULT;
         await runOrderCommandDrainCycle(db, authContext, { limit: 6, env });
-        const response = await getOrderUpdates(db, cursor, limit);
+        const response = await getOrderUpdates(db, cursor, limit, authContext);
         return json(response);
       }
 
@@ -2501,7 +2603,7 @@ export default {
   }
 };
 
-async function getData(db, requestUrl = null) {
+async function getData(db, requestUrl = null, authContext = null) {
   const keyFilterRaw = String(
     requestUrl && requestUrl.searchParams ? (requestUrl.searchParams.get('keys') || '') : ''
   ).trim();
@@ -2559,6 +2661,12 @@ async function getData(db, requestUrl = null) {
     data.jb_users_backup.length > (Array.isArray(data.jb_users) ? data.jb_users.length : 0)
   ) {
     data.jb_users = data.jb_users_backup;
+  }
+  if (isResellerContext(authContext)) {
+    const allowed = new Set(['jb_catalog', 'jb_cat_categories', 'jb_settings', 'jb_templates', 'jb_notif', 'jb_feed', 'jb_catalog_orders_map']);
+    for (const key of Object.keys(data)) {
+      if (!allowed.has(key)) delete data[key];
+    }
   }
   return json({ data });
 }
@@ -2734,6 +2842,53 @@ async function readOrderFromTable(db, id) {
   const row = await db.prepare('SELECT data FROM orders WHERE id=?').bind(id).first();
   if (!row || !row.data) return null;
   try { return JSON.parse(row.data); } catch { return null; }
+}
+
+function sanitizePublicTrackOrder(order) {
+  if (!order || typeof order !== 'object') return null;
+  const products = Array.isArray(order.products) ? order.products.map((p) => ({
+    name: String(p && p.name || 'Product'),
+    qty: Number(p && p.qty) || 1,
+    arrived: !!(p && p.arrived),
+    cnTracking: String(p && p.cnTracking || ''),
+    img: String(p && (p.depotPhoto || p.img) || '')
+  })) : [];
+  return {
+    id: String(order.id || ''),
+    ref: String(order.ref || ''),
+    name: String(order.name || ''),
+    status: String(order.status || 'New'),
+    ts: Number(order.ts) || 0,
+    ukTracking: String(order.ukTracking || ''),
+    products
+  };
+}
+
+async function getPublicOrderTrack(db, rawQuery) {
+  const q = String(rawQuery || '').trim().toLowerCase();
+  if (!q || q.length < 3) return json({ ok: false, error: 'query_missing' }, 400);
+  await ensureOrderTables(db);
+  const rows = await withD1Retry(
+    () => db.prepare('SELECT data FROM orders ORDER BY ts DESC').all(),
+    { op: 'public_order_track' }
+  );
+  const matched = (rows.results || [])
+    .map((r) => { try { return JSON.parse(r.data); } catch { return null; } })
+    .filter((order) => order && !order.deletedAt)
+    .find((order) => {
+      const ref = String(order.ref || '').toLowerCase();
+      const id = String(order.id || '').toLowerCase();
+      const uk = String(order.ukTracking || '').toLowerCase();
+      const cn = String(order.cnTracking || '').toLowerCase();
+      const products = Array.isArray(order.products) ? order.products : [];
+      return ref === q ||
+        id.endsWith(q) ||
+        uk.includes(q) ||
+        cn.includes(q) ||
+        products.some((p) => String(p && p.cnTracking || '').toLowerCase().includes(q));
+    });
+  if (!matched) return json({ ok: false, error: 'not_found' }, 404);
+  return json({ ok: true, order: sanitizePublicTrackOrder(matched) });
 }
 
 function sanitizeOrderForStorage(order) {
@@ -2944,6 +3099,7 @@ async function getOrders(db, authContext = null, opts = {}) {
       .filter(Boolean);
     const orders = tableOrders
       .filter(order => !(order && order.deletedAt))
+      .filter(order => orderBelongsToAuthContext(order, authContext))
       .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
     const incremental = !!(sinceTs > 0 || sinceV > 0);
     const filteredOrders = incremental
@@ -3255,7 +3411,7 @@ function normalizeOperationInput(raw) {
   };
 }
 
-async function getOrderUpdates(db, cursorRaw, limitRaw) {
+async function getOrderUpdates(db, cursorRaw, limitRaw, authContext = null) {
   await ensureOrderTables(db);
   await ensureSecurityTables(db);
   const cursor = parseSyncCursor(cursorRaw);
@@ -3299,6 +3455,7 @@ async function getOrderUpdates(db, cursorRaw, limitRaw) {
     .map((row) => {
       const order = safeParseJson(row && row.data, null);
       if (!order || typeof order !== 'object') return null;
+      if (!orderBelongsToAuthContext(order, authContext)) return null;
       return {
         eventId: normalizeOpId(
           `order_${String(order.id || '').slice(0, 80)}_${Number(row && row.version) || 0}_${Number(row && row.updated_at) || 0}`,
@@ -3333,7 +3490,13 @@ async function getOrderUpdates(db, cursorRaw, limitRaw) {
       actorId: String(row && row.actor_id || ''),
       actorRole: String(row && row.actor_role || '')
     }))
-    .filter((item) => item.eventId);
+    .filter((item) => {
+      if (!item.eventId) return false;
+      if (!isResellerContext(authContext)) return true;
+      const payloadOrder = item.payload && item.payload.order && typeof item.payload.order === 'object' ? item.payload.order : null;
+      if (payloadOrder) return orderBelongsToAuthContext(payloadOrder, authContext);
+      return String(item.actorId || '') === String(authContext && authContext.actorId || '');
+    });
   const events = [...orderEvents, ...auditEvents]
     .sort((a, b) => {
       const tsDiff = (Number(a.ts) || 0) - (Number(b.ts) || 0);
@@ -3394,6 +3557,12 @@ async function saveOrderDelete(db, id, req, authContext = null) {
   }
   const payload = buildDeleteCommandPayload(id, req);
   if (!payload.id) return json({ error: 'id missing' }, 400);
+  if (isResellerContext(authContext)) {
+    const existing = await readOrderFromTable(db, payload.id);
+    if (!existing || !orderBelongsToAuthContext(existing, authContext)) {
+      return json({ error: 'forbidden_reseller_order_scope' }, 403);
+    }
+  }
 
   const knownOp = await readOrderOpRecord(db, payload.opId);
   if (knownOp) {
@@ -3441,6 +3610,9 @@ async function saveOrder(db, payload, authContext = null) {
   const clean = sanitizeOrderForStorage(rawOrder);
   const id = String(clean && clean.id || '').trim();
   if (!id) return json({ error: 'order id missing' }, 400);
+  if (isResellerContext(authContext) && !orderBelongsToAuthContext(clean, authContext)) {
+    return json({ error: 'forbidden_reseller_order_scope' }, 403);
+  }
 
   const requestedV = Math.max(0, Number(parsed.v) || Number(clean && clean.v) || 0);
   const requestedTs = Number(parsed.ts || clean.updatedAt || clean.ts) || Date.now();

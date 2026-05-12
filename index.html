@@ -344,6 +344,7 @@ body.dark .prod-item{background:#263548;}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;display:none;align-items:flex-start;justify-content:center;padding:14px;overflow-y:auto;}
 .modal-bg.open{display:flex;}
 .modal{background:var(--card);border-radius:16px;width:100%;max-width:640px;box-shadow:var(--shadow-lg);margin:auto;display:flex;flex-direction:column;max-height:92vh;overflow:hidden;}
+.modal-box{background:var(--card);border-radius:16px;width:100%;box-shadow:var(--shadow-lg);margin:auto;display:flex;flex-direction:column;max-height:92vh;overflow:hidden;}
 .modal-head{padding:18px 20px 0;display:flex;align-items:center;justify-content:space-between;margin-bottom:13px;}
 .modal-head h2{font-size:16px;font-weight:700;}
 .mx{width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);}
@@ -608,7 +609,7 @@ body.dark .modal-foot{background:#263548;}
     </div>
     <button class="login-btn" onclick="login()">Sign In →</button>
     <div style="text-align:center;margin-top:14px;display:flex;gap:10px;justify-content:center;">
-      <button onclick="goTrackPage()" style="background:none;border:none;color:rgba(255,255,255,.4);font-size:12px;cursor:pointer;font-family:var(--font);">📦 Track order</button>
+      <button onclick="location.hash='#track'" style="background:none;border:none;color:rgba(255,255,255,.4);font-size:12px;cursor:pointer;font-family:var(--font);">📦 Track order</button>
       <span style="color:rgba(255,255,255,.2);">·</span>
 
     </div>
@@ -1940,6 +1941,7 @@ let notifSettings = {shipped:true};
 let activityLog = [];
 let catalog = [];
 let catalogCategories = ['Shoes','Bags','Accessories'];
+let me = null;
 let fStatus = 'all';
 let fSearch = '';
 const ORDERS_PAGE_SIZE = 40;
@@ -2327,7 +2329,7 @@ function getDefaultApiBaseByLocation(){
     const h=String(location.hostname||'').toLowerCase();
     const p=String(location.port||'');
     // Static dev servers should talk to the local Worker, not to their own origin.
-    if((h==='localhost'||h==='127.0.0.1') && (p==='8000'||p==='5500')) return 'http://127.0.0.1:8787';
+    if((h==='localhost'||h==='127.0.0.1') && (p==='8000'||p==='5500'||p==='5000')) return 'http://127.0.0.1:8787';
     if(h==='127.0.0.1' && p==='5500') return 'http://127.0.0.1:8788';
     if(h==='127.0.0.1' && p==='8788') return 'http://127.0.0.1:8888';
   }catch(_e){}
@@ -2342,6 +2344,7 @@ function normalizeConfiguredApiBase(raw){
   // Prevent pointing API to local static frontend servers.
   if(/^https?:\/\/(127\.0\.0\.1|localhost):8000$/i.test(value)) return 'http://127.0.0.1:8787';
   if(/^https?:\/\/(127\.0\.0\.1|localhost):5500$/i.test(value)) return 'http://127.0.0.1:8788';
+  if(/^https?:\/\/(127\.0\.0\.1|localhost):5000$/i.test(value)) return 'http://127.0.0.1:8787';
   if(/^https?:\/\/(127\.0\.0\.1|localhost):8788$/i.test(value)) return 'http://127.0.0.1:8888';
   return value;
 }
@@ -2383,13 +2386,14 @@ function getApiBaseEarly(){
         await hydrateSharedStateServerFirst('boot');
         users=normalizeUsersList(users);
         scheduleFirebaseAutoConnect('boot');
+        const skipAutoLogin=(function(){try{return localStorage.getItem('jb_skip_auto_login')==='1';}catch(_e){return false;}})();
         const savedEm=localStorage.getItem('jb_saved_email');
         const savedPwRaw=localStorage.getItem('jb_saved_pw');const savedPw=savedPwRaw?decodeURIComponent(atob(savedPwRaw)):'';
         const emEl=document.getElementById('l-em');
         const pwEl=document.getElementById('l-pw');
-        if(savedEm&&emEl)emEl.value=savedEm;
-        if(savedPw&&pwEl)pwEl.value=savedPw;
-        if(savedEm&&savedPw&&users.length){
+        if(!skipAutoLogin && savedEm&&emEl)emEl.value=savedEm;
+        if(!skipAutoLogin && savedPw&&pwEl)pwEl.value=savedPw;
+        if(!skipAutoLogin && !isPublicTrackRoute() && savedEm&&savedPw&&users.length){
           const u=users.find(function(u){return u.email.toLowerCase()===savedEm&&u.password===savedPw;});
           if(u){login();return;}
         }
@@ -2983,7 +2987,15 @@ async function syncDataForActivePage(reason){
   }
 }
 function handlePathRoute(){
-  if(!me) return false;
+  if(!me){
+    if(isPublicTrackRoute()){
+      normalizeTrackRouteUrl();
+      goTrackPage();
+      return true;
+    }
+    goLoginPage();
+    return false;
+  }
   const currentPath=parseRouteLocation();
   const pageId=pageIdFromPath(currentPath);
   if(!pageId) return false;
@@ -3050,6 +3062,10 @@ async function login(){
         });
         if(loginRes.ok){
           const payload=await loginRes.json().catch(()=>({}));
+            if(payload&&payload.token){
+              saveWorkerSessionToken(payload.token);
+              try{localStorage.removeItem('jb_no_local_dev_key');}catch(_e){}
+            }
           const remoteUser=payload&&payload.user&&typeof payload.user==='object'?payload.user:null;
           if(remoteUser&&remoteUser.email){
             users=persistUsersLocalSafe([{
@@ -3082,7 +3098,15 @@ async function login(){
     return;
   }
   me={...u,email:String(u.email||'').trim(),role:String(u.role||'Reseller')};
+  try{localStorage.removeItem('jb_skip_auto_login');}catch(_e){}
   const firebaseEmail=String(me.email||em||'').trim().toLowerCase();
+  const workerLogin=await requestWorkerLoginToken(firebaseEmail,pw);
+  if(workerLogin&&workerLogin.user){
+    const remoteRole=String(workerLogin.user.role||'').trim();
+    const remoteName=String(workerLogin.user.dname||'').trim();
+    if(remoteRole) me.role=remoteRole;
+    if(remoteName) me.dname=remoteName;
+  }
   saveLoginSession(firebaseEmail,pw);
   cacheFirebaseLoginCreds(firebaseEmail,pw);
   if(getFirebaseEnabled()){
@@ -3146,7 +3170,7 @@ async function login(){
   scheduleFirebaseAutoConnect('login');
   bootstrapAuthoritativeOrders().catch(()=>{});
   setTimeout(async function(){
-    fetch(getApiBase()+'/api/data')
+    fetch(getApiBase()+'/api/data',{headers:getAuthHeaders()})
     .then(function(r){return r.json();})
     .then(async function(res){
       if(res.data){
@@ -3204,13 +3228,26 @@ async function logout(){
   stopFirebaseRealtime();
   try{if(_firebaseAuth&&_firebaseAuth.currentUser){_firebaseAuth.signOut().catch(()=>{});}}catch(_e){}
   try{localStorage.removeItem(FIREBASE_AUTH_SESSION_KEY);}catch(_e){}
+  saveWorkerSessionToken('');
+  try{localStorage.setItem('jb_no_local_dev_key','1');}catch(_e){}
+  try{localStorage.setItem('jb_skip_auto_login','1');}catch(_e){}
+  try{localStorage.removeItem('jb_remember');}catch(_e){}
+  try{localStorage.removeItem('jb_remember_email');}catch(_e){}
+  try{localStorage.removeItem('jb_remember_pw');}catch(_e){}
   clearFirebaseAuthNeedsFreshLogin();
   resetHealthCounters();
   clearLoginSession();
   me=null;
   selId=null;
+  orders=[];
+  users=[];
+  catalog=[];
+  suppliers=[];
   document.getElementById('login-screen').style.display='flex';
   document.getElementById('app').classList.remove('on');
+  const remCb=document.getElementById('l-remember');
+  if(remCb) remCb.checked=false;
+  try{if(history.replaceState) history.replaceState(null,null,'/'); else location.hash='';}catch(_e){}
   document.getElementById('l-em').value='';
   document.getElementById('l-pw').value='';
   document.getElementById('login-err').style.display='none';
@@ -3304,6 +3341,10 @@ function showPage(id){
   // Staff sadece kendi sayfasını görebilir
   if(me && me.role==='Staff' && id!=='pg-depot-staff'){
     goDepotStaff();
+    return;
+  }
+  if(!me && id!=='pg-track'){
+    goLoginPage();
     return;
   }
   // Hide ALL pages with both class and inline style
@@ -7978,49 +8019,83 @@ async function submitResellerOrder(){
 }
 
 // ── CUSTOMER TRACKING PAGE ──
-function showTrackPage(){if(history.pushState)history.pushState(null,null,"#track");goTrackPage();}
+function normalizeTrackRouteUrl(){
+  try{
+    const search=String(window.location.search||'');
+    const next='/'+search+'#track';
+    if(history.replaceState) history.replaceState(null,null,next);
+    else location.hash='#track';
+  }catch(_e){}
+}
+function showTrackPage(){normalizeTrackRouteUrl();goTrackPage();}
+function isPublicTrackRoute(){
+  try{
+    const hash=String(window.location.hash||'');
+    const search=String(window.location.search||'');
+    return hash==='#track' || new URLSearchParams(search).has('track') || new URLSearchParams(search).has('ref');
+  }catch(_e){
+    return false;
+  }
+}
 function goTrackPage(){
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').classList.add('on');
   // Show minimal app with only tracking page
-  document.getElementById('sidebar').classList.add('collapsed');
-  document.getElementById('topbar-right').style.display='none';
-  document.getElementById('pg-title').textContent='Track Order';
+  const sidebar=document.getElementById('sidebar');
+  if(sidebar){sidebar.classList.add('collapsed');sidebar.style.width='0';sidebar.style.display='none';}
+  const sbOverlay=document.getElementById('sb-overlay');
+  if(sbOverlay){sbOverlay.classList.remove('on');sbOverlay.style.display='none';}
+  const menuBtn=document.querySelector('.topbar-menu-btn');
+  if(menuBtn) menuBtn.style.display='none';
+  const topbarRight=document.getElementById('topbar-right');
+  if(topbarRight) topbarRight.style.display='none';
+  const titleEl=document.getElementById('pg-title');
+  if(titleEl) titleEl.textContent='Track Order';
   showPage('pg-track');
-  document.getElementById('dark-btn').style.display='flex';
+  const darkBtn=document.getElementById('dark-btn');
+  if(darkBtn) darkBtn.style.display='flex';
 }
 function goLoginPage(){
   document.getElementById('login-screen').style.display='flex';
   document.getElementById('app').classList.remove('on');
+  try{
+    sessionStorage.removeItem('jrshop_spa_path');
+    if(history.replaceState) history.replaceState(null,null,'/');
+    else location.hash='';
+  }catch(_e){}
+  const sidebar=document.getElementById('sidebar');
+  if(sidebar){sidebar.style.display='';sidebar.classList.remove('collapsed');sidebar.style.width='';}
+  const sbOverlay=document.getElementById('sb-overlay');
+  if(sbOverlay){sbOverlay.classList.remove('on');sbOverlay.style.display='';}
+  const menuBtn=document.querySelector('.topbar-menu-btn');
+  if(menuBtn) menuBtn.style.display='';
 }
 async function trackOrder(){
   const val=document.getElementById('track-input').value.trim();
   if(!val){toast('⚠️ Enter your order ref or tracking number','err');return;}
   const btn=document.querySelector('#pg-track button');
   if(btn){btn.textContent='Searching...';btn.disabled=true;}
-  // Load from cloud if orders empty
-  if(!orders.length){
-    try{
-      // Önce /api/orders dene
-      try{
-        const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
-        const incoming=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
-        if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
-      }catch(e){}
-      // Deterministic behavior: do not fallback to /api/data.jb_orders snapshots.
-    }catch(e){}
+  const q=val.toLowerCase().trim();
+  const el=document.getElementById('track-result');
+  let found=null;
+  try{
+    const api=await ensureWorkingApiBase({silent:true});
+    const res=await fetch(api+'/api/order-track?q='+encodeURIComponent(val),{headers:{'Accept':'application/json'}});
+    if(res.ok){
+      const payload=await res.json().catch(()=>({}));
+      found=payload&&payload.order?payload.order:null;
+    }
+  }catch(_e){}
+  if(!found && Array.isArray(orders) && orders.length){
+    found=orders.find(o=>
+      (o.ref&&o.ref.toLowerCase()===q)||
+      (o.ukTracking&&o.ukTracking.toLowerCase().includes(q))||
+      (o.cnTracking&&o.cnTracking.toLowerCase().includes(q))||
+      (o.products&&o.products.some(p=>p.cnTracking&&p.cnTracking.toLowerCase().includes(q)))||
+      (o.id&&o.id.toLowerCase().includes(q))
+    );
   }
   if(btn){btn.textContent='Track';btn.disabled=false;}
-  const q=val.toLowerCase().trim();
-  // Search by ref, tracking, or name+postcode combo
-  const found=orders.find(o=>
-    (o.ref&&o.ref.toLowerCase()===q)||
-    (o.ukTracking&&o.ukTracking.toLowerCase().includes(q))||
-    (o.cnTracking&&o.cnTracking.toLowerCase().includes(q))||
-    (o.products&&o.products.some(p=>p.cnTracking&&p.cnTracking.toLowerCase().includes(q)))||
-    (o.id&&o.id.toLowerCase().includes(q))
-  );
-  const el=document.getElementById('track-result');
   if(!found){
     el.innerHTML=`<div style="background:var(--red-bg);border:1px solid var(--red-border);border-radius:11px;padding:18px;text-align:center;">
       <div style="font-size:28px;margin-bottom:8px;">😕</div>
@@ -8608,18 +8683,20 @@ function getAuthHeaders(extra){
   };
   const apiBase=(localStorage.getItem('jb_cloud_api')||'').trim()||getDefaultApiBaseByLocation();
   const isLocalApi=/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(apiBase.replace(/\/$/,''));
+  const sessionToken=normalizeCloudKey(getWorkerSessionToken());
   const savedKey=normalizeCloudKey(localStorage.getItem('jb_cloud_key'));
   // Local worker runs with API_AUTH_TOKEN=local-dev-token in this project.
   // Force it to avoid stale/incorrect saved keys causing endless 401 loops.
-  let k=savedKey || (isLocalApi ? getDefaultCloudKeyByLocation() : '');
+  let k=sessionToken || savedKey || (isLocalApi ? getDefaultCloudKeyByLocation() : '');
   if(isLocalApi){
     const localKey='local-dev-token';
-    k=localKey;
-    try{
-      if(savedKey!==localKey){
-        localStorage.setItem('jb_cloud_key',localKey);
-      }
-    }catch(_e){}
+    const noLocalDev = (function(){try{return localStorage.getItem('jb_no_local_dev_key')==='1';}catch(_e){return false;}})();
+    if(!noLocalDev){
+      k = sessionToken || localKey;
+      try{if(savedKey!==localKey) localStorage.setItem('jb_cloud_key',localKey);}catch(_e){}
+    } else {
+      k = sessionToken || '';
+    }
   }
   if(k) headers.Authorization='Bearer '+k;
   if(!headers['X-Client-Timestamp']) headers['X-Client-Timestamp']=String(Date.now());
@@ -8961,12 +9038,15 @@ function writeLocalJson(key,value){
 
   // For server-backed keys, attempt to persist to Worker (/api/data). Fall back to localStorage on any error.
   if(SERVER_KEYS.includes(key)){
+    try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
     try{
       // fire-and-forget async write to API; keep local fallback if network fails
       ensureWorkingApiBase({silent:true}).then(api=>{
         try{
           const h = getAuthHeaders() || {};
-          fetch(api+"/api/data",{method:'POST',headers:Object.assign({'Content-Type':'application/json'},h),body:JSON.stringify({[key]:value})}).catch(()=>{
+          fetch(api+"/api/data",{method:'POST',headers:Object.assign({'Content-Type':'application/json'},h),body:JSON.stringify({[key]:value})}).then(res=>{
+            if(!res||!res.ok) throw new Error('sync_failed');
+          }).catch(()=>{
             try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
           });
         }catch(_e){ try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){} }
@@ -9523,6 +9603,7 @@ const FIREBASE_COLLECTION_GENERIC_EVENTS='generic_events';
 const FIREBASE_AUTH_SESSION_KEY='jb_auth_session';
 const FIREBASE_AUTH_EMAIL_KEY='jb_saved_email';
 const FIREBASE_AUTH_PASSWORD_KEY='jb_saved_pw';
+const WORKER_SESSION_TOKEN_KEY='jb_worker_session_token';
 const FIREBASE_EMAIL_AUTH_TOGGLE_KEY='jb_firebase_email_auth';
 const FIREBASE_AUTH_FRESH_LOGIN_KEY='jb_firebase_auth_fresh_login';
 const LOCAL_MUTATION_TS_KEY='jb_local_mutations';
@@ -10647,6 +10728,32 @@ function cacheFirebaseLoginCreds(email,password){
     localStorage.setItem(FIREBASE_AUTH_PASSWORD_KEY,encodeSavedPassword(pw));
   }catch(_e){}
 }
+function saveWorkerSessionToken(token){
+  const v=String(token||'').trim();
+  try{
+    if(v) localStorage.setItem(WORKER_SESSION_TOKEN_KEY,v);
+    else localStorage.removeItem(WORKER_SESSION_TOKEN_KEY);
+  }catch(_e){}
+}
+function getWorkerSessionToken(){
+  try{return String(localStorage.getItem(WORKER_SESSION_TOKEN_KEY)||'').trim();}catch(_e){return '';}
+}
+async function requestWorkerLoginToken(email,password){
+  try{
+    const res=await fetch(getApiBase()+'/api/login',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Accept':'application/json'},
+      body:JSON.stringify({email:String(email||'').trim().toLowerCase(),password:String(password||'')})
+    });
+    if(!res.ok) return null;
+    const payload=await res.json().catch(()=>({}));
+    if(payload&&payload.token) saveWorkerSessionToken(payload.token);
+    try{if(payload&&payload.token) localStorage.removeItem('jb_no_local_dev_key');}catch(_e){}
+    return payload;
+  }catch(_e){
+    return null;
+  }
+}
 function clearFirebaseLoginCreds(opts={}){
   const includeRemember=opts.includeRemember!==false;
   try{
@@ -11614,6 +11721,18 @@ function writeLocalJson(key,value){
     return;
   }
   try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
+  const SERVER_KEYS = ['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed','jb_catalog_orders_map'];
+  if(!SERVER_KEYS.includes(String(key||''))) return;
+  try{
+    ensureWorkingApiBase({silent:true}).then(api=>{
+      const h=getAuthHeaders()||{};
+      fetch(api+'/api/data',{
+        method:'POST',
+        headers:Object.assign({'Content-Type':'application/json'},h),
+        body:JSON.stringify({[key]:value})
+      }).catch(()=>{});
+    }).catch(()=>{});
+  }catch(_e){}
 }
 function readLocalDataMap(){
   const out={};
@@ -11708,6 +11827,7 @@ function shouldRouteApiToFirebase(url){
   if(!getFirebaseEnabled()) return false;
   try{
     const u=new URL(url,location.origin);
+    if(u.pathname==='/api/order-track') return false;
     if(isApiPath(u.pathname)) return true;
     // Also intercept legacy absolute worker URLs that still point to /api/*
     // even when the current origin is now Pages/static hosting.
@@ -12308,14 +12428,15 @@ if('serviceWorker' in navigator){
   window.addEventListener('load',()=>{
   // Auto login using remember/session credentials.
   let autoCreds=null;
-  if(localStorage.getItem('jb_remember')==='1'){
+  const skipAutoLogin=(function(){try{return localStorage.getItem('jb_skip_auto_login')==='1';}catch(_e){return false;}})();
+  if(!skipAutoLogin && !isPublicTrackRoute() && localStorage.getItem('jb_remember')==='1'){
     const em=localStorage.getItem('jb_remember_email');
     const pw=localStorage.getItem('jb_remember_pw');
     if(em&&pw){
       autoCreds={email:em,password:pw,remember:true};
     }
   }
-  if(!autoCreds){
+  if(!skipAutoLogin && !isPublicTrackRoute() && !autoCreds){
     const sessionCreds=getLoginSession();
     if(sessionCreds){
       autoCreds={email:sessionCreds.email,password:sessionCreds.password,remember:false};
@@ -12380,10 +12501,11 @@ window.addEventListener('load',()=>{
   // URL routing — if #track or ?track, open track page directly
   const hash=window.location.hash;
   const search=window.location.search;
-  if(hash==='#track'||search.includes('track')){
+  if(isPublicTrackRoute()){
     const urlParams=new URLSearchParams(search);
     const ref=urlParams.get('track')||urlParams.get('ref')||'';
     setTimeout(()=>{
+      normalizeTrackRouteUrl();
       goTrackPage();
       if(ref){
         setTimeout(()=>{
@@ -17208,7 +17330,7 @@ function addCatalogCategory(){
   const inp=document.getElementById('new-cat-name-inp');
   const val=inp.value.trim();
   if(!val){toast('⚠️ Enter a category name','err');return;}
-  if(catalogCategories.includes(val)){toast('⚠️ Already exists','err');return;}
+  if(catalogCategories.some(c=>String(c||'').trim().toLowerCase()===val.toLowerCase())){toast('⚠️ Already exists','err');return;}
   catalogCategories.push(val);
   saveCatalogCategories();
   inp.value='';
