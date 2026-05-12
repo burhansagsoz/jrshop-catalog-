@@ -2033,7 +2033,7 @@ export default {
         const sinceTs = Math.max(0, Number(url.searchParams.get('sinceTs')) || 0);
         const sinceV = Math.max(0, Number(url.searchParams.get('sinceV')) || 0);
         const limitParam = url.searchParams.get('limit');
-        const limit = limitParam === null ? 0 : Math.max(1, Math.min(500, Number(limitParam) || 200));
+        const limit = limitParam === null ? undefined : Math.max(1, Math.min(500, Number(limitParam) || 200));
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         await runOrderCommandDrainCycle(db, authContext, { limit: 6, env });
         return await getOrders(db, authContext, { sinceTs, sinceV, limit, offset });
@@ -2929,8 +2929,9 @@ async function getOrders(db, authContext = null, opts = {}) {
   const startedAt = Date.now();
   const sinceTs = Math.max(0, Number(opts && opts.sinceTs) || 0);
   const sinceV = Math.max(0, Number(opts && opts.sinceV) || 0);
-  const hasExplicitLimit = opts && Object.prototype.hasOwnProperty.call(opts, 'limit');
-  const limit = hasExplicitLimit ? Math.max(1, Math.min(500, Number(opts && opts.limit) || 200)) : 0;
+  const rawLimit = Number(opts && opts.limit);
+  const hasExplicitLimit = Number.isFinite(rawLimit) && rawLimit > 0;
+  const limit = hasExplicitLimit ? Math.max(1, Math.min(500, rawLimit || 200)) : 0;
   const offset = Math.max(0, Number(opts && opts.offset) || 0);
   try {
     await ensureOrderTables(db);

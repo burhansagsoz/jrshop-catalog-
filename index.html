@@ -2032,6 +2032,8 @@ async function hydrateSharedStateServerFirst(source='bootstrap'){
 }
 const DEFAULT_BOOT_USERS=[{id:'u1',email:'joobuyadmin@gmail.com',password:'joobuy1212.',role:'Admin',dname:'Admin'}];
 const LIST_PAGE_SIZE = 20;
+const PAGE_STATE_KEY = 'jb_active_page';
+const SESSION_LOGIN_KEY = 'jb_login_session';
 function normalizeUsersList(raw){
   try{
     let list=raw;
@@ -2883,6 +2885,13 @@ function getCurrentPageId(){
   return el&&el.id?String(el.id):'';
 }
 function parseRouteLocation(){
+  try{
+    const restoredPath=sessionStorage.getItem('jrshop_spa_path')||'';
+    if(restoredPath && String(location.pathname||'/')==='/'){
+      sessionStorage.removeItem('jrshop_spa_path');
+      history.replaceState(null,'',restoredPath);
+    }
+  }catch(_e){}
   const hashPath=String(location.hash||'').replace(/^#/,'').trim();
   const raw=shouldUseHashRouting() ? (hashPath||'/dashboard') : String(location.pathname||'/');
   const p=String(raw||'/').toLowerCase();
@@ -7992,15 +8001,11 @@ async function trackOrder(){
   // Load from cloud if orders empty
   if(!orders.length){
     try{
-      const api=await ensureWorkingApiBase({silent:true});
       // Önce /api/orders dene
       try{
-        const r1=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-        if(r1.ok){
-          const d=await r1.json();
-          const incoming=Array.isArray(d&&d.orders)?d.orders:[];
-          if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
-        }
+        const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
+        const incoming=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
+        if(shouldAcceptRemoteOrders(incoming)) orders=incoming;
       }catch(e){}
       // Deterministic behavior: do not fallback to /api/data.jb_orders snapshots.
     }catch(e){}
@@ -12940,20 +12945,11 @@ async function startPendingPoll(){
     _pendingPollLastVersion = _remoteDbVersion;
 
     try{
-      const api=await ensureWorkingApiBase({silent:true});
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
-        const ordRes=await fetch(api+'/api/orders',{headers:getAuthHeaders()});
-        if(ordRes.ok){
-          const od=await ordRes.json();
-          newOrders=Array.isArray(od&&od.orders)?od.orders:[];
-          if(od&&od.localOnly){
-            newOrders=[];
-          }
-        }else{
-          return;
-        }
+        const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
+        newOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
       }catch{
         return;
       }

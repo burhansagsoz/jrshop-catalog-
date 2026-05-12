@@ -1,5 +1,5 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260419-api-pass-through-v2';
+const CACHE_VERSION = 'jrshop-v20260512-spa-navigation-fallback-v1';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
@@ -45,6 +45,24 @@ self.addEventListener('fetch', e => {
     e.request.method !== 'GET'
   ) {
     e.respondWith(fetch(e.request));
+    return;
+  }
+
+  const acceptsHtml = (e.request.headers.get('accept') || '').includes('text/html');
+  const isNavigation = e.request.mode === 'navigate' || acceptsHtml;
+  const looksLikeFile = /\.[a-z0-9]{2,8}$/i.test(url.pathname);
+
+  // SPA route fallback: /orders, /settings, /my-orders gibi path'ler
+  // refresh/F5 ile istendiğinde fiziksel dosya aratmak yerine index.html ver.
+  if (isNavigation && !looksLikeFile) {
+    e.respondWith(
+      fetch(e.request)
+        .then(response => {
+          if (response && response.ok) return response;
+          return caches.match('/index.html').then(cached => cached || fetch('/index.html'));
+        })
+        .catch(() => caches.match('/index.html').then(cached => cached || fetch('/index.html')))
+    );
     return;
   }
 
