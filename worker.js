@@ -1374,6 +1374,10 @@ function getRequiredRolesForRoute(path, method) {
   return null;
 }
 
+function isResellerChatSyncKey(key) {
+  return String(key || '').trim().startsWith('jb_chat_');
+}
+
 function roleAllowed(requiredRoles, role) {
   if (!Array.isArray(requiredRoles) || !requiredRoles.length) return true;
   const normalized = String(role || '').trim().toLowerCase();
@@ -1393,6 +1397,26 @@ function orderBelongsToAuthContext(order, authContext) {
   const resellerId = String(order && order.resellerId || '').trim();
   const resellerEmail = String(order && order.resellerEmail || order && order.email || '').trim().toLowerCase();
   return (!!actorId && resellerId === actorId) || (!!email && resellerEmail === email);
+}
+
+function sanitizeOrderForResellerClient(order) {
+  if (!order || typeof order !== 'object') return null;
+  return {
+    id: String(order.id || ''),
+    ref: String(order.ref || ''),
+    ts: Number(order.ts) || 0,
+    updatedAt: Number(order.updatedAt) || Number(order.ts) || 0,
+    v: Number(order.v) || 0,
+    status: String(order.status || ''),
+    pendingApproval: !!order.pendingApproval,
+    resellerId: String(order.resellerId || ''),
+    resellerEmail: String(order.resellerEmail || order.email || '').trim().toLowerCase(),
+    resellerName: String(order.resellerName || '').trim(),
+    products: Array.isArray(order.products) ? order.products.map((p) => ({
+      name: String(p && p.name || ''),
+      img: String(p && p.img || '')
+    })) : []
+  };
 }
 
 function shouldApplyReplayGuard(path, method) {
@@ -1824,7 +1848,15 @@ async function enforceEndpointSecurity(request, env, path, method) {
   }
 
   const authContext = auth.context || context;
-  const requiredRoles = getRequiredRolesForRoute(path, method);
+  let requiredRoles = getRequiredRolesForRoute(path, method);
+  if (path === '/api/sync' && String(method || '').toUpperCase() === 'POST') {
+    try {
+      const body = await request.clone().json().catch(() => ({}));
+      requiredRoles = isResellerChatSyncKey(body && body.key) ? ['Admin', 'Staff', 'Reseller'] : ['Admin', 'Staff'];
+    } catch (_e) {
+      requiredRoles = ['Admin', 'Staff'];
+    }
+  }
   if (requiredRoles && authContext.authMode === 'open') {
     logWorker('error', 'role_guard_auth_not_configured', {
       path,
@@ -2664,9 +2696,19 @@ async function getData(db, requestUrl = null, authContext = null) {
     data.jb_users = data.jb_users_backup;
   }
   if (isResellerContext(authContext)) {
-    const allowed = new Set(['jb_catalog', 'jb_cat_categories', 'jb_settings', 'jb_templates', 'jb_notif', 'jb_feed', 'jb_catalog_orders_map']);
+    // Resellers may only see a limited set of keys. Allow `jb_users` as a
+    // read-only, sanitized list (id, email, role, dname) so features like the
+    // reseller leaderboard can work without exposing sensitive fields.
+    const allowed = new Set(['jb_catalog', 'jb_cat_categories', 'jb_settings', 'jb_templates', 'jb_notif', 'jb_feed', 'jb_catalog_orders_map', 'jb_users']);
     for (const key of Object.keys(data)) {
       if (!allowed.has(key)) delete data[key];
+    }
+    if (Array.isArray(data.jb_users)) {
+      try {
+        data.jb_users = data.jb_users.map(sanitizeUserForClient).filter(Boolean);
+      } catch (_e) {
+        data.jb_users = [];
+      }
     }
   }
   return json({ data });
@@ -3098,9 +3140,14 @@ async function getOrders(db, authContext = null, opts = {}) {
     const tableOrders = rows.results
       .map(r => { try { return JSON.parse(r.data); } catch { return null; } })
       .filter(Boolean);
-    const orders = tableOrders
-      .filter(order => !(order && order.deletedAt))
-      .filter(order => orderBelongsToAuthContext(order, authContext))
+    const visibleOrders = isResellerContext(authContext)
+      ? tableOrders
+          .filter(order => !(order && order.deletedAt))
+          .map(sanitizeOrderForResellerClient)
+          .filter(Boolean)
+      : tableOrders.filter(order => !(order && order.deletedAt));
+    const orders = visibleOrders
+      .filter(order => !isResellerContext(authContext) || true)
       .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
     const incremental = !!(sinceTs > 0 || sinceV > 0);
     const filteredOrders = incremental

@@ -3537,7 +3537,10 @@ function renderPendingInTable(){
     </tr>`;
   }).join('');
 }
-function goBulkCN(el){setNav(el);showPage('pg-bulk-cn');document.getElementById('pg-title').textContent='Bulk CN Tracking';hideTop();stopCamera();stopBCNCamera();_bcnTab='pending';renderBulkCN('');}
+function goBulkCN(el){
+  console.log('[debug] goBulkCN route entered:', { route:'/bulk-cn', tab:'pending' });
+  setNav(el);showPage('pg-bulk-cn');document.getElementById('pg-title').textContent='Bulk CN Tracking';hideTop();stopCamera();stopBCNCamera();_bcnTab='pending';renderBulkCN('');
+}
 function goCatalog(el){setNav(el);showPage('pg-catalog');document.getElementById('pg-title').textContent='Product Catalog';hideTop();renderCatalog();}
 function goActivity(el){setNav(el);showPage('pg-activity');document.getElementById('pg-title').textContent='Activity Log';hideTop();renderActivityLog();}
 function goBarcode(el){setNav(el);showPage('pg-barcode');document.getElementById('pg-title').textContent='Depot Scanner';hideTop();stopBCNCamera();setScanMode('find');}
@@ -4046,17 +4049,29 @@ function triggerResellerNotif(o,type){
   toast(`📧 Notification → ${reseller.dname||reseller.email}`,'info');
 }
 
-function saveProductCN(orderId, prodIdx){
+async function saveProductCN(orderId, prodIdx){
   const o=orders.find(x=>x.id===orderId);if(!o)return;o.updatedAt=Date.now();
   const val=document.getElementById(`cn-prod-${prodIdx}`)?.value.trim();
   if(!val){toast('⚠️ Enter tracking number','err');return;}
   if(!o.products[prodIdx]) return;
   o.products[prodIdx].cnTracking=val;
   if(prodIdx===0) o.cnTracking=val; // backward compat
-  saveOrders();logActivity('tracking',`CN tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)} - ${o.products[prodIdx].name||'Product '+(prodIdx+1)})`,o.id);
+  const _saveRes = await saveOrders([orderId], { allowFallbackOnStrictFailure: true });
+  console.log('[debug] saveProductCN saveOrders result:', _saveRes);
+  try{ console.log('[debug] jb_sync_fallback:', JSON.parse(localStorage.getItem('jb_sync_fallback')||'{}')); }catch(_e){}
+  logActivity('tracking',`CN tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)} - ${o.products[prodIdx].name||'Product '+(prodIdx+1)})`,o.id);
   selectOrder(orderId);toast('✅ CN tracking saved!','ok');
 }
-function saveUk(){const o=orders.find(x=>x.id===selId);if(!o)return;const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}o.ukTracking=val;o.updatedAt=Date.now();if(orderStatus(o)==='Sent to Factory')o.status='Shipped';saveOrders([o.id]);logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);selectOrder(o.id);toast('✅ UK tracking saved!','ok');}
+async function saveUk(){
+  const o=orders.find(x=>x.id===selId);if(!o)return;
+  const val=document.getElementById('uk-input').value.trim();if(!val){toast('⚠️ Enter tracking number','err');return;}
+  o.ukTracking=val; o.updatedAt=Date.now(); if(orderStatus(o)==='Sent to Factory') o.status='Shipped';
+  const _saveRes = await saveOrders([o.id], { allowFallbackOnStrictFailure: true });
+  console.log('[debug] saveUk saveOrders result:', _saveRes);
+  try{ console.log('[debug] jb_sync_fallback:', JSON.parse(localStorage.getItem('jb_sync_fallback')||'{}')); }catch(_e){}
+  logActivity('tracking',`UK tracking added: ${val} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
+  selectOrder(o.id);toast('✅ UK tracking saved!','ok');
+}
 function saveNote(){const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();o.note=document.getElementById('d-note-input').value.trim();saveOrders();selectOrder(o.id);toast('✅ Note saved!','ok');}
 
@@ -5560,6 +5575,7 @@ function setBCNTab(tab,btn){
   renderBulkCN(document.getElementById('bcn-search')?.value||'');
 }
 function renderBulkCN(search){
+  console.log('[debug] renderBulkCN called:', { search:String(search||''), tab:_bcnTab, orders:Array.isArray(orders)?orders.length:0 });
   const q=(search||'').toLowerCase().trim();
   let list;
   if(_bcnTab==='pending'){
@@ -5623,7 +5639,7 @@ function renderBulkCN(search){
     </div>`;
   }).join('');
 }
-function saveSingleCN(orderId,prodIdx){
+async function saveSingleCN(orderId,prodIdx){
   const inp=document.getElementById(`bcnp-${orderId}-${prodIdx}`);
   if(!inp||!inp.value.trim()){toast('⚠️ Enter CN tracking','err');return;}
   const o=orders.find(x=>x.id===orderId);if(!o)return;o.updatedAt=Date.now();
@@ -5633,17 +5649,29 @@ function saveSingleCN(orderId,prodIdx){
   // arrived stays FALSE — physical package not here yet
   if(prodIdx===0) o.cnTracking=inp.value.trim();
   if(['New','Sent to Factory'].includes(orderStatus(o))) o.status='At Depot';
-  saveOrders();updateBadges();
+  const _saveRes=await saveOrders([orderId], { allowFallbackOnStrictFailure: true });
+  console.log('[debug] saveSingleCN saveOrders result:', _saveRes);
+  try{ console.log('[debug] jb_sync_fallback:', JSON.parse(localStorage.getItem('jb_sync_fallback')||'{}')); }catch(_e){}
+  if(_saveRes&&_saveRes.ok){
+    clearLocalOrderMutation(orderId);
+  }
+  updateBadges();
   logActivity('tracking',`CN tracking: ${inp.value.trim()} → ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)} - ${prods[prodIdx].name||'P'+(prodIdx+1)})`,o.id);
   toast('✅ CN saved — waiting for physical package','ok');
   renderBulkCN(document.getElementById('bcn-search')?.value||'');
 }
-function clearProductCN(orderId,prodIdx){
+async function clearProductCN(orderId,prodIdx){
   const o=orders.find(x=>x.id===orderId);if(!o||!o.products[prodIdx])return;
   o.products[prodIdx].cnTracking='';
   o.products[prodIdx].arrived=false;
   if(prodIdx===0) o.cnTracking='';
-  saveOrders();renderBulkCN(document.getElementById('bcn-search')?.value||'');
+  const _saveRes=await saveOrders([orderId], { allowFallbackOnStrictFailure: true });
+  console.log('[debug] clearProductCN saveOrders result:', _saveRes);
+  try{ console.log('[debug] jb_sync_fallback:', JSON.parse(localStorage.getItem('jb_sync_fallback')||'{}')); }catch(_e){}
+  if(_saveRes&&_saveRes.ok){
+    clearLocalOrderMutation(orderId);
+  }
+  renderBulkCN(document.getElementById('bcn-search')?.value||'');
   toast('✅ CN cleared','info');
 }
 
@@ -13313,9 +13341,6 @@ function startGlobalChatPoll(){
 
 async function pollAllChats(){
   if(!me || me.role !== 'Admin') return;
-  // Skip if nothing changed in D1
-  if(_remoteDbVersion && _chatPollLastVersion === _remoteDbVersion) return;
-  _chatPollLastVersion = _remoteDbVersion;
   try{
     // Check each reseller's chat key
     const resellers=users.filter(u=>u.role==='Reseller');
@@ -13641,16 +13666,13 @@ let _lastResUnreadCount = 0;
 function startResellerMessagePoll(){
   if(_resMsgPollInterval) clearInterval(_resMsgPollInterval);
   // Keep unread badge updated even when Firebase mode is enabled.
-  const pollMs=getFirebaseEnabled()?3000:5000;
+  const pollMs=getFirebaseEnabled()?2000:3500;
   _resMsgPollInterval = setInterval(checkResellerUnreadMessages, pollMs);
   checkResellerUnreadMessages(); // Initial check
 }
 
 async function checkResellerUnreadMessages(){
   if(!me) return;
-  // Skip if nothing changed in D1
-  if(_remoteDbVersion && _resMsgPollLastVersion === _remoteDbVersion) return;
-  _resMsgPollLastVersion = _remoteDbVersion;
   try{
     const chatKey='jb_chat_'+me.id;
     const data=await fetchDataMapByKeys([chatKey]);
@@ -16262,8 +16284,9 @@ async function staffSaveTracking(){
   
   _staffCurrentOrder.ukTracking = tracking;
   _staffCurrentOrder.updatedAt = Date.now();
-  await saveOrders([_staffCurrentOrder.id]);
-  
+  const _saveRes = await saveOrders([_staffCurrentOrder.id], { allowFallbackOnStrictFailure: true });
+  console.log('[debug] staffSaveTracking saveOrders result:', _saveRes);
+  try{ console.log('[debug] jb_sync_fallback:', JSON.parse(localStorage.getItem('jb_sync_fallback')||'{}')); }catch(_e){}
   toast('✅ 运单号已保存','ok');
   
   // 添加到最近操作
@@ -16482,6 +16505,7 @@ let _cnProductQueue=[], _cnProductQueueIdx=0, _cnProductPending=null;
 async function processBulkImages(input){
   if(!input.files||!input.files.length) return;
   const files=[...input.files];
+  console.log('[debug] processBulkImages started:', { fileCount:files.length, route:'/bulk-cn' });
   const statusEl=document.getElementById('bulk-img-status');
   const resultsEl=document.getElementById('bulk-img-results');
   statusEl.style.display='block';
@@ -16852,6 +16876,7 @@ async function aiReadShippingLabel(imagePayload,fileName){
 function showBulkResults(results){
   const el=document.getElementById('bulk-img-results');
   if(!results.length){el.innerHTML='';return;}
+  console.log('[debug] showBulkResults called:', { resultCount:results.length });
 
   // Match each result with orders
   const matched=results.map(r=>{
@@ -16952,8 +16977,9 @@ function onManualOrderSelect(idx,sel){
     </label>`).join('');
 }
 
-function saveAllBulkCN(){
+async function saveAllBulkCN(){
   const results=window._bulkCNResults||[];
+  console.log('[debug] saveAllBulkCN clicked:', { resultCount:results.length });
   let saved=0;
   results.forEach((r,i)=>{
     if(!r.order||r.matchType==='error') return;
@@ -16984,7 +17010,17 @@ function saveAllBulkCN(){
     saved++;
   });
   if(!saved){toast('⚠️ Kaydedilecek eşleşme not found','err');return;}
-  saveOrders();updateBadges();
+  const _saveRes = await saveOrders([...(results||[]).filter(r=>r&&r.order&&r.matchType!=='error').map(r=>r.order.id)], { allowFallbackOnStrictFailure: true });
+  console.log('[debug] saveAllBulkCN saveOrders result:', _saveRes);
+  try{ console.log('[debug] jb_sync_fallback:', JSON.parse(localStorage.getItem('jb_sync_fallback')||'{}')); }catch(_e){}
+  if(_saveRes&&_saveRes.ok){
+    (results||[]).forEach(function(r){
+      if(r&&r.order&&r.matchType!=='error'&&r.order.id){
+        clearLocalOrderMutation(r.order.id);
+      }
+    });
+  }
+  updateBadges();
   toast(`✅ ${saved} sipariş CN tracking eklendi!`,'ok');
   // Clear
   document.getElementById('bulk-img-results').innerHTML=`
@@ -17001,7 +17037,7 @@ function saveAllBulkCN(){
 // Old product modal (keep for backward compat)
 let _cnPMOrderId=null,_cnPMTracking=null;
 function closeCNProductModal(){document.getElementById('cn-product-modal').classList.remove('open');}
-function saveCNProductSelection(){
+async function saveCNProductSelection(){
   const checkboxes=document.querySelectorAll('#cnpm-products input[type=checkbox]:checked');
   if(!checkboxes.length){toast('⚠️ Select at least one product','err');return;}
   const o=orders.find(
@@ -17015,7 +17051,13 @@ function saveCNProductSelection(){
     }
   });
   if(['New','Sent to Factory'].includes(orderStatus(o))) o.status='At Depot';
-  saveOrders();updateBadges();
+  const _saveRes = await saveOrders([o.id], { allowFallbackOnStrictFailure: true });
+  console.log('[debug] saveCNProductSelection saveOrders result:', _saveRes);
+  try{ console.log('[debug] jb_sync_fallback:', JSON.parse(localStorage.getItem('jb_sync_fallback')||'{}')); }catch(_e){}
+  if(_saveRes&&_saveRes.ok){
+    clearLocalOrderMutation(o.id);
+  }
+  updateBadges();
   closeCNProductModal();
   // Process next in queue
   _cnProductQueueIdx++;
