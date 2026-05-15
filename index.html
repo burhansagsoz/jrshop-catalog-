@@ -701,7 +701,7 @@ body.dark .modal-foot{background:#263548;}
       </div>
 
       <!-- ALERTS -->
-      <div class="page scrl" id="pg-alerts">
+      <div class="page scrl" id="pg-alerts" style="overflow-y:auto !important;overflow-x:hidden !important;min-height:0;height:100%;">
         <div class="info-card">
           <div class="card-head">
             <h3>🔔 Pending Alerts</h3>
@@ -710,7 +710,7 @@ body.dark .modal-foot{background:#263548;}
               <button class="btn btn-ghost btn-xs" onclick="clearAcknowledgedAlerts()">✓ Mark All Read</button>
             </div>
           </div>
-          <div id="alerts-list"></div>
+          <div id="alerts-list" style="max-height:calc(100dvh - 230px);overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;"></div>
         </div>
       </div>
 
@@ -4007,8 +4007,12 @@ async function advanceStatus(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
   o.updatedAt=Date.now();
   const next=S_NEXT[o.status];if(!next)return;
+  const keepUkTracking=o.ukTracking;
+  const keepCnTracking=o.cnTracking;
   const oldStatus=o.status;
   o.status=next;if(next==='Completed'&&!o.completedAt)o.completedAt=Date.now();
+  if(!o.ukTracking&&keepUkTracking) o.ukTracking=keepUkTracking;
+  if(!o.cnTracking&&keepCnTracking) o.cnTracking=keepCnTracking;
   const saveResult=await saveOrders([o.id]);
   if(!saveResult||!saveResult.ok){
     toast('⚠️ Status could not be saved to cloud','err');
@@ -4427,7 +4431,12 @@ function openEditModal(){
   document.getElementById('e-country').value=o.country||'GB';document.getElementById('e-ref').value=o.ref||'';
   document.getElementById('e-email').value=o.email||'';document.getElementById('e-fblink').value=o.fblink||'';
   document.getElementById('e-status').value=o.status||'New';document.getElementById('e-note').value=o.note||'';
-  const resSel=document.getElementById('e-reseller');resSel.innerHTML='<option value="">— None —</option>'+users.filter(u=>u.role==='Reseller').map(u=>`<option value="${u.id}" ${o.resellerId===u.id?'selected':''}>${esc(u.dname||u.email)}</option>`).join('');
+  const resSel=document.getElementById('e-reseller');
+  const resellerOptions=users.filter(u=>String(u&&u.role||'').toLowerCase()==='reseller');
+  const hasAssignedReseller=!!(o.resellerId&&resellerOptions.some(u=>String(u.id)===String(o.resellerId)));
+  const fallbackAssignedReseller=!hasAssignedReseller&&o.resellerId?users.find(u=>String(u&&u.id||'')===String(o.resellerId)):null;
+  const fallbackOption=fallbackAssignedReseller?`<option value="${fallbackAssignedReseller.id}" selected>${esc((fallbackAssignedReseller.dname||fallbackAssignedReseller.email||'Assigned reseller')+' (assigned)')}</option>`:'';
+  resSel.innerHTML='<option value="">— None —</option>'+fallbackOption+resellerOptions.map(u=>`<option value="${u.id}" ${String(o.resellerId||'')===String(u.id)?'selected':''}>${esc(u.dname||u.email)}</option>`).join('');
   const supSel=document.getElementById('e-supplier2');supSel.innerHTML='<option value="">— Select —</option>'+suppliers.map(s=>`<option value="${s.id}" ${o.supplierId===s.id?'selected':''}>${esc(s.name)}</option>`).join('');
   renderEditProductImageList(o);
   document.getElementById('edit-modal').classList.add('open');
@@ -4439,8 +4448,10 @@ function closeEditModal(){
   const list=document.getElementById('e-prod-imgs');
   if(list) list.innerHTML='';
 }
-function saveEdit(){
+async function saveEdit(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
+  // Capture previous snapshot for op baseVersion calculation
+  const prevOrderSnapshot = Object.assign({}, o);
   o.updatedAt=Date.now();
   const name=document.getElementById('e-name').value.trim();const addr=document.getElementById('e-addr').value.trim();const city=document.getElementById('e-city').value.trim();const post=document.getElementById('e-post').value.trim();
   if(!name||!addr||!city||!post){toast('⚠️ Fill required fields','err');return;}
@@ -4459,10 +4470,49 @@ function saveEdit(){
     prods[idx].img=nextImg||null;
   });
   o.products=prods;
+  // Immediately queue a local fallback operation so edits survive reloads
+  let op=null;
+  try{ op = buildOperationFromOrder(o, prevOrderSnapshot||null); if(op) queueOrderOperationFallback(op); }catch(_e){op=null}
   if(oldStatus!=='Shipped'&&o.status==='Shipped'&&o.resellerId&&notifSettings.shipped){
     setTimeout(()=>{if(confirm('Send shipping notification to reseller?'))triggerResellerNotif(o,'shipped');},300);
   }
-  saveOrders();closeEditModal();selectOrder(o.id);render();updateBadges();
+
+  // Attempt to save and sync to cloud now; fall back to queued ops if needed
+  try{
+    await saveOrders([o.id],{allowFallbackOnStrictFailure:true});
+    if(op){
+      // Try direct POST to /api/order (authenticated)
+      try{
+        const api = await ensureWorkingApiBase({silent:true});
+        const res = await fetch(api + '/api/order',{
+          method: 'POST',
+          headers: getAuthHeaders({'Content-Type':'application/json'}),
+          body: JSON.stringify({ order: o, opId: op.opId||'', v: Number(o.v)||0, event: null })
+        });
+        let payload = {};
+        try{ payload = await res.json(); }catch(_e){ payload = {}; }
+        if(res.ok && !(payload && payload.localOnly)){
+          // remove op from local fallback queue
+          try{
+            const map = readLocalSyncFallback();
+            const arr = Array.isArray((map['jb_order_ops']&&map['jb_order_ops'].value))?map['jb_order_ops'].value:[];
+            const dedup = arr.filter(function(row){ return String(row&&row.opId||'')!==String(op.opId||''); });
+            persistLocalSyncFallback('jb_order_ops', dedup);
+          }catch(_e){}
+          try{ clearLocalOrderMutation(o.id); }catch(_e){}
+          toast('✅ Saved to cloud','ok');
+        }else{
+          toast('⚠️ Saved locally; will sync to cloud shortly','info');
+        }
+      }catch(_e){
+        toast('⚠️ Saved locally; will sync to cloud shortly','info');
+      }
+    }
+  }catch(_e){
+    toast('⚠️ Saved locally; will sync to cloud shortly','info');
+  }
+
+  closeEditModal();selectOrder(o.id);render();updateBadges();
   logActivity('edited',`Order edited: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   playSound('success');
   toast('✅ Updated!','ok');
@@ -5359,8 +5409,12 @@ function applyBulkStatus(){
   const changedIds=[];
   orders.forEach(o=>{
     if(!_selected.has(o.id)) return;
+    const keepUkTracking=o.ukTracking;
+    const keepCnTracking=o.cnTracking;
     o.status=status;
     if(status==='Completed'&&!o.completedAt) o.completedAt=Date.now();
+    if(!o.ukTracking&&keepUkTracking) o.ukTracking=keepUkTracking;
+    if(!o.cnTracking&&keepCnTracking) o.cnTracking=keepCnTracking;
     o.updatedAt=Date.now();
     changedIds.push(o.id);
   });
@@ -7071,6 +7125,8 @@ label.fl{font-size:12px;font-weight:700;color:#475569;display:block;margin-botto
     <div class="section-title">📍 Delivery Address</div>
     <label class="fl">Street Address <span style="color:#ef4444;">*</span></label><input type="text" class="fi" id="co-addr" placeholder="12 Baker Street" autocomplete="address-line1">
     <label class="fl">City <span style="color:#ef4444;">*</span></label><input type="text" class="fi" id="co-city" placeholder="London" autocomplete="address-level2">
+    <label class="fl">State <span style="color:#ef4444;">*</span></label><input type="text" class="fi" id="co-state" placeholder="Greater London" autocomplete="address-level1">
+    <label class="fl">Country <span style="color:#ef4444;">*</span></label><input type="text" class="fi" id="co-country" placeholder="United Kingdom" autocomplete="country-name" value="United Kingdom">
     <label class="fl">Postcode <span style="color:#ef4444;">*</span></label><input type="text" class="fi" id="co-post" placeholder="SW1A 1AA" autocomplete="postal-code" style="text-transform:uppercase;">
     <label class="fl">State / County</label><input type="text" class="fi" id="co-county" placeholder="Greater London" autocomplete="address-level1">
     <label class="fl">Order Notes</label><textarea class="fi" id="co-note" placeholder="Colour, size preference, special requests…" style="min-height:70px;"></textarea>
@@ -7219,16 +7275,10 @@ label.fl{font-size:12px;font-weight:700;color:#475569;display:block;margin-botto
     'function openCheckout(){',
     '  document.getElementById("cart-overlay").classList.remove("open");',
     '  document.getElementById("checkout-overlay").classList.add("open");',
-    '  var itemCount=cart.reduce(function(s,i){return s+i.qty},0);',
-    '  var subtotal=cart.reduce(function(s,i){return s+(i.price*i.qty)},0);',
-    '  var shipping=itemCount>0?5+Math.max(0,itemCount-1)*2.5:0;',
-    '  var el=document.getElementById("co-shipping-display");',
-    '  if(el)el.innerHTML="<strong>🚚 Shipping: £"+shipping.toFixed(2)+"</strong> (£5 first item + £2.50 per extra item)<br><strong>💰 Total inc. shipping: £"+(subtotal+shipping).toFixed(2)+"</strong>";',
-    '}',
+    '  var total=cart.reduce(function(s,i){return s+(i.price*i.qty)},0);',
     'function closeCheckout(){document.getElementById("checkout-overlay").classList.remove("open");}',
     '',
-    'function updateCartQty(i,d){',
-    '  cart[i].qty+=d;',
+    '      "<div style="display:flex;justify-content:space-between;font-size:20px;font-weight:900;color:#f97316;border-top:2px solid #f1f5f9;padding-top:8px;"><span>Total:</span><span>£"+total.toFixed(2)+"</span></div>";',
     '  if(cart[i].qty<1)cart.splice(i,1);',
     '  updateCartBadge();',
     '  renderCartItems();',
@@ -7277,19 +7327,19 @@ label.fl{font-size:12px;font-weight:700;color:#475569;display:block;margin-botto
     '  var phone=document.getElementById("co-phone").value.trim();',
     '  var addr=document.getElementById("co-addr").value.trim();',
     '  var city=document.getElementById("co-city").value.trim();',
+    '  var state=document.getElementById("co-state").value.trim();',
+    '  var country=document.getElementById("co-country").value.trim();',
     '  var post=document.getElementById("co-post").value.trim();',
     '  var county=document.getElementById("co-county")?document.getElementById("co-county").value.trim():"";',
-    '  if(!name||!phone||!addr||!city||!post){toast2("Please fill in all required fields (*)");return;}',
+    '  if(!name||!phone||!addr||!city||!state||!country||!post){toast2("Please fill in all required fields (*)");return;}',
     '  if(post.length<5||post.length>8){toast2("Please enter a valid UK postcode");return;}',
     '  if(!cart.length){toast2("Your cart is empty");return;}',
     '  var orderId="JRORDER-"+Date.now();',
     '  var subtotal=cart.reduce(function(s,i){return s+(i.price*i.qty)},0);',
-    '  var itemCount=cart.reduce(function(s,i){return s+i.qty},0);',
-    '  var shipping=itemCount>0?5+Math.max(0,itemCount-1)*2.5:0;',
-    '  var total=subtotal+shipping;',
+    '  var total=subtotal;',
     '  var orderData={id:orderId,name:name,phone:phone,',
     '    email:document.getElementById("co-email").value.trim(),',
-    '    address:addr,city:city,postcode:post,county:county,country:"GB",',
+    '    address:addr,city:city,state:state,postcode:post,county:county,country:country,',
     '    note:document.getElementById("co-note").value.trim(),',
     '    products:cart.map(function(i){return{name:i.name+(i.variant?" — "+i.variant:""),qty:i.qty,price:i.price}}),',
     '    total:total,ts:Date.now()};',
@@ -7306,11 +7356,9 @@ label.fl{font-size:12px;font-weight:700;color:#475569;display:block;margin-botto
     '    +"Phone: "+phone+"\\n"',
     '    +(emailVal?"Email: "+emailVal+"\\n":"")+"\\n"',
     '    +"📦 ITEMS\\n"+itemsList+"\\n\\n"',
-    '    +"💰 SUBTOTAL: £"+subtotal.toFixed(2)+"\\n"',
-    '    +"🚚 SHIPPING: £"+shipping.toFixed(2)+"\\n"',
     '    +"💰 TOTAL: £"+total.toFixed(2)+"\\n\\n"',
     '    +"📍 DELIVERY ADDRESS\\n"',
-    '    +addr+"\\n"+city+", "+post+(county?", "+county:"")+", UK\\n"',
+    '    +addr+"\\n"+city+", "+state+" "+post+(county?", "+county:"")+"\\n"+country+"\\n"',
     '    +(noteVal?"\\n📝 Note: "+noteVal+"\\n":"")+"\\n"',
     '    +"📋 ORDER CODE (for tracking):\\n"+orderId+"\\n\\n"',
     '    +"[Data:"+btoa(unescape(encodeURIComponent(JSON.stringify(orderData))))+"]";',
@@ -12891,7 +12939,11 @@ function quickAdvance(id){
   const o=orders.find(x=>x.id===id);if(!o)return;
   o.updatedAt=Date.now();
   const next=S_NEXT[o.status];if(!next)return;
+  const keepUkTracking=o.ukTracking;
+  const keepCnTracking=o.cnTracking;
   const old=o.status;o.status=next;
+  if(!o.ukTracking&&keepUkTracking) o.ukTracking=keepUkTracking;
+  if(!o.cnTracking&&keepCnTracking) o.cnTracking=keepCnTracking;
   saveOrders();updateBadges();render();
   logActivity('status',`${old} → ${next}: ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
   // Send push to reseller
@@ -15128,11 +15180,31 @@ function renderResFinance(){
 let _feedImgData = null; // geriye dönük uyumluluk
 let _feedImgs = []; // çoklu görseller [{data, url}]
 
+function renderFeedImagePreviews(){
+  const container=document.getElementById('feed-imgs-preview');
+  if(!container) return;
+  container.innerHTML='';
+  _feedImgs.forEach(function(item,idx){
+    if(!item||!item.data) return;
+    const wrap=document.createElement('div');
+    wrap.style.cssText='position:relative;width:80px;height:80px;border-radius:10px;overflow:hidden;border:1px solid var(--border);';
+    const img=document.createElement('img');
+    img.src=item.data;
+    img.style.cssText='width:100%;height:100%;object-fit:cover;';
+    img.onerror=function(){console.error('Image preview failed');};
+    const del=document.createElement('button');
+    del.textContent='✕';
+    del.style.cssText='position:absolute;top:3px;right:3px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;';
+    del.onclick=function(){_feedImgs.splice(idx,1);renderFeedImagePreviews();};
+    wrap.appendChild(img);
+    wrap.appendChild(del);
+    container.appendChild(wrap);
+  });
+}
+
 function previewFeedImgs(input){
   if(!input.files||!input.files.length) return;
   const files=Array.from(input.files);
-  const container=document.getElementById('feed-imgs-preview');
-  if(!container){console.error('feed-imgs-preview not found');return;}
   files.forEach(function(file){
     const reader=new FileReader();
     reader.onload=async function(e){
@@ -15140,20 +15212,7 @@ function previewFeedImgs(input){
         // Feed cards should keep detail: use larger target + higher JPEG quality.
         const compressed=await compressImage(e.target.result,1280,0.88);
         _feedImgs.push({data:compressed,url:null});
-        const idx=_feedImgs.length-1;
-        const wrap=document.createElement('div');
-        wrap.style.cssText='position:relative;width:80px;height:80px;border-radius:10px;overflow:hidden;border:1px solid var(--border);';
-        const img=document.createElement('img');
-        img.src=compressed;
-        img.style.cssText='width:100%;height:100%;object-fit:cover;';
-        img.onerror=function(){console.error('Image preview failed');};
-        const del=document.createElement('button');
-        del.textContent='✕';
-        del.style.cssText='position:absolute;top:3px;right:3px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;';
-        del.onclick=function(){_feedImgs.splice(idx,1);wrap.remove();};
-        wrap.appendChild(img);
-        wrap.appendChild(del);
-        container.appendChild(wrap);
+        renderFeedImagePreviews();
       }catch(err){console.error('previewFeedImgs error:',err);toast('Image preview error','err');}
     };
     reader.onerror=function(){console.error('FileReader error');toast('Could not read file','err');};
@@ -15168,8 +15227,7 @@ function previewFeedImg(input){ previewFeedImgs(input); }
 function clearFeedImg(){
   _feedImgData=null;
   _feedImgs=[];
-  const container=document.getElementById('feed-imgs-preview');
-  if(container) container.innerHTML='';
+  renderFeedImagePreviews();
   const inp=document.getElementById('feed-post-img');
   if(inp) inp.value='';
 }

@@ -71,7 +71,8 @@ self.addEventListener('fetch', e => {
   if (
     url.pathname === '/' ||
     url.pathname === '/index.html' ||
-    url.pathname.startsWith('/js/')
+    url.pathname.startsWith('/js/') ||
+    url.pathname.endsWith('.html')
   ) {
     e.respondWith(
       fetch(e.request)

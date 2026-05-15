@@ -140,6 +140,8 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
         <input class="fi" id="co-email" placeholder="Email *">
         <input class="fi full" id="co-addr" placeholder="Address *">
         <input class="fi" id="co-city" placeholder="City *">
+        <input class="fi" id="co-state" placeholder="State">
+        <input class="fi" id="co-country" placeholder="Country">
         <input class="fi" id="co-post" placeholder="Postcode *">
         <textarea class="fi full" id="co-note" placeholder="Notes (optional)" rows="3"></textarea>
       </div>
@@ -175,113 +177,36 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
   let qty=1;
   let messengerLink='';
   let _remoteCatalogSignature='';
-  const PUBLIC_FIREBASE_CONFIG={
-    apiKey:"AIzaSyBidcdMLlFsEp6c6P_tqwMMtP9w3wLKtFE",
-    authDomain:"jrshop-d732e.firebaseapp.com",
-    projectId:"jrshop-d732e",
-    storageBucket:"jrshop-d732e.appspot.com",
-    messagingSenderId:"1007615951734",
-    appId:"1:1007615951734:web:c8f2f44f02c2ee0f0f6146"
-  };
 
-  function toast(msg){
-    const el=document.getElementById('toast');
-    if(!el) return;
-    el.textContent=String(msg||'');
-    el.classList.add('on');
-    setTimeout(()=>el.classList.remove('on'),2200);
+  // Helper utilities (minimal implementations to avoid runtime errors)
+  function esc(s){ if(s===null||s===undefined) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function money(n){ const v=Number(n)||0; return '£'+v.toFixed(2); }
+  function toast(msg,timeout=1800){ const t=document.getElementById('toast'); if(!t) return; t.textContent=String(msg||''); t.classList.add('on'); setTimeout(()=>t.classList.remove('on'),timeout); }
+  function parsePrice(raw){ if(raw===null||raw===undefined) return 0; const s=String(raw).replace(/[^0-9.\-]/g,''); const v=parseFloat(s); return isNaN(v)?0:v; }
+  function optionSummary(opts){ if(!opts) return ''; try{ if(typeof opts==='string') return opts; if(Array.isArray(opts)) return opts.join(', '); if(typeof opts==='object') return Object.entries(opts).map(([k,v])=>v&&k?`${k}: ${v}`:v).filter(Boolean).join(', '); return String(opts);}catch(e){return ''; } }
+  function extractOptionGroups(p){ return Array.isArray(p&&p.optionGroups)?p.optionGroups:[]; }
+  function normalizeImageValue(img){ if(!img) return ''; try{ const s=String(img).trim(); if(!s) return ''; if(/^https?:\/\//i.test(s) || s.startsWith('/') || /^data:/i.test(s)) return s; return s; }catch(e){return ''; } }
+  function fetchWithTimeout(url,ms=5000,opts={}){ return new Promise((resolve,reject)=>{ const timer=setTimeout(()=>reject(new Error('Timeout')),ms); fetch(url,opts).then(r=>{clearTimeout(timer);resolve(r);}).catch(e=>{clearTimeout(timer);reject(e);}); }); }
+
+  function setQty(delta){
+    qty = Math.max(1, (Number(qty)||1) + Number(delta));
+    drawProductSheet();
   }
 
-  function fetchWithTimeout(url, ms, init){
-    const timeoutMs=Math.max(1200,Number(ms)||6000);
-    const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),timeoutMs);
-    const reqInit={...(init||{}),signal:controller.signal};
-    return fetch(url,reqInit).finally(()=>clearTimeout(timer));
-  }
-
-  function esc(s){
-    return String(s==null?'':s)
-      .replace(/&/g,'&amp;')
-      .replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;')
-      .replace(/"/g,'&quot;')
-      .replace(/'/g,'&#39;');
-  }
-
-  function money(v){
-    const n=Number(v)||0;
-    return '£'+n.toFixed(2);
-  }
-
-  function parsePrice(raw){
-    const str=String(raw==null?'':raw).replace(/[^0-9.]/g,'');
-    const n=Number(str);
-    return Number.isFinite(n)?n:0;
-  }
-
-  function normalizeImageValue(raw){
-    const src=String(raw==null?'':raw).trim();
-    return /^(https?:|data:|blob:|\/api\/image\/)/.test(src)?src:'';
-  }
-
-  function normalizeOpt(x){
-    if(typeof x==='string') return {value:x,label:x};
-    if(x&&typeof x==='object'){
-      const val=String(x.value||x.label||x.name||'').trim();
-      if(!val) return null;
-      return {value:val,label:val,img:normalizeImageValue(x.img||x.image||'')};
-    }
-    return null;
-  }
-
-  function extractOptionGroups(p){
-    const groups=[];
-    function pushGroup(name,list){
-      const opts=(Array.isArray(list)?list:[]).map(normalizeOpt).filter(Boolean);
-      const uniq=[...new Map(opts.map(o=>[o.value,o])).values()];
-      if(uniq.length) groups.push({name:String(name||'Option'),options:uniq});
-    }
-    const variantGroups=Array.isArray(p.variantGroups)?p.variantGroups:[];
-    variantGroups.forEach(g=>{
-      const values=Array.isArray(g&&g.values)?g.values:[];
-      const withImgs=values.map(v=>{
-        const normalized=normalizeOpt(v);
-        if(!normalized) return null;
-        if(g&&g.hasImg) normalized.img=normalizeImageValue(v&&v.img||normalized.img||'');
-        return normalized;
-      }).filter(Boolean);
-      pushGroup(g&&g.name||'Option',withImgs);
-    });
-
-    if(Array.isArray(p.sizes)) pushGroup('Size',p.sizes);
-    if(Array.isArray(p.colors)) pushGroup('Color',p.colors);
-
-    const variants=Array.isArray(p.variants)?p.variants:[];
-    variants.forEach(v=>{
-      if(typeof v==='string'){
-        pushGroup('Variant',[v]);
-        return;
-      }
-      if(!v||typeof v!=='object') return;
-      if(Array.isArray(v.options)){
-        pushGroup(v.name||v.label||v.type||'Option',v.options);
-      }else{
-        const one=normalizeOpt(v);
-        if(one) pushGroup('Variant',[one]);
-      }
-    });
-
-    const merged={};
-    groups.forEach(g=>{
-      const key=g.name.toLowerCase();
-      if(!merged[key]) merged[key]={name:g.name,options:[]};
-      merged[key].options.push(...g.options);
-    });
-    return Object.values(merged).map(g=>({
-      name:g.name,
-      options:[...new Map(g.options.map(o=>[o.value,o])).values()]
-    }));
+  function drawProductSheet(){
+    const el = document.getElementById('prod-sheet-content');
+    if(!currentProduct){ if(el) el.innerHTML=''; return; }
+    const p = currentProduct;
+    const gallery = getProductGallery(p);
+    const mainImage = selectedImage || p.img || (gallery[0]||'');
+    const img = mainImage ? `<div class="img-wrap"><img src="${esc(mainImage)}" onerror="this.style.display='none'"></div>` : `<div class="img-wrap"><div class="ph">🛍️</div></div>`;
+    const galleryHtml = gallery.length>1?`<div class="gallery-row">${gallery.map(src=>`<img class="gallery-thumb ${mainImage===src?'on':''}" src="${esc(src)}" onclick="selectProductImage('${encodeURIComponent(src)}')">`).join('')}</div>`:'';
+    const groups = (p.optionGroups||[]).map((g,gi)=>{
+      const chips = (g.options||[]).map((o,oi)=>`<button class="chip ${String(selectedOptions[g.name])===String(o.value)?'on':''}" onclick="setOptionByIndex(${gi},${oi})">${o.img?`<img class=\"chip-img\" src=\"${esc(o.img)}\">`:''}${esc(o.label||o.value)}</button>`).join('');
+      return `<div class="opt-wrap"><div class="opt-title">${esc(g.name)}</div><div class="chips">${chips}</div></div>`;
+    }).join('');
+    const html = `<div class="hrow"><h3 style="margin:0">${esc(p.name)}</h3><button class="btn" onclick="closeProductSheet()">Close</button></div>${img}${galleryHtml}<div class="tiny">${esc(p.desc||'')}</div><div style="margin-top:8px;font-size:22px;font-weight:900;color:#f97316;">${money(p.price)}</div>${groups}<div class="qty"><button onclick="setQty(-1)">−</button><b>${qty}</b><button onclick="setQty(1)">+</button></div><div style="margin-top:12px;"><button class="btn btn-pri" style="width:100%;" ${p.inStock?'':'disabled'} onclick="addCurrentToCart()">Add to Cart</button></div>`;
+    if(el) el.innerHTML = html;
   }
 
   function normalizeProduct(p){
@@ -497,63 +422,6 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
   }
   window.selectProductImage=selectProductImage;
 
-  function setQty(delta){
-    qty=Math.max(1,qty+delta);
-    drawProductSheet();
-  }
-  window.setQty=setQty;
-
-  function optionSummary(opts){
-    const keys=Object.keys(opts||{});
-    if(!keys.length) return '';
-    return keys.map(k=>k+': '+opts[k]).join(', ');
-  }
-
-  function drawProductSheet(){
-    if(!currentProduct) return;
-    const p=currentProduct;
-    const mainImage=selectedImage||resolveProductImage(p,selectedOptions,p.img||'');
-    const img=mainImage?`<img src="${esc(mainImage)}" style="width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:12px;margin:8px 0 10px;">`:'';
-    const gallery=getProductGallery(p);
-    const groups=(p.optionGroups||[]).map(g=>{
-      const groupIdx=(p.optionGroups||[]).findIndex(x=>x.name===g.name);
-      const chips=(g.options||[]).map((o,optIdx)=>{
-        const on=selectedOptions[g.name]===o.value;
-        if(o.img){
-          return `<button class="chip ${on?'on':''}" onclick="setOptionByIndex(${groupIdx},${optIdx})" style="display:flex;align-items:center;gap:6px;">
-            <img class="chip-img" src="${esc(o.img)}"><span>${esc(o.label)}</span>
-          </button>`;
-        }
-        return `<button class="chip ${on?'on':''}" onclick="setOptionByIndex(${groupIdx},${optIdx})">${esc(o.label)}</button>`;
-      }).join('');
-      return `<div class="opt-wrap">
-        <div class="opt-title">${esc(g.name)}</div>
-        <div class="chips">${chips}</div>
-      </div>`;
-    }).join('');
-    const galleryHtml=gallery.length>1?`<div class="gallery-row">${
-      gallery.map(src=>{
-        const token=encodeURIComponent(src);
-        return `<img class="gallery-thumb ${mainImage===src?'on':''}" src="${esc(src)}" onclick="selectProductImage(decodeURIComponent('${token}'))">`;
-      }).join('')
-    }</div>`:'';
-    const html=`<div class="hrow">
-      <h3 style="margin:0">${esc(p.name)}</h3>
-      <button class="btn" onclick="closeProductSheet()">Close</button>
-    </div>
-    ${img}
-    ${galleryHtml}
-    <div class="tiny">${esc(p.desc||'')}</div>
-    <div style="margin-top:8px;font-size:22px;font-weight:900;color:#f97316;">${money(p.price)}</div>
-    ${groups}
-    <div class="qty">
-      <button onclick="setQty(-1)">−</button><b>${qty}</b><button onclick="setQty(1)">+</button>
-    </div>
-    <div style="margin-top:12px;">
-      <button class="btn btn-pri" style="width:100%;" ${p.inStock?'':'disabled'} onclick="addCurrentToCart()">Add to Cart</button>
-    </div>`;
-    document.getElementById('prod-sheet-content').innerHTML=html;
-  }
 
   function cartKeyFor(product,opts){
     return product.id+'|'+JSON.stringify(opts||{});
@@ -660,13 +528,18 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
 
   function renderCart(){
     if(!cart.length){
-      cartListEl.innerHTML='<div class="empty">Your cart is empty.</div>';
-      cartSummaryEl.innerHTML='';
+      cartListEl.innerHTML = '<div class="empty">Your cart is empty.</div>';
+      cartSummaryEl.innerHTML = '';
+      floatCartBtn.style.display = 'none';
+      cartCountEl.textContent = '0';
+      goCheckoutBtn.disabled = true;
       return;
     }
-    cartListEl.innerHTML=cart.map(function(item,i){
-      const opts=optionSummary(item.options);
-      const img=item.img?`<img src="${esc(item.img)}" style="width:52px;height:52px;border-radius:10px;object-fit:cover;">`:'<div class="ph" style="width:52px;height:52px;border-radius:10px;background:#eef2f7;font-size:20px;">🛍️</div>';
+
+    floatCartBtn.style.display = 'inline-flex';
+    const itemsHtml = cart.map(function(item,i){
+      const opts = optionSummary(item.options);
+      const img = item.img ? `<img src="${esc(item.img)}" style="width:52px;height:52px;border-radius:10px;object-fit:cover;">` : `<div class="ph" style="width:52px;height:52px;border-radius:10px;background:#eef2f7;font-size:20px;">🛍️</div>`;
       return `<div class="cart-item">
         ${img}
         <div style="flex:1;">
@@ -682,14 +555,17 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
         </div>
       </div>`;
     }).join('');
-    const totals=getCartTotals();
-    cartSummaryEl.innerHTML=`
+
+    cartListEl.innerHTML = itemsHtml;
+    const totals = getCartTotals();
+    // Customer-facing summary: hide shipping and show subtotal as total
+    cartSummaryEl.innerHTML = `
       <div class="sum-row"><span>Items</span><span>${totals.itemCount}</span></div>
       <div class="sum-row"><span>Subtotal</span><span>${money(totals.subtotal)}</span></div>
-      <div class="sum-row"><span>Shipping</span><span>${money(totals.shipping)}</span></div>
-      <div class="sum-row total"><span>Total</span><span>${money(totals.total)}</span></div>
-      <div class="tiny" style="margin-top:6px;">Shipping rule: same category up to 4 items = £5, mixed categories = £5 first item + £2.50 each extra item.</div>
+      <div class="sum-row total"><span>Total</span><span>${money(totals.subtotal)}</span></div>
     `;
+    cartCountEl.textContent = String(totals.itemCount || 0);
+    goCheckoutBtn.disabled = totals.itemCount === 0;
   }
 
   function openCheckout(){
@@ -778,6 +654,8 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
     const email=getInput('co-email');
     const addr=getInput('co-addr');
     const city=getInput('co-city');
+    const state=getInput('co-state');
+    const country=getInput('co-country');
     const post=getInput('co-post');
     const note=getInput('co-note');
     if(!name||!phone||!email||!addr||!city||!post){
@@ -804,12 +682,13 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
       email,
       address:addr,
       city,
+      state,
+      country,
       postcode:post,
       note,
       products:cart.map(i=>({name:i.name,qty:i.qty,price:i.price,options:i.options,category:i.category||''})),
       subtotal,
-      shipping,
-      total,
+      total: subtotal,
       ts:Date.now()
     };
     let dataToken='';
@@ -822,15 +701,18 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans
       'Name: '+name,
       'Phone: '+phone,
       'Email: '+email,
-      'Address: '+addr+', '+city+' '+post,
+      'Address: '+addr,
+      'City: '+city,
+      state?('State: '+state):'',
+      country?('Country: '+country):'',
+      'Postcode: '+post,
       note?('Note: '+note):'',
       '',
       'Items:',
       ...lines,
       '',
       'SUBTOTAL: '+money(subtotal),
-      'SHIPPING: '+money(shipping),
-      'TOTAL: '+money(total),
+      'TOTAL: '+money(subtotal),
       dataToken?('[Data:'+dataToken+']'):''
     ].filter(Boolean).join('\n');
 

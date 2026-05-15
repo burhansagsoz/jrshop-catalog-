@@ -1344,6 +1344,7 @@ function isPublicApiRoute(path, method) {
   if (path === '/api/login' && m === 'POST') return true;
   if (path === '/api/order-track' && m === 'GET') return true;
   if (path.startsWith('/api/image/') && m === 'GET') return true;
+  if (path === '/api/catalog-order' && m === 'POST') return true;
   if (path.startsWith('/api/catalog-order/') && m === 'GET') return true;
   if (path === '/api/auth/health' && m === 'GET') return true;
   return false;
