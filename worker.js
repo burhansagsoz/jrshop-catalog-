@@ -1360,16 +1360,16 @@ function getRequiredRolesForRoute(path, method) {
   if (path === '/api/order-queue/drain' && m === 'POST') return ['Admin'];
   if (path === '/api/backup' && m === 'GET') return ['Admin'];
   if (path === '/api/backup/import' && m === 'POST') return ['Admin'];
-  if (path === '/api/data' && m === 'POST') return ['Admin', 'Staff'];
-  if (path === '/api/sync' && m === 'POST') return ['Admin', 'Staff'];
+  if (path === '/api/data' && m === 'POST') return ['Admin', 'Staff', 'Reseller'];
+  if (path === '/api/sync' && m === 'POST') return ['Admin', 'Staff', 'Reseller'];
   if (path.startsWith('/api/order-command/') && m === 'GET') return ['Admin'];
   if (path.startsWith('/api/order-command/') && m === 'POST') return ['Admin'];
   if (path === '/api/order-deadletters' && m === 'GET') return ['Admin'];
   if (path === '/api/order-deadletters/requeue' && m === 'POST') return ['Admin'];
   if (path === '/api/order-deadletters/clear' && m === 'POST') return ['Admin'];
-  if (path.startsWith('/api/logistics/') && m !== 'GET') return ['Admin', 'Staff'];
-  if (path === '/api/push/send' && m === 'POST') return ['Admin', 'Staff'];
-  if (path === '/api/catalog-page' && m === 'POST') return ['Admin', 'Staff'];
+  if (path.startsWith('/api/logistics/') && m !== 'GET') return ['Admin', 'Staff', 'Reseller'];
+  if (path === '/api/push/send' && m === 'POST') return ['Admin', 'Staff', 'Reseller'];
+  if (path === '/api/catalog-page' && m === 'POST') return ['Admin', 'Staff', 'Reseller'];
   if (path.startsWith('/api/')) return ['Admin', 'Staff', 'Reseller'];
   return null;
 }
@@ -1412,9 +1412,20 @@ function sanitizeOrderForResellerClient(order) {
     resellerId: String(order.resellerId || ''),
     resellerEmail: String(order.resellerEmail || order.email || '').trim().toLowerCase(),
     resellerName: String(order.resellerName || '').trim(),
+    // Include customer-facing fields so reseller clients can display full details
+    name: String(order.name || ''),
+    phone: String(order.phone || ''),
+    email: String(order.email || ''),
+    address: String(order.address || ''),
+    city: String(order.city || ''),
+    postcode: String(order.postcode || ''),
+    country: String(order.country || ''),
+    ukTracking: String(order.ukTracking || ''),
     products: Array.isArray(order.products) ? order.products.map((p) => ({
       name: String(p && p.name || ''),
-      img: String(p && p.img || '')
+      img: String(p && p.img || ''),
+      qty: Number(p && p.qty) || 1,
+      cnTracking: String(p && p.cnTracking || p && p.tracking || '')
     })) : []
   };
 }
