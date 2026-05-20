@@ -2138,6 +2138,7 @@ export default {
         return json({ ok: true, user, token, tokenType: token ? 'Bearer' : '', expiresIn: token ? 7 * 24 * 60 * 60 : 0 });
       }
       if (path === '/api/data' && method === 'GET') return await getData(db, url, authContext);
+      if (path === '/api/chat-index' && method === 'GET') return await getChatIndex(db, authContext);
       if (path === '/api/data-version' && method === 'GET') {
         const version = await getDbVersion(db);
         return json({ ok: true, version, ts: Date.now() });
@@ -2711,7 +2712,36 @@ async function getData(db, requestUrl = null, authContext = null) {
     // read-only, sanitized list (id, email, role, dname) so features like the
     // reseller leaderboard can work without exposing sensitive fields.
     const allowed = new Set(['jb_catalog', 'jb_cat_categories', 'jb_settings', 'jb_templates', 'jb_notif', 'jb_feed', 'jb_catalog_orders_map', 'jb_users']);
+    const claims = authContext && typeof authContext.claims === 'object' ? authContext.claims : {};
+    const actorId = String(authContext && authContext.actorId || '').trim();
+    const email = String(claims.email || claims.mail || '').trim().toLowerCase();
+    const chatKeyById = actorId ? `jb_chat_${actorId}` : '';
+    const chatKeyByEmail = email ? `jb_chat_${email}` : '';
+    let chatKeyByUserId = '';
+    let usersForLookup = Array.isArray(data.jb_users) ? data.jb_users : null;
+    if (!usersForLookup && (email || actorId)) {
+      try {
+        usersForLookup = await readUsersFromStore(db);
+      } catch (_e) {
+        usersForLookup = null;
+      }
+    }
+    if (Array.isArray(usersForLookup) && (email || actorId)) {
+      const match = usersForLookup.find((u) => {
+        const uEmail = String(u && u.email || '').trim().toLowerCase();
+        const uId = String(u && u.id || '').trim();
+        return (email && uEmail === email) || (actorId && uId === actorId);
+      });
+      const userId = String(match && match.id || '').trim();
+      if (userId) chatKeyByUserId = `jb_chat_${userId}`;
+    }
     for (const key of Object.keys(data)) {
+      if (key.startsWith('jb_chat_')) {
+        if (key !== chatKeyById && key !== chatKeyByEmail && key !== chatKeyByUserId) {
+          delete data[key];
+        }
+        continue;
+      }
       if (!allowed.has(key)) delete data[key];
     }
     if (Array.isArray(data.jb_users)) {
@@ -2723,6 +2753,43 @@ async function getData(db, requestUrl = null, authContext = null) {
     }
   }
   return json({ data });
+}
+
+async function getChatIndex(db, authContext = null) {
+  if (isResellerContext(authContext)) return json({ ok: false, error: 'forbidden' }, 403);
+  const rows = await db
+    .prepare("SELECT key, value FROM kv_store WHERE key LIKE 'jb_chat_%'")
+    .all();
+  const chats = [];
+  for (const row of rows.results || []) {
+    const key = String(row && row.key || '').trim();
+    if (!key.startsWith('jb_chat_')) continue;
+    let list = [];
+    try {
+      const parsed = JSON.parse(row.value || '[]');
+      list = Array.isArray(parsed) ? parsed : [];
+    } catch (_e) {
+      list = [];
+    }
+    if (!list.length) continue;
+    const last = list.reduce((best, msg) => {
+      const bestTs = Number(best && best.ts) || 0;
+      const msgTs = Number(msg && msg.ts) || 0;
+      return msgTs >= bestTs ? msg : best;
+    }, null);
+    chats.push({
+      key,
+      resellerId: key.replace('jb_chat_', ''),
+      count: list.length,
+      lastTs: Number(last && last.ts) || 0,
+      lastFrom: String(last && last.from || ''),
+      lastText: String(last && last.text || '').slice(0, 120),
+      senderName: String(last && (last.senderName || last.fromName || last.resellerName || '') || '').slice(0, 120),
+      senderEmail: String(last && (last.senderEmail || last.email || '') || '').slice(0, 160)
+    });
+  }
+  chats.sort((a, b) => (Number(b.lastTs) || 0) - (Number(a.lastTs) || 0));
+  return json({ ok: true, chats });
 }
 
 function getSyncMetaStoreKey(key) {

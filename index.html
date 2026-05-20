@@ -2978,6 +2978,8 @@ async function syncDataForActivePage(reason){
     if(ORDER_HEAVY_PAGES.has(pageId)){
       await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
       await runSilentLoadWithLock().catch(()=>{});
+      // Ensure UI reflects newly fetched orders immediately (fix: dashboard empty on first open)
+      try{ renderRealtimeCounters(); }catch(_e){}
     }else if(AUX_DATA_PAGES.has(pageId)){
       await loadAuxDataOnly().catch(()=>{});
     }
@@ -3332,8 +3334,9 @@ function renderNav(){
     <div class="nav-sec">System</div>
     `+(isAdmin?`<div class="ni" onclick="goUsers(this);closeSidebarMobile();"><span class="ico2">👥</span><span>Users</span></div>`:'')+`
     <div class="ni" onclick="goSettings(this);closeSidebarMobile();"><span class="ico2">⚙️</span><span>Settings</span></div>
-    <div class="ni" onclick="goChat(this);closeSidebarMobile();"><span class="ico2">💬</span><span>Messages</span><span id="chat-badge" style="display:none;background:#f97316;color:#fff;border-radius:50%;width:18px;height:18px;font-size:10px;font-weight:800;margin-left:auto;flex-shrink:0;">0</span></div>
+    <div class="ni" onclick="goChat(this);closeSidebarMobile();"><span class="ico2">💬</span><span>Messages</span><span id="chat-badge" class="chat-unread-badge" style="display:none;background:#ef4444;color:#fff;border:2px solid rgba(255,255,255,.85);border-radius:999px;min-width:19px;height:19px;font-size:10px;font-weight:900;margin-left:8px;flex-shrink:0;align-items:center;justify-content:center;padding:0 5px;line-height:17px;box-shadow:0 0 0 1px rgba(0,0,0,.12);">0</span></div>
     <div class="ni" onclick="goFeed(this);closeSidebarMobile();"><span class="ico2">📰</span><span>Reseller Feed</span></div>`;
+  refreshChatNotificationState('render_nav');
 }
 
 // ── PAGE SWITCHING ──
@@ -3359,6 +3362,10 @@ function showPage(id){
   if(chatEmpty) chatEmpty.style.display='flex';
   const resChatOverlay = document.getElementById('res-chat-overlay');
   if(resChatOverlay) resChatOverlay.style.display='none';
+  if(id!=='pg-chat' && typeof _chatReseller !== 'undefined'){
+    _chatReseller=null;
+    if(typeof stopActiveChatRealtime==='function') stopActiveChatRealtime();
+  }
   // Clear chat polling interval
   if(typeof _chatPollInterval !== 'undefined' && _chatPollInterval){ clearInterval(_chatPollInterval); _chatPollInterval=null; }
   if(typeof _resChatInterval !== 'undefined' && _resChatInterval){ clearInterval(_resChatInterval); _resChatInterval=null; }
@@ -3550,7 +3557,21 @@ function goSuppliers(el){setNav(el);showPage('pg-suppliers');document.getElement
 function goMessages(el){setNav(el);showPage('pg-messages');document.getElementById('pg-title').textContent='Templates & Notifications';hideTop();}
 function goUsers(el){setNav(el);showPage('pg-users');document.getElementById('pg-title').textContent='Users';hideTop();_usersPage=1;try{renderUsers();}catch(e){console.error("[goUsers]",e);}}
 function goSettings(el){setNav(el);showPage('pg-settings');document.getElementById('pg-title').textContent='Settings';hideTop();}
-function goChat(el){setNav(el);showPage('pg-chat');document.getElementById('pg-title').textContent='Messages';hideTop();try{renderChatList();}catch(e){console.error("[goChat]",e);}}
+function goChat(el){
+  setNav(el);
+  showPage('pg-chat');
+  document.getElementById('pg-title').textContent='Messages';
+  hideTop();
+  try{
+    renderChatList();
+    if(typeof refreshChatIndexFromCloud==='function'){
+      refreshChatIndexFromCloud().then(function(){ return pollAllChats({force:true}); }).catch(function(){});
+    }
+    if(typeof pollAllChats==='function'){
+      pollAllChats({force:true}).catch(function(e){console.error("[goChat poll]",e);});
+    }
+  }catch(e){console.error("[goChat]",e);}
+}
 function goFeed(el){
   setNav(el);
   showPage('pg-feed');
@@ -3613,6 +3634,9 @@ function getOverdue(){return orders.filter(isOverdue);}
 
 // ── DASHBOARD ──
 let _dashPeriod=30;
+// Overdue pagination settings to avoid heavy DOM on dashboard open
+let _dashOverduePageSize = 8;
+let _dashOverdueShowAll = false;
 function setDashPeriod(days,btn){
   _dashPeriod=days;
   document.querySelectorAll('[id^="dash-btn-"]').forEach(b=>b.className='btn btn-sm');
@@ -3709,7 +3733,7 @@ function renderDash(){
   const dtEl=document.getElementById('dash-delivery-time');
   dtEl.innerHTML=`
     <div style="text-align:center;padding:12px 0;">
-      <div style="font-size:36px;font-weight:800;font-family:var(--mono);color:var(--accent);">${avgDays??'—'}</div>
+      <div style="font-size:36px;font-weight:800;font-family:var(--mono);color:var(--accent);">${(typeof avgDays !== 'undefined' && avgDays !== null) ? avgDays : '—'}</div>
       <div style="font-size:13px;color:var(--muted);">avg days from order to completion</div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
@@ -3723,10 +3747,18 @@ function renderDash(){
   if(!readyOrders.length){readyEl.innerHTML='<p style="font-size:13px;color:var(--muted);">No orders ready yet.</p>';}
   else readyEl.innerHTML=readyOrders.map(o=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer;" onclick="navOrders('Ready',document.querySelector('.ni'));selectOrder('${o.id}')"><div><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span> <span style="font-size:13px;">${esc(o.name)}</span></div><span class="pill p-ready">📦 Ready</span></div>`).join('');
 
-  // Overdue
+  // Overdue (paginated to improve performance)
   const odEl=document.getElementById('dash-overdue');
   if(!od.length){odEl.innerHTML='<p style="font-size:13px;color:var(--muted);padding:8px 0;">✅ No overdue orders!</p>';return;}
-  odEl.innerHTML=`<table style="width:100%;border-collapse:collapse;margin-top:7px;"><thead><tr>${['Ref','Customer','Status','Days'].map(h=>`<th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);">${h}</th>`).join('')}</tr></thead><tbody>${od.map(o=>{const d=daysSince(o.ts);const st=orderStatus(o);return`<tr style="cursor:pointer;" onclick="navOrders('all',null);selectOrder('${o.id}')"><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;">${esc(o.name)}</td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="pill ${S_CLASS[st]||'p-new'}">${S_EMOJI[st]||''} ${displayStatus(st)}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-family:var(--mono);font-weight:700;color:${d>=5?'var(--red)':'var(--yellow)'};">${d}d</td></tr>`;}).join('')}</tbody></table>`;
+  const pageSize = _dashOverdueShowAll ? Math.max(od.length, _dashOverduePageSize) : _dashOverduePageSize;
+  const rows = od.slice(0, pageSize);
+  const more = od.length > rows.length;
+  odEl.innerHTML=`<div style="margin-top:7px;">`+
+    `<table style="width:100%;border-collapse:collapse;"><thead><tr>${['Ref','Customer','Status','Days'].map(h=>`<th style="padding:6px 10px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);">${h}</th>`).join('')}</tr></thead><tbody>`+
+    rows.map(o=>{const d=daysSince(o.ts);const st=orderStatus(o);return`<tr style="cursor:pointer;" onclick="navOrders('all',null);selectOrder('${o.id}')"><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="ref-code">${esc(o.ref||o.id.slice(-6))}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;">${esc(o.name)}</td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;"><span class="pill ${S_CLASS[st]||'p-new'}">${S_EMOJI[st]||''} ${displayStatus(st)}</span></td><td style="padding:7px 10px;border-bottom:1px solid #f3f4f6;font-family:var(--mono);font-weight:700;color:${d>=5?'var(--red)':'var(--yellow)'};">${d}d</td></tr>`;}).join('')+
+    `</tbody></table>`+
+    (more ? `<div style="text-align:center;margin-top:8px;"><button class="btn btn-outline btn-sm" onclick="(function(){_dashOverdueShowAll=true;renderDash();})();">Show all (${od.length})</button></div>` : '')+
+    `</div>`;
 }
 
 function renderRealtimeCounters(){
@@ -4008,22 +4040,34 @@ function markProductArrived(orderId, prodIdx){
 // ── ADVANCE STATUS ──
 async function advanceStatus(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
-  o.updatedAt=Date.now();
   const next=S_NEXT[o.status];if(!next)return;
+  const oldStatus=o.status;
   const keepUkTracking=o.ukTracking;
   const keepCnTracking=o.cnTracking;
-  const oldStatus=o.status;
-  o.status=next;if(next==='Completed'&&!o.completedAt)o.completedAt=Date.now();
+  
+  // Optimistic update - instantly update UI without waiting for cloud
+  o.status=next;
+  o.updatedAt=Date.now();
+  if(next==='Completed'&&!o.completedAt)o.completedAt=Date.now();
   if(!o.ukTracking&&keepUkTracking) o.ukTracking=keepUkTracking;
   if(!o.cnTracking&&keepCnTracking) o.cnTracking=keepCnTracking;
+  
+  // Render immediately for instant feedback
+  selectOrder(o.id);
+  toast('✅ Status: '+next,'ok');
+  
+  // Send to cloud asynchronously (non-blocking)
   const saveResult=await saveOrders([o.id]);
   if(!saveResult||!saveResult.ok){
-    toast('⚠️ Status could not be saved to cloud','err');
+    // Revert on error
+    o.status=oldStatus;
+    selectOrder(o.id);
+    toast('⚠️ Status revert to '+oldStatus,'err');
     return;
   }
-  selectOrder(o.id);
+  
   logActivity('status',`Status: ${oldStatus} → ${next} | ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
-  toast('✅ Status: '+next,'ok');
+  
   // Reseller notifications
   if(next==='At Depot'&&notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
   if(next==='Sent to Factory'&&notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
@@ -5477,27 +5521,38 @@ async function sendBulkMessage(resellerIdsStr, btn){
   
   if(btn){btn.disabled=true;btn.textContent='Sending...';}
   
-  const api=await ensureWorkingApiBase({silent:true});
-  
   let sent = 0;
   for(const resId of resellerIds){
     const res = users.find(u => u.id === resId);
     if(!res) continue;
     
     try{
-      const r = await fetch(api+'/api/data', {headers:getAuthHeaders()});
-      const {data} = await r.json();
-      const chats = data.jb_chats || {};
-      const chatKey = 'admin_'+resId;
-      const chat = chats[chatKey] || [];
-      chat.push({from:'admin', text, ts: Date.now()});
-      const ok=await syncGenericKeyToCloud('jb_chats',chats,{
+      const chatKey='jb_chat_'+String(resId);
+      let chat=readChatMessagesFromCache(chatKey);
+      const data=await fetchDataMapByKeys([chatKey]);
+      if(data){
+        chat=mergeChatByVersion(chat,normalizeChatMessages(data&&data[chatKey]?data[chatKey]:[],chatKey));
+      }
+      const msg=normalizeChatMessage({
+        id:'m'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+        from:'admin',
+        to:String(resId),
+        text,
+        ts:Date.now(),
+        updatedAt:Date.now()
+      },chat[chat.length-1]||null);
+      chat=mergeChatByVersion(chat,[msg]);
+      _messages[String(resId)]=chat;
+      writeChatMessagesToCache(chatKey,chat);
+      const ok=await syncChatThreadToCloud(chatKey,chat,{
         opId:createLocalMutationOpId('bulkchat')
       });
       if(ok) sent++;
     }catch(e){console.warn('Bulk msg error:', e);}
   }
   
+  if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList(document.getElementById('chat-search')?.value||'');
+  refreshChatNotificationState('bulk_message');
   closeBulkMsgModal();
   clearBulkSelect();
   toast(`✅ Message sent to ${sent} reseller(s)`,'ok');
@@ -10172,6 +10227,70 @@ function readChatMessagesFromCache(chatKey){
     return [];
   }
 }
+
+const CHAT_LIST_META_KEY='jb_chat_list_meta';
+function readChatListMeta(){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(CHAT_LIST_META_KEY)||'{}');
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+  }catch(_e){
+    return {};
+  }
+}
+function writeChatListMeta(meta){
+  try{localStorage.setItem(CHAT_LIST_META_KEY,JSON.stringify(meta&&typeof meta==='object'?meta:{}));}catch(_e){}
+}
+function updateChatListMeta(chatKey,msgs){
+  const key=String(chatKey||'').trim();
+  if(key.indexOf('jb_chat_')!==0) return;
+  const rid=key.replace('jb_chat_','');
+  if(!rid) return;
+  const list=Array.isArray(msgs)?msgs:[];
+  const last=list.length?list[list.length-1]:null;
+  const meta=readChatListMeta();
+  if(last){
+    meta[rid]={
+      lastTs:Number(last&&last.ts)||0,
+      lastText:String(last&&last.text||''),
+      lastFrom:String(last&&last.from||''),
+      count:list.length,
+      updatedAt:Date.now()
+    };
+  }else if(!meta[rid]){
+    meta[rid]={lastTs:0,lastText:'',lastFrom:'',count:0,updatedAt:Date.now()};
+  }
+  writeChatListMeta(meta);
+}
+async function refreshChatIndexFromCloud(){
+  if(!me || me.role!=='Admin') return false;
+  try{
+    const api=await ensureWorkingApiBase({silent:true});
+    const res=await fetch(api+'/api/chat-index',{headers:getAuthHeaders(),cache:'no-store'});
+    if(!res.ok) return false;
+    const payload=await res.json().catch(function(){return {};});
+    const rows=Array.isArray(payload&&payload.chats)?payload.chats:[];
+    if(!rows.length) return false;
+    const meta=readChatListMeta();
+    rows.forEach(function(row){
+      const rid=String(row&&row.resellerId||'').trim();
+      if(!rid) return;
+      meta[rid]={
+        lastTs:Number(row&&row.lastTs)||0,
+        lastText:String(row&&row.lastText||''),
+        lastFrom:String(row&&row.lastFrom||''),
+        senderName:String(row&&row.senderName||''),
+        senderEmail:String(row&&row.senderEmail||''),
+        count:Number(row&&row.count)||0,
+        updatedAt:Date.now()
+      };
+    });
+    writeChatListMeta(meta);
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList(document.getElementById('chat-search')?.value||'');
+    return true;
+  }catch(_e){
+    return false;
+  }
+}
 function writeChatMessagesToCache(chatKey,msgs){
   const key=String(chatKey||'').trim();
   if(!key) return;
@@ -10180,15 +10299,29 @@ function writeChatMessagesToCache(chatKey,msgs){
     window._chatCache = window._chatCache || {};
     window._chatCache[key]=normalized.slice();
   }catch(_e){}
+  updateChatListMeta(key,normalized);
 }
 function mergeChatMessagesWithCache(chatKey,remoteMsgs,seedLocal){
   const key=String(chatKey||'').trim();
   if(!key) return [];
   const localBase=Array.isArray(seedLocal)?seedLocal:readChatMessagesFromCache(key);
+  const remoteBase=Array.isArray(remoteMsgs)?remoteMsgs:[];
   const merged=mergeChatByVersion(
     normalizeChatMessages(localBase,key),
-    normalizeChatMessages(Array.isArray(remoteMsgs)?remoteMsgs:[],key)
+    normalizeChatMessages(remoteBase,key)
   );
+  // Read status is monotonic: once either side has marked a message as read,
+  // later merges must not resurrect the unread badge from a stale cache copy.
+  try{
+    const localMap=new Map((Array.isArray(localBase)?localBase:[]).filter(m=>m&&m.id).map(m=>[String(m.id),m]));
+    const remoteMap=new Map(remoteBase.filter(m=>m&&m.id).map(m=>[String(m.id),m]));
+    for(const m of merged){
+      if(!m||!m.id) continue;
+      const prev=localMap.get(String(m.id));
+      const remote=remoteMap.get(String(m.id));
+      m.read=!!((prev&&prev.read)||(remote&&remote.read)||m.read);
+    }
+  }catch(_e){}
   const toFingerprint=function(list){
     return (Array.isArray(list)?list:[]).map(function(row){
       return `${String(row&&row.id||'')}:${Number(row&&row.v)||0}:${row&&row.read?'1':'0'}`;
@@ -11532,10 +11665,21 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     const chatKey='jb_chat_'+String(rid||'');
     const mergedMsgs=mergeChatMessagesWithCache(chatKey,Array.isArray(value)?value:[],_messages[String(rid||'')]||[]);
     _messages[String(rid||'')]=mergedMsgs;
-    if(_chatReseller && String(_chatReseller)===String(rid||'')) renderMessages();
-    if(me&&me.id&&String(me.id)===String(rid||'')) renderResellerMessages(mergedMsgs);
+    if(_chatReseller && String(_chatReseller)===String(rid||'')){
+      markAdminChatRead(rid).catch(()=>{});
+      renderMessages();
+    }
+    if(me&&me.id&&String(me.id)===String(rid||'')){
+      if(document.getElementById('res-chat-overlay')?.style.display==='flex'){
+        markResellerChatRead().catch(()=>{});
+      }else{
+        renderResellerMessages(mergedMsgs);
+      }
+    }
     updateChatBadge();
-    checkResellerUnreadMessages().catch(()=>{});
+    if(!(me&&me.id&&String(me.id)===String(rid||'')&&document.getElementById('res-chat-overlay')?.style.display==='flex')){
+      checkResellerUnreadMessages().catch(()=>{});
+    }
     if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList();
     }else if(k==='jb_chat_index'){
     // keep durable snapshot only
@@ -12539,6 +12683,9 @@ if('serviceWorker' in navigator){
       navigator.serviceWorker.register('./sw.js').then(reg=>{
         // Check for updates immediately and every 60 seconds
         reg.update();
+        if(reg.waiting){
+          reg.waiting.postMessage('skipWaiting');
+        }
         setInterval(()=>reg.update(), 60000);
         // When new SW is waiting, activate it immediately
         reg.addEventListener('updatefound',()=>{
@@ -12550,17 +12697,44 @@ if('serviceWorker' in navigator){
           });
         });
       }).catch(()=>{});
-      // Avoid force-reload while a logged-in user is actively using the app.
+      // Apply fresh UI assets once after service worker updates; otherwise old
+      // cached index.html can briefly redraw older chat rows after refresh.
       navigator.serviceWorker.addEventListener('controllerchange',()=>{
-        if(typeof me!=='undefined' && me){
-          toast('🔄 Update ready. It will apply next reopen.','info');
-          return;
+        const key='jrshop-sw-controller-reload-v20260520-chat-ui-v4';
+        try{
+          if(sessionStorage.getItem(key)==='1') return;
+          sessionStorage.setItem(key,'1');
+        }catch(_e){}
+        if(typeof showLoading==='function'){
+          try{showLoading('Updating app...');}catch(_e){}
+        }else if(typeof toast==='function'){
+          try{toast('🔄 Updating app...','info');}catch(_e){}
         }
-        window.location.reload();
+        setTimeout(function(){
+          try{window.location.reload();}catch(_e){location.reload();}
+        },350);
       });
+      try{
+        if(navigator.serviceWorker.controller){
+          navigator.serviceWorker.controller.postMessage({type:'JRSHOP_ACTIVE_BUILD',build:'20260520-chat-ui-v4'});
+        }
+      }catch(_e){}
     }
   });
 }
+
+async function refreshAppShellCache(){
+  try{
+    if(!('caches' in window)) return;
+    const build='20260520-chat-ui-v4';
+    const prev=localStorage.getItem('jrshop_app_shell_build');
+    if(prev===build) return;
+    const keys=await caches.keys();
+    await Promise.all(keys.filter(function(key){return String(key||'').indexOf('jrshop-')===0;}).map(function(key){return caches.delete(key);}));
+    localStorage.setItem('jrshop_app_shell_build',build);
+  }catch(_e){}
+}
+refreshAppShellCache();
 // iOS install hint
 window.addEventListener('load',()=>{
   const isStandalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone;
@@ -12875,13 +13049,13 @@ function renderSupplierPerf(){
         </div>
         <div style="text-align:center;background:${scoreColor}22;border:2px solid ${scoreColor};border-radius:12px;padding:8px 14px;">
           <div style="font-size:24px;font-weight:900;color:${scoreColor};">${grade}</div>
-          <div style="font-size:10px;color:var(--muted);">${score??'—'}/100</div>
+          <div style="font-size:10px;color:var(--muted);">${(typeof score !== 'undefined' && score !== null) ? score : '—'}/100</div>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center;">
         <div style="background:var(--card);border-radius:9px;padding:9px;"><div style="font-size:18px;font-weight:800;">${s.orders}</div><div style="font-size:10px;color:var(--muted);">Orders</div></div>
         <div style="background:var(--card);border-radius:9px;padding:9px;"><div style="font-size:18px;font-weight:800;">${s.completed}</div><div style="font-size:10px;color:var(--muted);">Done</div></div>
-        <div style="background:var(--card);border-radius:9px;padding:9px;"><div style="font-size:18px;font-weight:800;color:${avgDays>14?'var(--red)':'var(--green)'};">${avgDays??'—'}</div><div style="font-size:10px;color:var(--muted);">Avg Days</div></div>
+        <div style="background:var(--card);border-radius:9px;padding:9px;"><div style="font-size:18px;font-weight:800;color:${avgDays>14?'var(--red)':'var(--green)'};">${(typeof avgDays !== 'undefined' && avgDays !== null) ? avgDays : '—'}</div><div style="font-size:10px;color:var(--muted);">Avg Days</div></div>
         <div style="background:var(--card);border-radius:9px;padding:9px;"><div style="font-size:18px;font-weight:800;color:${s.delayed>0?'var(--red)':'var(--green)'};">${s.delayed}</div><div style="font-size:10px;color:var(--muted);">Delayed</div></div>
       </div>
     </div>`;
@@ -13322,10 +13496,14 @@ async function startResellerChatRealtime(){
   if(_resChatRealtimeBound||!me||!me.id) return false;
   const chatKey='jb_chat_'+me.id;
   const ok=await startActiveChatRealtime(chatKey,function(msgs){
+    const rid=String(me.id);
+    _messages[rid]=mergeChatMessagesWithCache(chatKey,Array.isArray(msgs)?msgs:[],_messages[rid]||[]);
     if(document.getElementById('res-chat-overlay')?.style.display==='flex'){
-      renderResellerMessages(Array.isArray(msgs)?msgs:[]);
+      markResellerChatRead().catch(()=>{});
+      renderResellerMessages(_messages[rid]||[]);
+    }else{
+      refreshChatNotificationState('reseller_chat_realtime');
     }
-    checkResellerUnreadMessages().catch(()=>{});
   });
   if(ok) _resChatRealtimeBound=true;
   return ok;
@@ -13334,86 +13512,66 @@ async function startResellerChatRealtime(){
 // Start global poll when admin logs in - checks all reseller chats
 function startGlobalChatPoll(){
   if(_globalChatPoll) clearInterval(_globalChatPoll);
+  
+  // Pre-populate _messages from cache so badges show up immediately
+  try{
+    getAdminChatParticipants().forEach(u=>{
+      const rid=String(u.id);
+      const localMsgs=getChatKeysForParticipant(u).reduce(function(acc,chatKey){
+        return mergeChatByVersion(acc,readChatMessagesFromCache(chatKey));
+      },[]);
+      _messages[rid]=localMsgs;
+    });
+    refreshChatNotificationState('init');
+  }catch(_e){}
+
   const pollMs=getFirebaseEnabled()?1200:5000;
   _globalChatPoll = setInterval(pollAllChats, pollMs);
   pollAllChats(); // immediate first check
 }
 
-async function pollAllChats(){
+async function pollAllChats(opts={}){
   if(!me || me.role !== 'Admin') return;
+  const force=!!(opts&&opts.force);
+  
+  // Optimization: Skip if DB version hasn't changed
+  if(!force && _remoteDbVersion && _chatPollLastVersion === _remoteDbVersion) return;
+  _chatPollLastVersion = _remoteDbVersion;
+
   try{
-    // Check each reseller's chat key
-    const resellers=users.filter(u=>u.role==='Reseller');
-    const keys=resellers.map(function(u){return 'jb_chat_'+u.id;});
+    // Check each reseller's chat key (ensure string ids)
+    const resellers=getAdminChatParticipants();
+    const keys = [];
+    resellers.forEach(function(u){
+      getChatKeysForParticipant(u).forEach(function(k){ if(k&&!keys.includes(k)) keys.push(k); });
+    });
+    // Include any jb_chat_ keys present locally (fallback for missing users list)
+    try{
+      Object.keys(localStorage||{}).forEach(function(k){ if(String(k||'').startsWith('jb_chat_') && !keys.includes(k)) keys.push(k); });
+    }catch(_e){}
+    if(!keys.length){ return; }
     const data=await fetchDataMapByKeys(keys);
     if(!data) return;
-    let totalUnread=0;
-    let hasNewMessages = false;
-    let newMessageFrom = '';
-    let newestEventId = '';
-    
     resellers.forEach(u=>{
-      const chatKey='jb_chat_'+u.id;
-      const prevMsgs=Array.isArray(_messages[u.id])?_messages[u.id]:readChatMessagesFromCache(chatKey);
-      const prevUnreadIds=new Set(prevMsgs.filter(function(m){return isInboundUnreadForAdmin(m,u.id);}).map(function(m){return String(m.id||'');}));
-      const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
-      const latestUnread=[...mergedMsgs].reverse().find(function(m){
-        const id=String(m&&m.id||'');
-        return isInboundUnreadForAdmin(m,u.id) && !prevUnreadIds.has(id);
+      const rid = String(u.id||'');
+      const prevMsgs=Array.isArray(_messages[rid])?_messages[rid]:[];
+      let mergedMsgs=prevMsgs;
+      getChatKeysForParticipant(u).forEach(function(chatKey){
+        mergedMsgs=mergeChatByVersion(
+          mergedMsgs,
+          mergeChatMessagesWithCache(chatKey,data[chatKey]||[],readChatMessagesFromCache(chatKey))
+        );
       });
-      if(latestUnread){
-        hasNewMessages = true;
-        newMessageFrom = u.dname || u.email;
-        newestEventId=String(latestUnread.id||(`${u.id}_${latestUnread.ts||Date.now()}`));
-      }
-      _messages[u.id]=mergedMsgs;
+      _messages[rid]=mergedMsgs;
+      if(mergedMsgs.length) updateChatListMeta('jb_chat_'+rid,mergedMsgs);
     });
-    
-    // Show local notification if new messages and page not focused on chat
-    if(hasNewMessages){
-      dispatchRealtimeNotification({
-        kind:'admin_chat',
-        eventId:newestEventId||('from_'+newMessageFrom),
-        title:'💬 New Message',
-        body:`Message from ${newMessageFrom}`,
-        toastType:'info',
-        localNotification:document.visibilityState!=='visible',
-        tag:'chat-notification',
-        vibratePattern:[120,70,120]
-      }).catch(()=>{});
-    }
-    
     // If a chat is open, mark as read and sync to cloud
     if(_chatReseller){
-      const msgs = _messages[_chatReseller] || [];
-      let hasNewUnread = false;
-      msgs.forEach(m => {
-        if(isInboundUnreadForAdmin(m,_chatReseller)){
-          m.read = true;
-          hasNewUnread = true;
-        }
-      });
-      
-      if(hasNewUnread){
-        await syncChatThreadToCloud('jb_chat_'+_chatReseller,msgs,{
-          opId:createLocalMutationOpId('chatread')
-        });
-        renderMessages();
-      }
+      await markAdminChatRead(_chatReseller);
     }
     
     // Calculate total unread (only from resellers)
-    resellers.forEach(u => {
-      const msgs = _messages[u.id] || [];
-      const unread = msgs.filter(function(m){return isInboundUnreadForAdmin(m,u.id);}).length;
-      totalUnread += unread;
-    });
-    
-    // Update badge
-    const badge=document.getElementById('chat-badge');
-    if(badge){badge.textContent=totalUnread;badge.style.display=totalUnread?'flex':'none';}
-    _health.chatUnreadAdmin=Math.max(0,Number(totalUnread)||0);
-    _health.chatLastPollAt=Date.now();
+    refreshChatNotificationState('poll_admin');
     // Re-render chat list if open
     if(document.getElementById('pg-chat')?.classList.contains('on')){
       renderChatList();
@@ -13422,42 +13580,502 @@ async function pollAllChats(){
 }
 let _chatPollInterval = null;
 let _messages = {}; // {resellerId: [{id, from, text, ts}]}
+const _chatUnreadSnapshot = {
+  admin: new Map(),
+  reseller: new Map()
+};
+const _chatNotifySnapshot = {
+  admin: new Map(),
+  reseller: new Map()
+};
+const _chatNotificationBootstrapped = {
+  admin: false,
+  reseller: false
+};
+const CHAT_ADMIN_SEEN_KEY='jb_chat_seen_admin';
+const CHAT_RESELLER_SEEN_KEY='jb_chat_seen_reseller';
 function isInboundUnreadForAdmin(msg,resellerId){
-  if(!msg||msg.read) return false;
+  if(!msg) return false;
   const from=String(msg.from||'');
   const rid=String(resellerId||'');
   if(!from) return false;
   return from!=='admin' && (!rid || from===rid || from==='reseller');
 }
 function isInboundUnreadForReseller(msg){
-  if(!msg||msg.read) return false;
+  if(!msg) return false;
   return String(msg.from||'')==='admin';
+}
+
+function readChatSeenMap(key){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(key)||'{}');
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+  }catch(_e){
+    return {};
+  }
+}
+
+function writeChatSeenMap(key,map){
+  try{localStorage.setItem(key,JSON.stringify(map&&typeof map==='object'?map:{}));}catch(_e){}
+}
+
+function getAdminSeenKey(){
+  return String((me&&me.id)||me&&me.email||'admin').trim().toLowerCase()||'admin';
+}
+
+function getAdminSeenTs(resellerId){
+  const root=readChatSeenMap(CHAT_ADMIN_SEEN_KEY);
+  const adminKey=getAdminSeenKey();
+  const adminMap=root&&root[adminKey]&&typeof root[adminKey]==='object'?root[adminKey]:{};
+  return Math.max(0,Number(adminMap[String(resellerId||'')]||0));
+}
+
+function setAdminSeenTs(resellerId,ts){
+  const rid=String(resellerId||'').trim();
+  if(!rid) return;
+  const root=readChatSeenMap(CHAT_ADMIN_SEEN_KEY);
+  const adminKey=getAdminSeenKey();
+  const adminMap=root&&root[adminKey]&&typeof root[adminKey]==='object'?root[adminKey]:{};
+  adminMap[rid]=Math.max(Number(adminMap[rid])||0,Number(ts)||Date.now());
+  root[adminKey]=adminMap;
+  writeChatSeenMap(CHAT_ADMIN_SEEN_KEY,root);
+}
+
+function getResellerSeenTs(){
+  const map=readChatSeenMap(CHAT_RESELLER_SEEN_KEY);
+  return Math.max(0,Number(map[String((me&&me.id)||'')]||0));
+}
+
+function setResellerSeenTs(ts){
+  if(!me||!me.id) return;
+  const map=readChatSeenMap(CHAT_RESELLER_SEEN_KEY);
+  const rid=String(me.id);
+  map[rid]=Math.max(Number(map[rid])||0,Number(ts)||Date.now());
+  writeChatSeenMap(CHAT_RESELLER_SEEN_KEY,map);
+}
+
+function countAdminUnreadMessages(resellerId,msgs){
+  const rid=String(resellerId||'');
+  const seen=getAdminSeenTs(rid);
+  return (Array.isArray(msgs)?msgs:[]).filter(function(m){
+    return isInboundUnreadForAdmin(m,rid) && (Number(m&&m.ts)||0)>seen;
+  }).length;
+}
+
+function countResellerUnreadMessages(msgs){
+  const seen=getResellerSeenTs();
+  return (Array.isArray(msgs)?msgs:[]).filter(function(m){
+    return isInboundUnreadForReseller(m) && (Number(m&&m.ts)||0)>seen;
+  }).length;
+}
+
+function latestInboundAdminTs(resellerId,msgs){
+  const rid=String(resellerId||'');
+  return (Array.isArray(msgs)?msgs:[]).reduce(function(max,m){
+    if(!isInboundUnreadForAdmin(m,rid)) return max;
+    return Math.max(max,Number(m&&m.ts)||0);
+  },0);
+}
+
+function latestInboundResellerTs(msgs){
+  return (Array.isArray(msgs)?msgs:[]).reduce(function(max,m){
+    if(!isInboundUnreadForReseller(m)) return max;
+    return Math.max(max,Number(m&&m.ts)||0);
+  },0);
+}
+
+function getResellerUsersForChat(){
+  return (Array.isArray(users)?users:[]).filter(function(u){
+    return String(u&&u.role||'').trim().toLowerCase()==='reseller';
+  });
+}
+
+function getAdminChatParticipants(){
+  const map=new Map();
+  getResellerUsersForChat().forEach(function(u){
+    const rid=String(u&&u.id||'').trim();
+    if(rid) map.set(rid,u);
+  });
+  try{
+    Object.keys(window._chatCache||{}).forEach(function(k){
+      const key=String(k||'');
+      if(key.indexOf('jb_chat_')!==0) return;
+      const rid=key.replace('jb_chat_','');
+      if(rid && !map.has(rid)) map.set(rid,{id:rid,role:'Reseller',dname:'Reseller '+rid,email:rid});
+    });
+  }catch(_e){}
+  try{
+    Object.keys(_messages||{}).forEach(function(rid){
+      rid=String(rid||'').trim();
+      if(rid && !map.has(rid)) map.set(rid,{id:rid,role:'Reseller',dname:'Reseller '+rid,email:rid});
+    });
+  }catch(_e){}
+  try{
+    Object.keys(localStorage||{}).forEach(function(k){
+      const key=String(k||'');
+      if(key.indexOf('jb_chat_')!==0) return;
+      const rid=key.replace('jb_chat_','');
+      if(rid && !map.has(rid)) map.set(rid,{id:rid,role:'Reseller',dname:'Reseller '+rid,email:rid});
+    });
+  }catch(_e){}
+  try{
+    const meta=readChatListMeta();
+    Object.keys(meta||{}).forEach(function(rid){
+      rid=String(rid||'').trim();
+      if(rid && !map.has(rid)) map.set(rid,{id:rid,role:'Reseller',dname:'Reseller '+rid,email:rid});
+    });
+  }catch(_e){}
+  return [...map.values()];
+}
+
+function findAdminChatParticipant(resellerId){
+  const rid=String(resellerId||'');
+  const lowered=rid.trim().toLowerCase();
+  const fromUsers=(Array.isArray(users)?users:[]).find(function(u){
+    const uid=String(u&&u.id||'').trim();
+    const email=String(u&&u.email||'').trim().toLowerCase();
+    return uid===rid || (!!lowered && email===lowered);
+  });
+  if(fromUsers) return fromUsers;
+  return getAdminChatParticipants().find(function(u){return String(u&&u.id||'')===rid;})||null;
+}
+
+function getChatDisplayName(resellerId,msgs){
+  const rid=String(resellerId||'').trim();
+  const user=findAdminChatParticipant(rid);
+  const fromUser=String(user&&user.dname||user&&user.email||'').trim();
+  if(fromUser && fromUser!==rid && fromUser!==('Reseller '+rid)) return fromUser;
+  const fromMsg=[...(Array.isArray(msgs)?msgs:[])].reverse().find(function(m){
+    return m && String(m.from||'')!=='admin' && (m.senderName||m.fromName||m.resellerName||m.email||m.senderEmail);
+  });
+  const msgName=String(fromMsg&& (fromMsg.senderName||fromMsg.fromName||fromMsg.resellerName||fromMsg.senderEmail||fromMsg.email) || '').trim();
+  if(msgName) return msgName;
+  const meta=readChatListMeta();
+  const row=meta[rid]||{};
+  const metaName=String(row.senderName||row.senderEmail||'').trim();
+  if(metaName) return metaName;
+  if(rid.indexOf('@')>0) return rid;
+  return rid ? ('Reseller '+rid.slice(-6)) : 'Reseller';
+}
+
+function getChatKeysForParticipant(u){
+  const keys=[];
+  const id=String(u&&u.id||'').trim();
+  const email=String(u&&u.email||'').trim().toLowerCase();
+  if(id) keys.push('jb_chat_'+id);
+  if(email && email!==id.toLowerCase()) keys.push('jb_chat_'+email);
+  return [...new Set(keys)];
+}
+
+function setUnreadBadge(el,count){
+  if(!el) return;
+  const n=Math.max(0,Number(count)||0);
+  el.textContent=String(n);
+  el.style.display=n>0?'flex':'none';
+  el.style.alignItems='center';
+  el.style.justifyContent='center';
+}
+
+function seedChatSeenBaselineFromCurrentMessages(){
+  try{
+    if(me && me.role==='Admin'){
+      getAdminChatParticipants().forEach(function(u){
+        const rid=String(u&&u.id||'').trim();
+        if(!rid) return;
+        const msgs=Array.isArray(_messages[rid])?_messages[rid]:[];
+        const latestSeen=latestInboundAdminTs(rid,msgs);
+        if(latestSeen) setAdminSeenTs(rid,latestSeen);
+      });
+    }
+    if(me && me.role==='Reseller'){
+      const rid=String(me.id||'').trim();
+      if(rid){
+        const msgs=Array.isArray(_messages[rid])?_messages[rid]:[];
+        const latestSeen=latestInboundResellerTs(msgs);
+        if(latestSeen) setResellerSeenTs(latestSeen);
+      }
+    }
+  }catch(_e){}
+}
+
+function fmtChatTime(ts){
+  if(!ts) return '-';
+  const d=new Date(ts);
+  const hh=String(d.getHours()).padStart(2,'0');
+  const mm=String(d.getMinutes()).padStart(2,'0');
+  return `${fmtDate(ts)} ${hh}:${mm}`;
+}
+
+function fmtChatListDate(ts){
+  if(!ts) return '';
+  const d=new Date(ts);
+  const now=new Date();
+  const sameDay=d.getFullYear()===now.getFullYear()&&d.getMonth()===now.getMonth()&&d.getDate()===now.getDate();
+  if(sameDay) return 'Today';
+  const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  if(d.getFullYear()===now.getFullYear()) return `${d.getDate()} ${months[d.getMonth()]}`;
+  return `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${String(d.getFullYear()).slice(-2)}`;
+}
+
+function fmtChatClock(ts){
+  if(!ts) return '-';
+  const d=new Date(ts);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function getChatThreadLatestTs(resellerId){
+  const msgs=Array.isArray(_messages[String(resellerId||'')])?_messages[String(resellerId||'')]:[];
+  const last=msgs.length?msgs[msgs.length-1]:null;
+  if(last&&last.ts) return Number(last.ts)||0;
+  const meta=readChatListMeta();
+  return Math.max(0,Number(meta[String(resellerId||'')]&&meta[String(resellerId||'')].lastTs)||0);
+}
+
+function getChatThreadLastPreview(resellerId){
+  const rid=String(resellerId||'');
+  const msgs=Array.isArray(_messages[rid])?_messages[rid]:[];
+  const last=msgs.length?msgs[msgs.length-1]:null;
+  if(last) return last;
+  const meta=readChatListMeta();
+  const row=meta[rid]||{};
+  if(row.lastTs) return {ts:row.lastTs,text:row.lastText||'',from:row.lastFrom||''};
+  return null;
+}
+
+async function markAdminChatRead(resellerId,opts={}){
+  const rid=String(resellerId||'');
+  if(!rid) return false;
+  const chatKey='jb_chat_'+rid;
+  const msgs=Array.isArray(_messages[rid])?_messages[rid]:readChatMessagesFromCache(chatKey);
+  const latestSeen=latestInboundAdminTs(rid,msgs);
+  if(latestSeen) setAdminSeenTs(rid,latestSeen);
+  let changed=false;
+  const next=msgs.map(function(m){
+    if(isInboundUnreadForAdmin(m,rid)){
+      changed=true;
+      return {...m,read:true,updatedAt:Date.now(),v:Math.max(1,Number(m&&m.v)||1)+1};
+    }
+    return m;
+  });
+  if(!changed){
+    updateChatBadge();
+    if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList(document.getElementById('chat-search')?.value||'');
+    refreshChatNotificationState('mark_admin_seen');
+    return !!latestSeen;
+  }
+  _messages[rid]=next;
+  writeChatMessagesToCache(chatKey,next);
+  updateChatBadge();
+  if(document.getElementById('pg-chat')?.classList.contains('on')) renderChatList(document.getElementById('chat-search')?.value||'');
+  if(_chatReseller===rid) renderMessages();
+  if(opts.sync!==false){
+    try{
+      await syncChatThreadToCloud(chatKey,next,{opId:createLocalMutationOpId('chatread')});
+    }catch(_e){}
+  }
+  refreshChatNotificationState('mark_admin_read');
+  return true;
+}
+
+async function markResellerChatRead(opts={}){
+  if(!me||!me.id) return false;
+  const rid=String(me.id);
+  const chatKey='jb_chat_'+rid;
+  const msgs=Array.isArray(_messages[rid])?_messages[rid]:readChatMessagesFromCache(chatKey);
+  const latestSeen=latestInboundResellerTs(msgs);
+  if(latestSeen) setResellerSeenTs(latestSeen);
+  let changed=false;
+  const next=msgs.map(function(m){
+    if(isInboundUnreadForReseller(m)){
+      changed=true;
+      return {...m,read:true,updatedAt:Date.now(),v:Math.max(1,Number(m&&m.v)||1)+1};
+    }
+    return m;
+  });
+  if(!changed){
+    setUnreadBadge(document.getElementById('res-chat-badge'),0);
+    setUnreadBadge(document.getElementById('res-header-chat-badge'),0);
+    refreshChatNotificationState('mark_reseller_seen');
+    return !!latestSeen;
+  }
+  _messages[rid]=next;
+  writeChatMessagesToCache(chatKey,next);
+  renderResellerMessages(next);
+  const badge=document.getElementById('res-chat-badge');
+  setUnreadBadge(badge,0);
+  const headerBadge=document.getElementById('res-header-chat-badge');
+  setUnreadBadge(headerBadge,0);
+  if(opts.sync!==false){
+    try{
+      await syncChatThreadToCloud(chatKey,next,{opId:createLocalMutationOpId('reschatread')});
+    }catch(_e){}
+  }
+  refreshChatNotificationState('mark_reseller_read');
+  return true;
+}
+
+function refreshChatNotificationState(source=''){
+  try{
+    if(!me) return;
+    if(me.role==='Admin'){
+      const resellers=getAdminChatParticipants();
+      const prevMap=_chatUnreadSnapshot.admin instanceof Map?_chatUnreadSnapshot.admin:new Map();
+      const prevNotify=_chatNotifySnapshot.admin instanceof Map?_chatNotifySnapshot.admin:new Map();
+      const nextMap=new Map();
+      const nextNotify=new Map();
+      let totalUnread=0;
+      let peopleWithUnread=0;
+      let newestEventId='';
+      let newestFrom='';
+      let newestRid='';
+      let hasIncrease=false;
+      resellers.forEach(u=>{
+        const rid=String(u.id||'');
+        const msgs=Array.isArray(_messages[rid])?_messages[rid]:[];
+        const unread=countAdminUnreadMessages(rid,msgs);
+        const prevUnread=Number(prevMap.get(rid)||0);
+        const latest=msgs.length?msgs[msgs.length-1]:null;
+        const latestTs=Number(latest&&latest.ts)||0;
+        const latestInboundTs=latestInboundAdminTs(rid,msgs);
+        const prevTs=Number(prevNotify.get(rid)||0);
+        if(unread>prevUnread){
+          hasIncrease=true;
+          const seenTs=getAdminSeenTs(rid);
+          const lastUnread=[...msgs].reverse().find(function(m){return isInboundUnreadForAdmin(m,rid) && (Number(m&&m.ts)||0)>seenTs;});
+          newestEventId=String(lastUnread&&lastUnread.id||(`${rid}_${lastUnread&&lastUnread.ts||Date.now()}`));
+          newestFrom=getChatDisplayName(rid,msgs);
+          newestRid=rid;
+        }
+        if(latestInboundTs){
+          nextNotify.set(rid, latestInboundTs);
+          const seenTs=getAdminSeenTs(rid);
+          if(latestInboundTs>seenTs && latest && latest.from!=='admin'){
+            hasIncrease = true;
+            newestEventId=String(latest.id||(`${rid}_${latestInboundTs}`));
+            newestFrom=getChatDisplayName(rid,msgs);
+            newestRid=rid;
+          }
+        }
+        nextMap.set(rid, unread);
+        if(unread>0) peopleWithUnread++;
+        totalUnread+=unread;
+      });
+      _chatUnreadSnapshot.admin=nextMap;
+      _chatNotifySnapshot.admin=nextNotify;
+      const badge=document.getElementById('chat-badge');
+      setUnreadBadge(badge,peopleWithUnread);
+      _health.chatUnreadAdmin=Math.max(0,Number(peopleWithUnread)||0);
+      _health.chatLastPollAt=Date.now();
+      const canDispatchAdminNotif = !!_chatNotificationBootstrapped.admin;
+      _chatNotificationBootstrapped.admin = true;
+      if(hasIncrease && canDispatchAdminNotif){
+        const unreadForNewest = newestRid ? Number(nextMap.get(newestRid)||0) : 0;
+        const bodyText = unreadForNewest>0 ? `${newestFrom || 'reseller'}: ${unreadForNewest} new message${unreadForNewest>1?'s':''}` : `Message from ${newestFrom || 'reseller'}`;
+        dispatchRealtimeNotification({
+          kind:'admin_chat',
+          eventId:newestEventId||('from_'+newestFrom),
+          title:'💬 New Message',
+          body:bodyText,
+          toastType:'info',
+          localNotification:document.visibilityState!=='visible',
+          tag:'chat-notification',
+          badgeElementIds:['chat-badge'],
+          vibratePattern:[120,70,120]
+        }).catch(()=>{});
+      }
+      if(document.getElementById('pg-chat')?.classList.contains('on')){
+        renderChatList(document.getElementById('chat-search')?.value||'');
+      }
+      return;
+    }
+    if(me.role==='Reseller'){
+      const rid=String(me.id||'');
+      const msgs=Array.isArray(_messages[rid])?_messages[rid]:[];
+      const unread=countResellerUnreadMessages(msgs);
+      const prevUnread=Number(_chatUnreadSnapshot.reseller.get(rid)||0);
+      const prevTs=Number(_chatNotifySnapshot.reseller.get(rid)||0);
+      const latest=msgs.length?msgs[msgs.length-1]:null;
+      const latestTs=Number(latest&&latest.ts)||0;
+      const latestInboundTs=latestInboundResellerTs(msgs);
+      _chatUnreadSnapshot.reseller.set(rid, unread);
+      if(latestInboundTs) _chatNotifySnapshot.reseller.set(rid, latestInboundTs);
+      _health.chatUnreadReseller=Math.max(0,Number(unread)||0);
+      _health.chatLastPollAt=Date.now();
+      const badge=document.getElementById('res-chat-badge');
+      setUnreadBadge(badge,unread);
+      const headerBadge=document.getElementById('res-header-chat-badge');
+      setUnreadBadge(headerBadge,unread);
+      const canDispatchResellerNotif = !!_chatNotificationBootstrapped.reseller;
+      _chatNotificationBootstrapped.reseller = true;
+      if(canDispatchResellerNotif && (unread>prevUnread || (latestInboundTs>getResellerSeenTs() && latest && latest.from==='admin'))){
+        const seenTs=getResellerSeenTs();
+        const lastUnread=[...msgs].reverse().find(function(m){return isInboundUnreadForReseller(m) && (Number(m&&m.ts)||0)>seenTs;}) || latest;
+        dispatchRealtimeNotification({
+          kind:'reseller_chat',
+          eventId:String(lastUnread&&lastUnread.id||('admin_'+(lastUnread&&lastUnread.ts||Date.now()))),
+          title:'💬 New Message from Admin',
+          body:'You have a new message',
+          toastType:'info',
+          localNotification:document.visibilityState!=='visible',
+          tag:'reseller-chat',
+          badgeElementIds:['res-chat-badge','res-header-chat-badge'],
+          vibratePattern:[180,90,180]
+        }).catch(()=>{});
+      }
+    }
+  }catch(e){
+    console.warn('[refreshChatNotificationState]', source, e);
+  }
 }
 
 function renderChatList(filter=''){
   const el = document.getElementById('chat-list');
   if(!el) return;
-  const resellers = users.filter(u => u.role==='Reseller' && (!filter || u.dname?.toLowerCase().includes(filter.toLowerCase()) || u.email.toLowerCase().includes(filter.toLowerCase())));
+  let resellers = getAdminChatParticipants().filter(function(u){
+    const last=getChatThreadLastPreview(u.id);
+    if(!last) return false;
+    if(!filter) return true;
+    const q=String(filter||'').toLowerCase();
+    const display=getChatDisplayName(u.id,_messages[String(u.id||'')]||[]).toLowerCase();
+    return display.includes(q) || String(u.email||'').toLowerCase().includes(q);
+  });
+  
+  // Sort by latest message timestamp - newest first (like WhatsApp)
+  resellers = resellers.sort((a, b) => {
+    const tsA = getChatThreadLatestTs(a.id);
+    const tsB = getChatThreadLatestTs(b.id);
+    if(tsA!==tsB) return tsB - tsA; // Descending - newest first
+    if(!!tsA!==!!tsB) return tsB?1:-1;
+    return String(a.dname||a.email||a.id||'').localeCompare(String(b.dname||b.email||b.id||''),'tr',{sensitivity:'base'});
+  });
+  
   if(!resellers.length){el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No resellers found</div>';return;}
   el.innerHTML = resellers.map(u => {
     const msgs = _messages[u.id] || [];
-    const last = msgs[msgs.length-1];
-    const unread = msgs.filter(function(m){return isInboundUnreadForAdmin(m,u.id);}).length;
+    const last = getChatThreadLastPreview(u.id);
+    const unread = countAdminUnreadMessages(u.id,msgs);
     const isActive = _chatReseller === u.id;
-    const initial = (u.dname||u.email)[0].toUpperCase();
+    const displayName=getChatDisplayName(u.id,msgs);
+    const initial = (displayName||u.dname||u.email||'?')[0].toUpperCase();
     const colors = ['#f97316','#7c3aed','#16a34a','#0891b2','#dc2626','#ca8a04'];
     const color = colors[u.id.charCodeAt(0)%colors.length];
     const photo = u.photo || localStorage.getItem('jb_photo_'+u.id);
     const avatarHtml = photo 
       ? `<img src="${photo}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">` 
       : initial;
-    return `<div onclick="openChatWith('${u.id}')" style="padding:12px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);background:${isActive?'var(--accent-light)':'transparent'};transition:.15s;" onmouseover="this.style.background='${isActive?'var(--accent-light)':'var(--bg)'}'" onmouseout="this.style.background='${isActive?'var(--accent-light)':'transparent'}'">
-      <div style="width:42px;height:42px;border-radius:50%;background:${photo?'transparent':color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;flex-shrink:0;overflow:hidden;">${avatarHtml}</div>
+    const lastText=last?(String(last.text||'').startsWith('[img]')?'📷 Foto':String(last.text||'').startsWith('[voice]')?'🎤 Voice':esc(String(last.text||'').slice(0,44))):'No messages yet';
+    return `<div onclick="openChatWith('${u.id}')" style="padding:12px 16px;cursor:pointer;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--border);background:${isActive?'var(--accent-light)':'transparent'};transition:.2s;" onmouseover="this.style.background='${isActive?'var(--accent-light)':'var(--bg)'}'" onmouseout="this.style.background='${isActive?'var(--accent-light)':'transparent'}'">
+      <div style="width:48px;height:48px;border-radius:50%;background:${photo?'transparent':color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0;overflow:hidden;">${avatarHtml}</div>
       <div style="flex:1;min-width:0;">
-        <div style="font-size:13px;font-weight:${unread?'700':'600'};color:${isActive?'var(--accent)':'var(--text)'};">${esc(u.dname||u.email)}</div>
-        <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">${last?(last.text.startsWith('[img]')?'📷 Photo':esc(last.text.slice(0,35))):'No messages yet'}</div>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:8px;margin-bottom:3px;">
+          <div style="font-size:14px;font-weight:${unread?'800':'700'};color:${isActive?'var(--accent)':'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(displayName)}</div>
+          ${last?`<div style="font-size:10px;color:var(--muted);text-align:right;line-height:1.15;min-width:46px;white-space:nowrap;"><div>${fmtChatListDate(last.ts)}</div><div style="font-family:var(--mono);font-weight:700;color:${unread?'var(--accent)':'var(--muted)'};">${fmtChatClock(last.ts)}</div></div>`:''}
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div style="font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">${lastText}</div>
+          ${unread?`<div style="background:#ef4444;color:#fff;border-radius:999px;min-width:20px;height:20px;padding:0 6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;">${unread}</div>`:''}
+        </div>
       </div>
-      ${unread?`<div style="background:#f97316;color:#fff;border-radius:50%;min-width:20px;height:20px;padding:0 4px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;">${unread}</div>`:''}
     </div>`;
   }).join('');
 }
@@ -13467,6 +14085,11 @@ function renderChatList(filter=''){
 // ── CHAT POLLING ──
 async function pollMessages(resellerId){
   if(!resellerId) return;
+  
+  // Optimization: Skip if DB version hasn't changed
+  if(_remoteDbVersion && _activeChatPollLastVersion === _remoteDbVersion) return;
+  _activeChatPollLastVersion = _remoteDbVersion;
+
   try{
     const chatKey='jb_chat_'+resellerId;
     const data=await fetchDataMapByKeys([chatKey]);
@@ -13475,9 +14098,13 @@ async function pollMessages(resellerId){
     const mergedMsgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],prevMsgs);
     if(JSON.stringify(mergedMsgs)!==JSON.stringify(prevMsgs)){
       _messages[resellerId]=mergedMsgs;
-      if(_chatReseller===resellerId) renderMessages();
-      renderChatList();
-      updateChatBadge();
+      if(_chatReseller===resellerId){
+        await markAdminChatRead(resellerId);
+      }else{
+        renderChatList();
+        updateChatBadge();
+        refreshChatNotificationState('poll_messages');
+      }
     }
   }catch(e){ console.warn('[pollMessages]',e); }
 }
@@ -13498,7 +14125,7 @@ function closeChatWindow(){
 
 async function openChatWith(resellerId){
   _chatReseller = resellerId;
-  const u = users.find(x=>x.id===resellerId);
+  const u = findAdminChatParticipant(resellerId);
   if(!u) return;
   // Hide empty state, show window
   const _emptyEl=document.getElementById('chat-empty-state')||document.getElementById('chat-empty');
@@ -13522,36 +14149,26 @@ async function openChatWith(resellerId){
     <div style="width:36px;height:36px;border-radius:50%;background:${photo?'transparent':color};color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;overflow:hidden;">${avatarHtml}</div>
     <div><div style="font-size:14px;font-weight:700;">${esc(u.dname||u.email)}</div><div style="font-size:11px;color:#22c55e;font-weight:600;">● Active</div></div>`;
   
-  // Mark as read and sync to cloud
-  const msgs = _messages[resellerId] || [];
-  let hasUnread = false;
-  msgs.forEach(m => {
-    if(isInboundUnreadForAdmin(m,resellerId)){
-      m.read = true;
-      hasUnread = true;
-    }
-  });
-  
-  if(hasUnread){
-    try{
-      await syncChatThreadToCloud('jb_chat_'+resellerId,msgs,{
-        opId:createLocalMutationOpId('chatread')
-      });
-    }catch(e){}
-  }
+  await markAdminChatRead(resellerId);
   
   renderMessages();
   renderChatList();
+  updateChatBadge();
   const chatKey='jb_chat_'+resellerId;
   await startActiveChatRealtime(chatKey,function(msgsNow){
     _messages[resellerId]=mergeChatMessagesWithCache(chatKey,Array.isArray(msgsNow)?msgsNow:[],_messages[resellerId]||[]);
-    if(_chatReseller===resellerId) renderMessages();
-    renderChatList();
-    updateChatBadge();
+    if(_chatReseller===resellerId){
+      markAdminChatRead(resellerId).catch(()=>{});
+      renderMessages();
+    }else{
+      renderChatList();
+      updateChatBadge();
+      refreshChatNotificationState('active_chat_realtime');
+    }
   });
   // Start polling
   if(_chatPollInterval) clearInterval(_chatPollInterval);
-  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?4000:5000);
+  _chatPollInterval = setInterval(()=>{ if(typeof pollMessages==='function') pollMessages(resellerId); }, getFirebaseEnabled()?2500:2000);
   document.getElementById('chat-input')?.focus();
 }
 
@@ -13569,6 +14186,7 @@ function renderMessages(){
   const resellerPhoto = reseller?.photo || localStorage.getItem('jb_photo_'+_chatReseller);
   const adminPhoto = localStorage.getItem('jb_admin_photo');
   
+  // Display messages in chronological order (oldest first) — newest at bottom
   el.innerHTML = msgs.map(m => {
     const isAdmin = m.from === 'admin';
     const time = new Date(m.ts).toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'});
@@ -13580,7 +14198,7 @@ function renderMessages(){
       const audioUrl = voiceData[0];
       const duration = voiceData[1] || '?';
       content = `<div style="display:flex;align-items:center;gap:10px;padding:4px 0;">
-        <button onclick="playVoiceMsg('${audioUrl}',this)" style="width:36px;height:36px;border-radius:50%;background:${isAdmin?'rgba(255,255,255,.2)':'var(--accent)'};border:none;color:#fff;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;">▶</button>
+        <button onclick="playVoiceMsg('${encodeURIComponent(audioUrl)}',this)" style="width:36px;height:36px;border-radius:50%;background:${isAdmin?'rgba(255,255,255,.2)':'var(--accent)'};border:none;color:#fff;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;">▶</button>
         <div style="flex:1;">
           <div style="font-size:12px;font-weight:600;">🎤 Voice Message</div>
           <div style="font-size:11px;opacity:.7;">${Math.floor(duration/60)}:${(duration%60).toString().padStart(2,'0')}</div>
@@ -13610,16 +14228,59 @@ function renderMessages(){
       ${isAdmin ? avatarHtml : ''}
     </div>`;
   }).join('');
+  // Scroll to bottom to show newest messages
   el.scrollTop = el.scrollHeight;
 }
 
 // Play voice message
 function playVoiceMsg(url, btn){
-  const audio = new Audio(url);
-  audio.play();
+  const resolvedUrl = (() => {
+    try {
+      return decodeURIComponent(String(url || ''));
+    } catch (_e) {
+      return String(url || '');
+    }
+  })();
+  const audio = new Audio();
+  audio.preload = 'auto';
+  audio.src = resolvedUrl;
+  let blobFallbackUrl = '';
+  let blobFallbackAttempted = false;
+  const cleanup = () => {
+    if(blobFallbackUrl){
+      try{ URL.revokeObjectURL(blobFallbackUrl); }catch(_e){}
+      blobFallbackUrl = '';
+    }
+  };
+  const tryBlobFallback = async () => {
+    if(blobFallbackAttempted) return;
+    blobFallbackAttempted = true;
+    try{
+      const res = await fetch(resolvedUrl, { mode: 'cors' });
+      if(!res.ok) throw new Error('fetch_failed');
+      const blob = await res.blob();
+      if(!blob || !blob.size) throw new Error('empty_audio_blob');
+      blobFallbackUrl = URL.createObjectURL(blob);
+      audio.src = blobFallbackUrl;
+      const fallbackPlay = audio.play();
+      if(fallbackPlay && typeof fallbackPlay.catch === 'function'){
+        await fallbackPlay;
+      }
+      return true;
+    }catch(_e){
+      cleanup();
+      toast('Failed to play voice','err');
+      btn.innerHTML = '▶';
+      return false;
+    }
+  };
+  const playPromise = audio.play();
   btn.innerHTML = '⏸';
-  audio.onended = () => { btn.innerHTML = '▶'; };
-  audio.onerror = () => { toast('Failed to play voice','err'); btn.innerHTML = '▶'; };
+  audio.onended = () => { cleanup(); btn.innerHTML = '▶'; };
+  audio.onerror = () => { cleanup(); tryBlobFallback(); };
+  if(playPromise && typeof playPromise.catch === 'function'){
+    playPromise.catch(() => { tryBlobFallback(); });
+  }
 }
 
 // Open order from ref click in chat
@@ -13639,15 +14300,16 @@ function openOrderFromRef(ref){
 
 
 function updateChatBadge(){
-  const total=Object.entries(_messages).reduce(function(sum,entry){
+  // Count how many distinct resellers have unread messages (people count)
+  const peopleWithUnread = Object.entries(_messages).reduce(function(count,entry){
     const resellerId=String(entry&&entry[0]||'');
     const msgs=Array.isArray(entry&&entry[1])?entry[1]:[];
-    const unread=msgs.filter(function(m){return isInboundUnreadForAdmin(m,resellerId);}).length;
-    return sum+unread;
+    const unread=countAdminUnreadMessages(resellerId,msgs);
+    return count + (unread>0?1:0);
   },0);
   const badge=document.getElementById('chat-badge');
-  if(badge){badge.textContent=total;badge.style.display=total?'flex':'none';}
-  _health.chatUnreadAdmin=Math.max(0,Number(total)||0);
+  setUnreadBadge(badge,peopleWithUnread);
+  _health.chatUnreadAdmin=Math.max(0,Number(peopleWithUnread)||0);
 }
 function refreshDashboardCounters(){
   const pg=document.getElementById('pg-dash');
@@ -13672,54 +14334,27 @@ function startResellerMessagePoll(){
 }
 
 async function checkResellerUnreadMessages(){
-  if(!me) return;
+  if(!me || String(me.role||'')!=='Reseller') return;
+  
+  // Optimization: Skip if DB version hasn't changed
+  if(_remoteDbVersion && _resMsgPollLastVersion === _remoteDbVersion) return;
+  _resMsgPollLastVersion = _remoteDbVersion;
+
   try{
     const chatKey='jb_chat_'+me.id;
     const data=await fetchDataMapByKeys([chatKey]);
     if(!data) return;
     const msgs=mergeChatMessagesWithCache(chatKey,data[chatKey]||[],_messages[String(me.id)]||[]);
     _messages[String(me.id)]=msgs;
-    const unreadCount = msgs.filter(function(m){return isInboundUnreadForReseller(m);}).length;
-    _health.chatUnreadReseller=Math.max(0,Number(unreadCount)||0);
-    _health.chatLastPollAt=Date.now();
-    
-    // Check for new messages (unread count increased)
-    if(unreadCount > _lastResUnreadCount){
-      const lastUnread=[...msgs].reverse().find(function(m){return isInboundUnreadForReseller(m);});
-      const eventId=String(lastUnread&&lastUnread.id||('admin_'+(lastUnread&&lastUnread.ts||Date.now())));
-      dispatchRealtimeNotification({
-        kind:'reseller_chat',
-        eventId,
-        title:'💬 New Message from Admin',
-        body:'You have a new message',
-        toastType:'info',
-        localNotification:document.visibilityState!=='visible',
-        tag:'reseller-chat',
-        vibratePattern:[180,90,180]
-      }).catch(()=>{});
-    }
-    _lastResUnreadCount = unreadCount;
-    
-    // Alt navigasyon badge
-    const badge = document.getElementById('res-chat-badge');
-    if(badge){
-      if(unreadCount > 0){
-        badge.style.display = 'flex';
-        badge.textContent = unreadCount;
-      } else {
-        badge.style.display = 'none';
+    if(document.getElementById('res-chat-overlay')?.style.display==='flex'){
+      await markResellerChatRead();
+    }else{
+      refreshChatNotificationState('poll_reseller');
+      if(!_chatNotificationBootstrapped.reseller){
+        seedChatSeenBaselineFromCurrentMessages();
       }
     }
-    // Header chat badge
-    const headerBadge = document.getElementById('res-header-chat-badge');
-    if(headerBadge){
-      if(unreadCount > 0){
-        headerBadge.style.display = 'flex';
-        headerBadge.textContent = unreadCount;
-      } else {
-        headerBadge.style.display = 'none';
-      }
-    }
+    _lastResUnreadCount = _health.chatUnreadReseller;
   }catch(e){
     console.warn('[checkResellerUnreadMessages]', e);
   }
@@ -13749,6 +14384,11 @@ function closeResellerChat(){
 
 async function loadResellerMessages(){
   if(!me) return;
+  
+  // Optimization: Skip if DB version hasn't changed
+  if(_remoteDbVersion && _resChatPollLastVersion === _remoteDbVersion) return;
+  _resChatPollLastVersion = _remoteDbVersion;
+
   try{
     const chatKey='jb_chat_'+me.id;
     let msgs=readChatMessagesFromCache(chatKey);
@@ -13763,29 +14403,12 @@ async function loadResellerMessages(){
     // Mark admin messages as read if chat is open
     const isChatOpen = document.getElementById('res-chat-overlay')?.style.display === 'flex';
     if(isChatOpen){
-      let hasUnread = false;
-      msgs = msgs.map(m => {
-        if(isInboundUnreadForReseller(m)){
-          hasUnread = true;
-          return {...m, read: true};
-        }
-        return m;
-      });
-      
-      // Save read status to cloud
-      if(hasUnread){
-        writeChatMessagesToCache(chatKey,msgs);
-        await syncChatThreadToCloud(chatKey,msgs,{
-          opId:createLocalMutationOpId('reschatread')
-        });
-      }
-      
-      // Clear badge
-      const badge = document.getElementById('res-chat-badge');
-      if(badge) badge.style.display = 'none';
+      await markResellerChatRead();
+      msgs=_messages[String(me.id)]||msgs;
     }
     
     renderResellerMessages(msgs);
+    refreshChatNotificationState('load_reseller_messages');
   }catch(e){
     console.error('[loadResellerMessages]', e);
   }
@@ -13807,6 +14430,7 @@ function renderResellerMessages(msgs){
   const adminPhoto = adminUser?.photo || localStorage.getItem('jb_admin_photo');
   const myPhoto = localStorage.getItem('jb_photo_'+me?.id);
   
+  // Display messages in chronological order (oldest first) — newest at bottom
   el.innerHTML=msgs.map(m=>{
     const isAdmin=m.from==='admin';
     let content='';
@@ -13817,7 +14441,7 @@ function renderResellerMessages(msgs){
       const voiceData=m.text.replace('[voice]','').split('|');
       const audioUrl=voiceData[0];
       const duration=voiceData[1]||'?';
-      content=`<div style="display:flex;align-items:center;gap:8px;min-width:120px;"><button onclick="playVoiceMsg('${audioUrl}',this)" style="width:32px;height:32px;border-radius:50%;border:none;background:${isAdmin?'var(--accent)':'#fff'};color:${isAdmin?'#fff':'var(--accent)'};cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;">▶</button><div><div style="font-size:12px;font-weight:600;">🎤 Voice</div><div style="font-size:10px;opacity:0.7;">${duration}</div></div></div>`;
+      content=`<div style="display:flex;align-items:center;gap:8px;min-width:120px;"><button onclick="playVoiceMsg('${encodeURIComponent(audioUrl)}',this)" style="width:32px;height:32px;border-radius:50%;border:none;background:${isAdmin?'var(--accent)':'#fff'};color:${isAdmin?'#fff':'var(--accent)'};cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;">▶</button><div><div style="font-size:12px;font-weight:600;">🎤 Voice</div><div style="font-size:10px;opacity:0.7;">${duration}</div></div></div>`;
     }else{
       // Make #ref clickable
       let text=esc(m.text||'');
@@ -13835,11 +14459,12 @@ function renderResellerMessages(msgs){
       ${isAdmin ? avatarHtml : ''}
       <div style="display:flex;flex-direction:column;align-items:${isAdmin?'flex-start':'flex-end'};">
         <div style="padding:9px 13px;border-radius:${isAdmin?'4px 14px 14px 14px':'14px 14px 4px 14px'};font-size:13px;line-height:1.6;background:${isAdmin?'var(--card)':'var(--accent)'};color:${isAdmin?'var(--text)':'#fff'};border:${isAdmin?'1px solid var(--border)':'none'};">${content}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:3px;">${fmtDate(m.ts)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:3px;">${fmtChatClock(m.ts)}</div>
       </div>
     </div>`;
   }).join('');
   const newLen=msgs.length;
+  // If user was at bottom (viewing newest) or new messages added, keep at bottom
   if(wasAtBottom || (typeof newLen!=="undefined" && newLen > prevLen)) el.scrollTop=el.scrollHeight;
 }
 
@@ -13873,6 +14498,7 @@ async function sendChatMsg(){
   _messages[_chatReseller]=msgs;
   writeChatMessagesToCache(chatKey,msgs);
   renderMessages();
+  renderChatList(document.getElementById('chat-search')?.value||'');
   try{
     const synced=await syncChatThreadToCloud(chatKey,msgs,{
       opId:createLocalMutationOpId('chatadmin')
@@ -13883,6 +14509,7 @@ async function sendChatMsg(){
     if(reseller){
       await sendPushToReseller(_chatReseller, '💬 New Message', `Admin: ${text.slice(0,50)}${text.length>50?'...':''}`);
     }
+    refreshChatNotificationState('send_chat_msg');
   }catch(e){
     console.error('[sendChatMsg]',e);
     persistLocalSyncFallback(chatKey,msgs);
@@ -13907,6 +14534,8 @@ async function sendResellerChatMsg(){
       id:'m'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
       from:me.id,
       to:'admin',
+      senderName:me.dname||me.email||me.id,
+      senderEmail:me.email||'',
       text,
       ts:Date.now(),
       updatedAt:Date.now()
@@ -13915,12 +14544,14 @@ async function sendResellerChatMsg(){
     _messages[String(me.id)]=msgs;
     writeChatMessagesToCache(chatKey,msgs);
     renderResellerMessages(msgs);
+    refreshChatNotificationState('send_reseller_chat_msg_local');
     const syncOk=await syncChatThreadToCloud(chatKey,msgs,{
       opId:createLocalMutationOpId('reschatmsg')
     });
     if(!syncOk) throw new Error('chat sync failed');
     // Push notification to admin
     await sendPushToAdmin('💬 New Message', `${me.dname||me.email}: ${text.slice(0,50)}${text.length>50?'...':''}`);
+    refreshChatNotificationState('send_reseller_chat_msg');
   }catch(e){
     persistLocalSyncFallback(chatKey,readChatMessagesFromCache(chatKey));
     console.error('[sendResellerChatMsg]', e);
@@ -14143,13 +14774,15 @@ let _autoSyncVisibilityBound=false;
 let _silentLoadInFlight=null;
 
 // Optimized version-based sync
- let _remoteDbVersion = null;
- let _versionPollInterval = null;
- let _autoSyncLastVersion = null;
- let _pageSyncLastVersion = null;
- let _pendingPollLastVersion = null;
- let _chatPollLastVersion = null;
- let _resMsgPollLastVersion = null;
+let _remoteDbVersion = null;
+let _versionPollInterval = null;
+let _autoSyncLastVersion = null;
+let _pageSyncLastVersion = null;
+let _pendingPollLastVersion = null;
+  let _chatPollLastVersion = null;
+  let _resMsgPollLastVersion = null;
+   let _activeChatPollLastVersion = null;
+   let _resChatPollLastVersion = null;
 
 async function pollDbVersion(){
   try{
@@ -14157,7 +14790,19 @@ async function pollDbVersion(){
     const res=await fetch(api+'/api/data-version',{headers:getAuthHeaders()});
     if(!res.ok) return;
     const {version}=await res.json();
+    const oldVersion = _remoteDbVersion;
     _remoteDbVersion=version;
+
+    // If version changed and a chat is active, force refresh messages
+    if(oldVersion && oldVersion !== version){
+      if(me && me.role==='Admin' && _chatReseller){
+        pollMessages(_chatReseller).catch(()=>{});
+      }
+      if(me && me.role==='Reseller'){
+        const isChatOpen = document.getElementById('res-chat-overlay')?.style.display === 'flex';
+        if(isChatOpen) loadResellerMessages().catch(()=>{});
+      }
+    }
   }catch(e){}
 }
 
@@ -15890,9 +16535,7 @@ async function sendResChatImage(input){
       msgs.push(msg);
       writeChatMessagesToCache(chatKey,msgs);
       renderResellerMessages(msgs);
-      syncChatThreadToCloud(chatKey,msgs,{
-        opId:createLocalMutationOpId('reschatimg')
-      }).catch(function(err){ console.warn('[res chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
+      syncChatThreadToCloud(chatKey,msgs,{opId:createLocalMutationOpId('reschatimg')}).catch(function(err){ console.warn('[res chat image sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,msgs); });
       toast('✅ Image sent','ok');
       // Background upload: replace local data URL with remote URL when ready.
       setTimeout(async function(){
@@ -15905,9 +16548,7 @@ async function sendResChatImage(input){
           found.text='[img]'+uploaded;
           writeChatMessagesToCache(chatKey,live);
           renderResellerMessages(live);
-          syncChatThreadToCloud(chatKey,live,{
-            opId:createLocalMutationOpId('reschatimgup')
-          }).catch(function(err){ console.warn('[res chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,live); });
+          syncChatThreadToCloud(chatKey,live,{opId:createLocalMutationOpId('reschatimgup')}).catch(function(err){ console.warn('[res chat image upgrade sync]',err&&err.message?err.message:err); persistLocalSyncFallback(chatKey,live); });
         }catch(_e){}
       },0);
     }catch(err){

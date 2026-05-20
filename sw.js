@@ -1,5 +1,5 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260512-spa-navigation-fallback-v1';
+const CACHE_VERSION = 'jrshop-v20260520-chat-ui-v4';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
@@ -56,7 +56,7 @@ self.addEventListener('fetch', e => {
   // refresh/F5 ile istendiğinde fiziksel dosya aratmak yerine index.html ver.
   if (isNavigation && !looksLikeFile) {
     e.respondWith(
-      fetch(e.request)
+      fetch(e.request, { cache: 'reload' })
         .then(response => {
           if (response && response.ok) return response;
           return caches.match('/index.html').then(cached => cached || fetch('/index.html'));
@@ -75,7 +75,7 @@ self.addEventListener('fetch', e => {
     url.pathname.endsWith('.html')
   ) {
     e.respondWith(
-      fetch(e.request)
+      fetch(e.request, { cache: 'reload' })
         .then(response => {
           if (response.ok) {
             const clone = response.clone();
