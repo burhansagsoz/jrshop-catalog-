@@ -1225,9 +1225,14 @@ body.dark .modal-foot{background:#263548;}
       <!-- CHAT PAGE -->
       <div class="page" id="pg-chat" style="display:flex;flex-direction:row;overflow:hidden;padding:0;gap:0;position:relative;">
         <div id="chat-sidebar" style="width:240px;min-width:240px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;position:relative;">
-          <div style="padding:12px 16px;border-bottom:1px solid var(--border);">
-            <div style="font-size:14px;font-weight:700;margin-bottom:8px;">💬 Messages</div>
-            <input id="chat-search" placeholder="Search resellers..." style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12px;outline:none;color:var(--text);" oninput="renderChatList(this.value)">
+          <div style="padding:12px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;">
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:14px;font-weight:700;margin-bottom:8px;">💬 Messages</div>
+              <input id="chat-search" placeholder="Search resellers..." style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12px;outline:none;color:var(--text);" oninput="renderChatList(this.value)">
+            </div>
+            <div style="flex-shrink:0;">
+              <button class="btn btn-sm btn-primary" style="padding:8px 10px;" onclick="openCreateChatModal()">➕ New Chat</button>
+            </div>
           </div>
           <div id="chat-list" style="flex:1;overflow-y:auto;overflow-x:hidden;"></div>
         </div>
@@ -1271,6 +1276,26 @@ body.dark .modal-foot{background:#263548;}
 
       <div class="page-slot" id="pg-messages-slot"></div>
       <script>includePageFragmentSync('pg-messages-slot','pages/pg-messages.html');</script>
+
+      <!-- Create Chat Modal (moved here so it appears on /messages which maps to pg-chat) -->
+      <div id="create-chat-modal" class="modal-bg" style="display:none;align-items:center;justify-content:center;">
+        <div class="modal" style="max-width:720px;">
+          <div class="modal-head"><h2>Create Chat</h2><button class="mx" onclick="closeCreateChatModal()">✕</button></div>
+          <div class="modal-body" style="padding-top:6px;">
+            <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;">
+              <input id="create-chat-search" class="fi" placeholder="Search resellers…" oninput="populateCreateChatModal(this.value)" style="flex:1;">
+            </div>
+            <div id="create-chat-list" style="max-height:44vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:6px;"></div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-secondary" onclick="closeCreateChatModal()">Cancel</button>
+            <button class="btn btn-primary" id="create-chat-do-btn" onclick="createChatsFromSelection()">Create Chat</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Floating quick chat button (shown only on pg-chat) -->
+      <!-- floating quick-chat removed: using inline sidebar button -->
 
       <div class="page-slot" id="pg-users-slot"></div>
       <script>includePageFragmentSync('pg-users-slot','pages/pg-users.html');</script>
@@ -3397,6 +3422,11 @@ function showPage(id){
     pg.scrollTop=0;
     requestAnimationFrame(()=>pg.classList.add('page-enter'));
   }
+  // Show quick chat button only on messages page
+  try{
+    // Sidebar 'New Chat' button is inline; no need to toggle floating button here.
+    try{ const sbBtn = document.querySelector('#chat-sidebar .btn[onclick*="openCreateChatModal"]'); if(sbBtn) sbBtn.style.display = (id==='pg-chat' ? 'inline-flex' : 'none'); }catch(_e){}
+  }catch(_e){}
   if(id!=='pg-orders') closeDetail();
   if(id!=='pg-barcode') stopCamera();
   if(id!=='pg-bulk-cn') stopBCNCamera();
@@ -3554,7 +3584,7 @@ function goBarcode(el){setNav(el);showPage('pg-barcode');document.getElementById
 function goImport(el){setNav(el);showPage('pg-import');document.getElementById('pg-title').textContent='Import Tracking';hideTop();}
 function goCustomers(el){setNav(el);showPage('pg-customers');document.getElementById('pg-title').textContent='Customers';hideTop();_customersPage=1;renderCustomers('');}
 function goSuppliers(el){setNav(el);showPage('pg-suppliers');document.getElementById('pg-title').textContent='Factories';hideTop();_suppliersPage=1;renderSuppliers();}
-function goMessages(el){setNav(el);showPage('pg-messages');document.getElementById('pg-title').textContent='Templates & Notifications';hideTop();}
+function goMessages(el){setNav(el);showPage('pg-messages');document.getElementById('pg-title').textContent='Templates & Notifications';hideTop();loadTemplates();initAdminMessaging();}
 function goUsers(el){setNav(el);showPage('pg-users');document.getElementById('pg-title').textContent='Users';hideTop();_usersPage=1;try{renderUsers();}catch(e){console.error("[goUsers]",e);}}
 function goSettings(el){setNav(el);showPage('pg-settings');document.getElementById('pg-title').textContent='Settings';hideTop();}
 function goChat(el){
@@ -5848,6 +5878,83 @@ function saveNotifSettings(){
   };
   writeLocalJson('jb_notif',notifSettings);
   toast('✅ Notification settings saved!','ok');
+}
+
+// ── ADMIN MESSAGE TO RESELLERS ──
+function loadResellerList(){
+  const sel=document.getElementById('reseller-select');
+  const resellerList=Array.isArray(users)?users.filter(u=>u.role==='Reseller'):[];
+  sel.innerHTML='<option value="">— Choose a reseller —</option>'+resellerList.map(r=>`<option value="${r.id}">${esc(r.dname||r.email)}</option>`).join('');
+  const listContent=document.getElementById('reseller-list-content');
+  if(listContent){
+    listContent.innerHTML=resellerList.map(r=>`<div style="padding:8px;background:var(--hover);border-radius:4px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;" onclick="selectResellerFromList('${r.id}','${esc(r.dname||r.email)}')"><span>${esc(r.dname||r.email)}</span><span style="font-size:11px;color:var(--muted);">${esc(r.email)}</span></div>`).join('');
+  }
+}
+function toggleResellerList(){
+  const view=document.getElementById('reseller-list-view');
+  if(view)view.style.display=view.style.display==='none'?'block':'none';
+}
+function selectResellerFromList(id,name){
+  document.getElementById('reseller-select').value=id;
+  document.getElementById('reseller-list-view').style.display='none';
+  toast(`✅ Selected: ${name}`,'ok');
+}
+function sendMessageToReseller(){
+  const resellerId=document.getElementById('reseller-select').value;
+  const msg=document.getElementById('message-text').value.trim();
+  if(!resellerId){toast('⚠️ Select a reseller first','err');return;}
+  if(!msg){toast('⚠️ Enter a message','err');return;}
+  const reseller=Array.isArray(users)?users.find(u=>u.id===resellerId):null;
+  if(!reseller){toast('⚠️ Reseller not found','err');return;}
+  const messages=(jb_message_history&&Array.isArray(jb_message_history))?jb_message_history:[];
+  messages.push({ts:Date.now(),to:reseller.email,toName:reseller.dname||reseller.email,msg,from:auth.currentUser?.email||'admin',fromName:'Admin',read:false});
+  writeLocalJson('jb_message_history',messages);
+  clearMessageForm();
+  renderMessageHistory();
+  toast('✅ Message sent to '+(reseller.dname||reseller.email),'ok');
+}
+function clearMessageForm(){
+  document.getElementById('reseller-select').value='';
+  document.getElementById('message-text').value='';
+}
+function initAdminMessaging(){
+  const section=document.getElementById('admin-message-section');
+  const historySection=document.getElementById('message-history-section');
+  if(!section)return;
+  let show=false;
+  if(typeof auth!=='undefined'&&auth){
+    show=(auth.isAdmin&&auth.isAdmin())||(auth.isStaff&&auth.isStaff());
+  }else{
+    const role=State.get('jb_auth_role')||localStorage.getItem('jb_auth_role')||'';
+    show=role==='Admin'||role==='Staff';
+  }
+  section.style.display=show?'block':'none';
+  if(historySection)historySection.style.display=show?'block':'none';
+  if(show){
+    loadResellerList();
+    renderMessageHistory();
+  }
+}
+function renderMessageHistory(){
+  const histList=document.getElementById('message-history-list');
+  if(!histList)return;
+  const messages=(jb_message_history&&Array.isArray(jb_message_history))?jb_message_history.slice().reverse():[];
+  if(!messages.length){
+    histList.innerHTML='<div style="text-align:center;color:var(--muted);padding:20px;font-size:13px;">No messages sent yet</div>';
+    return;
+  }
+  histList.innerHTML=messages.slice(0,50).map(m=>{
+    const time=new Date(m.ts).toLocaleString();
+    const status=m.read?'✅ Read':'⏰ Pending';
+    return`<div style="background:var(--hover);border-radius:6px;padding:10px;font-size:12px;border-left:3px solid var(--accent);">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;margin-bottom:5px;">
+        <strong>${esc(m.toName||m.to)}</strong>
+        <span style="font-size:10px;color:var(--muted);">${time}</span>
+        <span style="font-size:10px;padding:2px 6px;border-radius:3px;${m.read?'background:var(--accent-light);color:var(--accent);':'background:var(--yellow-bg);color:var(--yellow);'}">${status}</span>
+      </div>
+      <div style="color:var(--muted);word-break:break-word;">${esc(m.msg).substring(0,80)}${m.msg.length>80?'...':''}</div>
+    </div>`;
+  }).join('');
 }
 
 // ── USERS ──
@@ -14380,6 +14487,74 @@ function closeResellerChat(){
   _resChatRealtimeBound=false;
   stopActiveChatRealtime();
   if(_resChatInterval){clearInterval(_resChatInterval);_resChatInterval=null;}
+}
+
+// ── Create Chat (Admin) UI helpers
+function openCreateChatModal(){
+  if(!me || me.role!=='Admin') return toast('Yetkiniz yok','err');
+  const el=document.getElementById('create-chat-modal');
+  if(!el) return toast('Modal yüklenemedi','err');
+  el.style.display='flex';
+  populateCreateChatModal('');
+  setTimeout(()=>document.getElementById('create-chat-search')?.focus(),250);
+}
+function closeCreateChatModal(){
+  const el=document.getElementById('create-chat-modal'); if(!el) return; el.style.display='none';
+}
+function populateCreateChatModal(filter){
+  const listEl=document.getElementById('create-chat-list'); if(!listEl) return;
+  const q=String(filter||'').toLowerCase();
+  const resellers=(getResellerUsersForChat()||[]).filter(function(u){
+    const rid=String(u&&u.id||'').trim(); if(!rid) return false;
+    // skip if there is already a chat preview, messages, or local chat stored
+    if(getChatThreadLastPreview(rid)) return false;
+    if(Array.isArray(_messages[rid]) && _messages[rid].length) return false;
+    if(localStorage.getItem('jb_chat_'+rid)) return false;
+    if(q){
+      const hay=(String(u.dname||u.email||rid)||'').toLowerCase();
+      return hay.includes(q);
+    }
+    return true;
+  });
+  if(!resellers.length){ listEl.innerHTML='<div style="padding:12px;color:var(--muted);text-align:center;">No resellers without chats found</div>'; return; }
+  listEl.innerHTML = resellers.map(function(u){
+    const name=esc(u.dname||u.email||u.id||'');
+    const email=esc(String(u.email||'')).slice(0,40);
+    return `<label style="display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--border);border-radius:8px;"><input type="checkbox" value="${u.id}" style="width:16px;height:16px;"><div style="flex:1;min-width:0;"><div style="font-weight:700;">${name}</div><div style="font-size:12px;color:var(--muted);">${email}</div></div></label>`;
+  }).join('');
+}
+function createChatsFromSelection(){
+  const checked = Array.from(document.querySelectorAll('#create-chat-list input[type=checkbox]:checked')).map(function(i){return i.value;});
+  if(!checked.length) return toast('Select at least one reseller','err');
+  createChatsWithResellerIds(checked).then(function(created){
+    if(created && created.length){
+      toast('Chats created','ok');
+      renderChatList(document.getElementById('chat-search')?.value||'');
+      // open first created chat
+      openChatWith(created[0]);
+    }else{
+      toast('No chats created','err');
+    }
+    closeCreateChatModal();
+  }).catch(function(e){ console.error('[createChatsFromSelection]',e); toast('Failed to create chats','err'); });
+}
+async function createChatsWithResellerIds(ids){
+  const created=[];
+  try{
+    for(const rid of Array.isArray(ids)?ids:[]){
+      const id=String(rid||'').trim(); if(!id) continue;
+      const chatKey='jb_chat_'+id;
+      const hasLocal = !!localStorage.getItem(chatKey);
+      const hasMsgs = Array.isArray(_messages[id]) && _messages[id].length;
+      const hasPreview = !!getChatThreadLastPreview(id);
+      if(hasLocal || hasMsgs || hasPreview) continue;
+      // create empty thread
+      writeLocalJson(chatKey,[]);
+      writeChatMessagesToCache(chatKey,[]);
+      created.push(id);
+    }
+  }catch(_e){ console.warn('[createChatsWithResellerIds]',_e); }
+  return created;
 }
 
 async function loadResellerMessages(){
