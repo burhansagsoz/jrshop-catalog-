@@ -2698,13 +2698,10 @@ async function getData(db, requestUrl = null, authContext = null) {
   for (const row of rows.results) {
     try { data[row.key] = JSON.parse(row.value); } catch { data[row.key] = row.value; }
   }
-  // If jb_users was accidentally overwritten by a tiny snapshot, recover from backup key.
+  // Keep the stored users list authoritative; only fall back to backup when the
+  // primary key is missing or invalid.
   const shouldCheckUsersBackup = !requestedKeys.length || requestedKeys.includes('jb_users') || requestedKeys.includes('jb_users_backup');
-  if (
-    shouldCheckUsersBackup &&
-    Array.isArray(data.jb_users_backup) &&
-    data.jb_users_backup.length > (Array.isArray(data.jb_users) ? data.jb_users.length : 0)
-  ) {
+  if (shouldCheckUsersBackup && !Array.isArray(data.jb_users) && Array.isArray(data.jb_users_backup)) {
     data.jb_users = data.jb_users_backup;
   }
   if (isResellerContext(authContext)) {
@@ -2894,8 +2891,7 @@ async function syncKey(db, key, value, event = null) {
   }
 
   if (normalizedKey === 'jb_users') {
-    const existingUsers = await readUsersFromStore(db);
-    const nextUsers = mergeUsersConservative(existingUsers, value);
+    const nextUsers = normalizeUsersForStore(value);
     await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
       .bind('jb_users', JSON.stringify(nextUsers)).run();
     const backupRow = await db.prepare("SELECT value FROM kv_store WHERE key='jb_users_backup'").first();
@@ -2903,7 +2899,7 @@ async function syncKey(db, key, value, event = null) {
     if (backupRow && backupRow.value) {
       try { backupUsers = normalizeUsersForStore(JSON.parse(backupRow.value)); } catch { backupUsers = []; }
     }
-    if (nextUsers.length >= backupUsers.length) {
+    if (nextUsers.length >= backupUsers.length || !backupUsers.length) {
       await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
         .bind('jb_users_backup', JSON.stringify(nextUsers)).run();
     }
