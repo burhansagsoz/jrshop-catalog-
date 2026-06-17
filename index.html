@@ -2451,8 +2451,8 @@ function persistOrdersState(nextOrders){
 }
 async function fetchOrdersSnapshotFromWorker(opts={}){
   const api=await ensureWorkingApiBase({silent:true});
-  const pageSize=Math.max(50,Math.min(500,Number(opts&&opts.pageSize)||200));
-  const maxPages=Math.max(1,Math.min(50,Number(opts&&opts.maxPages)||20));
+  const pageSize=Math.max(50,Math.min(500,Number(opts&&opts.pageSize)||500));
+  const maxPages=Math.max(1,Math.min(50,Number(opts&&opts.maxPages)||50));
   const sinceTs=Math.max(0,Number(opts&&opts.sinceTs)||0);
   const sinceV=Math.max(0,Number(opts&&opts.sinceV)||0);
   const incremental=!!(sinceTs>0||sinceV>0);
@@ -3216,7 +3216,7 @@ async function login(){
         // Prefer authoritative /api/orders on login; fetch full paginated snapshot to avoid partial page flashes.
         let cloudOrders=[];
         try{
-          const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[]}));
+          const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:500,maxPages:50}).catch(()=>({orders:[]}));
           cloudOrders = Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
         }catch(_e){
           cloudOrders = [];
@@ -3508,7 +3508,7 @@ async function navOrders(status,el){
           await fetchOrderUpdatesWithCursor({silent:true,maxBatches:2,limit:180}).catch(()=>{});
         }else{
           // Use paginated fetcher to avoid applying single-page (200) snapshot
-          const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[]}));
+          const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:500,maxPages:50}).catch(()=>({orders:[]}));
           const cloudOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
           if(cloudOrders.length){
             const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'pending_nav',forceRemote:true});
@@ -8772,7 +8772,7 @@ async function maybeSelfHealOrderDrift(opts={}){
     try{
       const beforeCount=Array.isArray(orders)?orders.length:0;
       // Use paginated fetcher to avoid single-page (200 item) snapshot
-      const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[],fetchedPages:0}));
+      const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:500,maxPages:50}).catch(()=>({orders:[],fetchedPages:0}));
       const remoteOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
       if(!remoteOrders.length) return false;
       const hasDrift=hasOrderSnapshotDrift(orders,remoteOrders);
@@ -9316,7 +9316,7 @@ async function bootstrapAuthoritativeOrders(){
     const api=await ensureWorkingApiBase({silent:true});
     let changed=false;
     try{
-      const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5}).catch(()=>({orders:[]}));
+      const snapshot = await fetchOrdersSnapshotFromWorker({pageSize:500,maxPages:50}).catch(()=>({orders:[]}));
       const cloudOrders = Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
       if(cloudOrders.length){
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'bootstrap_paginated',forceRemote:true});
@@ -9682,7 +9682,7 @@ async function loadFromCloudSilent(){
       return true;
     }
 
-    const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
+    const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:500,maxPages:50});
     const cloudOrders=Array.isArray(orderSnapshot&&orderSnapshot.orders)?orderSnapshot.orders:[];
     const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load_silent',forceRemote:true});
     if(applied.applied&&applied.changed){
@@ -9750,7 +9750,7 @@ async function loadFromCloud(){
           updateBadges();render();
           return true;
         }
-        const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
+        const orderSnapshot=await fetchOrdersSnapshotFromWorker({pageSize:500,maxPages:50});
         const cloudOrders=Array.isArray(orderSnapshot&&orderSnapshot.orders)?orderSnapshot.orders:[];
         const applied=applyAuthoritativeOrdersSnapshot(cloudOrders,{source:'load',forceRemote:true});
         if(!applied.applied){
@@ -13431,7 +13431,7 @@ async function startPendingPoll(){
       // Try dedicated orders endpoint first
       let newOrders=[];
       try{
-        const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:1000,maxPages:5});
+        const snapshot=await fetchOrdersSnapshotFromWorker({pageSize:500,maxPages:50});
         newOrders=Array.isArray(snapshot&&snapshot.orders)?snapshot.orders:[];
       }catch{
         return;
