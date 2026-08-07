@@ -2355,8 +2355,6 @@ function getDefaultApiBaseByLocation(){
     const p=String(location.port||'');
     // Static dev servers should talk to the local Worker, not to their own origin.
     if((h==='localhost'||h==='127.0.0.1') && (p==='8000'||p==='5500'||p==='5000')) return 'http://127.0.0.1:8787';
-    if(h==='127.0.0.1' && p==='5500') return 'http://127.0.0.1:8788';
-    if(h==='127.0.0.1' && p==='8788') return 'http://127.0.0.1:8888';
   }catch(_e){}
   return location.origin;
 }
@@ -2368,9 +2366,9 @@ function normalizeConfiguredApiBase(raw){
   value=value.replace(/\/$/,'');
   // Prevent pointing API to local static frontend servers.
   if(/^https?:\/\/(127\.0\.0\.1|localhost):8000$/i.test(value)) return 'http://127.0.0.1:8787';
-  if(/^https?:\/\/(127\.0\.0\.1|localhost):5500$/i.test(value)) return 'http://127.0.0.1:8788';
+  if(/^https?:\/\/(127\.0\.0\.1|localhost):5500$/i.test(value)) return 'http://127.0.0.1:8787';
   if(/^https?:\/\/(127\.0\.0\.1|localhost):5000$/i.test(value)) return 'http://127.0.0.1:8787';
-  if(/^https?:\/\/(127\.0\.0\.1|localhost):8788$/i.test(value)) return 'http://127.0.0.1:8888';
+  if(/^https?:\/\/(127\.0\.0\.1|localhost):8788$/i.test(value)) return 'http://127.0.0.1:8787';
   return value;
 }
 function getDefaultCloudKeyByLocation(){
@@ -9274,22 +9272,11 @@ function writeLocalJson(key,value){
 
   const SERVER_KEYS = ['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed','jb_catalog_orders_map'];
 
-  // For server-backed keys, attempt to persist to Worker (/api/data). Fall back to localStorage on any error.
+  // For server-backed keys, persist through the sync pipeline so local edits
+  // stay protected while the cloud write is in flight.
   if(SERVER_KEYS.includes(key)){
     try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
-    try{
-      // fire-and-forget async write to API; keep local fallback if network fails
-      ensureWorkingApiBase({silent:true}).then(api=>{
-        try{
-          const h = getAuthHeaders() || {};
-          fetch(api+"/api/data",{method:'POST',headers:Object.assign({'Content-Type':'application/json'},h),body:JSON.stringify({[key]:value})}).then(res=>{
-            if(!res||!res.ok) throw new Error('sync_failed');
-          }).catch(()=>{
-            try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){}
-          });
-        }catch(_e){ try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){} }
-      }).catch(()=>{ try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){} });
-    }catch(_e){ try{localStorage.setItem(key,JSON.stringify(value));}catch(_e){} }
+    syncGenericKeyToCloud(key,value).catch(()=>{});
     return;
   }
 
