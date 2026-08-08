@@ -12038,14 +12038,18 @@ function writeLocalJson(key,value){
   const SERVER_KEYS = ['jb_users','jb_suppliers','jb_catalog','jb_settings','jb_templates','jb_notif','jb_activity','jb_cat_categories','jb_feed','jb_catalog_orders_map'];
   if(!SERVER_KEYS.includes(String(key||''))) return;
   try{
-    ensureWorkingApiBase({silent:true}).then(api=>{
-      const h=getAuthHeaders()||{};
-      fetch(api+'/api/data',{
-        method:'POST',
-        headers:Object.assign({'Content-Type':'application/json'},h),
-        body:JSON.stringify({[key]:value})
+    if(typeof syncGenericKeyToCloud === 'function'){
+      syncGenericKeyToCloud(key,value).catch(()=>{});
+    }else{
+      ensureWorkingApiBase({silent:true}).then(api=>{
+        const h=getAuthHeaders()||{};
+        fetch(api+'/api/data',{
+          method:'POST',
+          headers:Object.assign({'Content-Type':'application/json'},h),
+          body:JSON.stringify({[key]:value})
+        }).catch(()=>{});
       }).catch(()=>{});
-    }).catch(()=>{});
+    }
   }catch(_e){}
 }
 function readLocalDataMap(){

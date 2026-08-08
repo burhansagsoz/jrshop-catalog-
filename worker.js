@@ -2699,10 +2699,28 @@ async function getData(db, requestUrl = null, authContext = null) {
     try { data[row.key] = JSON.parse(row.value); } catch { data[row.key] = row.value; }
   }
   // Keep the stored users list authoritative; only fall back to backup when the
-  // primary key is missing or invalid.
+  // primary key is missing or completely invalid (not just empty).
   const shouldCheckUsersBackup = !requestedKeys.length || requestedKeys.includes('jb_users') || requestedKeys.includes('jb_users_backup');
-  if (shouldCheckUsersBackup && !Array.isArray(data.jb_users) && Array.isArray(data.jb_users_backup)) {
-    data.jb_users = data.jb_users_backup;
+  if (shouldCheckUsersBackup) {
+    const hasPrimary = Array.isArray(data.jb_users);
+    const hasBackup = Array.isArray(data.jb_users_backup);
+    if (!hasPrimary && hasBackup) {
+      data.jb_users = data.jb_users_backup;
+    } else if (hasPrimary && hasBackup) {
+      const primaryIds = new Set((data.jb_users || []).map(u => userIdentityKey(u)));
+      const backupIds = new Set((data.jb_users_backup || []).map(u => userIdentityKey(u)));
+      const backupHasDeleted = [];
+      for (const k of backupIds) {
+        if (!primaryIds.has(k)) backupHasDeleted.push(k);
+      }
+      if (backupHasDeleted.length) {
+        try {
+          await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+            .bind('jb_users_backup', JSON.stringify(normalizeUsersForStore(data.jb_users))).run();
+        } catch (_e) {}
+        data.jb_users_backup = normalizeUsersForStore(data.jb_users);
+      }
+    }
   }
   if (isResellerContext(authContext)) {
     // Resellers may only see a limited set of keys. Allow `jb_users` as a
@@ -2892,22 +2910,73 @@ async function syncKey(db, key, value, event = null) {
 
   if (normalizedKey === 'jb_users') {
     const nextUsers = normalizeUsersForStore(value);
+    const existingRow = await db.prepare("SELECT value FROM kv_store WHERE key='jb_users'").first();
+    let existingUsers = [];
+    if (existingRow && existingRow.value) {
+      try { existingUsers = normalizeUsersForStore(JSON.parse(existingRow.value)); } catch { existingUsers = []; }
+    }
+
+    let finalUsers = nextUsers;
+    if (!eventMeta) {
+      const incomingIds = new Set(nextUsers.map(u => userIdentityKey(u)));
+      const existingIds = new Set(existingUsers.map(u => userIdentityKey(u)));
+      const restoredByStaleWrite = [];
+      for (const eu of existingUsers) {
+        const k = userIdentityKey(eu);
+        if (!incomingIds.has(k)) {
+          restoredByStaleWrite.push(k);
+        }
+      }
+      if (restoredByStaleWrite.length === 0) {
+        finalUsers = nextUsers;
+      } else {
+        finalUsers = existingUsers;
+        for (const u of nextUsers) {
+          const k = userIdentityKey(u);
+          if (!existingIds.has(k)) {
+            finalUsers.push(u);
+          } else {
+            const idx = finalUsers.findIndex(x => userIdentityKey(x) === k);
+            if (idx >= 0) {
+              finalUsers[idx] = { ...finalUsers[idx], ...u };
+            }
+          }
+        }
+        finalUsers = normalizeUsersForStore(finalUsers);
+      }
+    }
+
     await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-      .bind('jb_users', JSON.stringify(nextUsers)).run();
+      .bind('jb_users', JSON.stringify(finalUsers)).run();
+
     const backupRow = await db.prepare("SELECT value FROM kv_store WHERE key='jb_users_backup'").first();
     let backupUsers = [];
     if (backupRow && backupRow.value) {
       try { backupUsers = normalizeUsersForStore(JSON.parse(backupRow.value)); } catch { backupUsers = []; }
     }
-    if (nextUsers.length >= backupUsers.length || !backupUsers.length) {
-      await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-        .bind('jb_users_backup', JSON.stringify(nextUsers)).run();
+    {
+      const finalIds = new Map(finalUsers.map(u => [userIdentityKey(u), u]));
+      const backupIds = new Map(backupUsers.map(u => [userIdentityKey(u), u]));
+      let backupNeedsUpdate = false;
+      if (finalIds.size !== backupIds.size) {
+        backupNeedsUpdate = true;
+      } else {
+        for (const [k, u] of finalIds) {
+          const b = backupIds.get(k);
+          if (!b) { backupNeedsUpdate = true; break; }
+          if (JSON.stringify(b) !== JSON.stringify(u)) { backupNeedsUpdate = true; break; }
+        }
+      }
+      if (backupNeedsUpdate || !backupUsers.length) {
+        await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+          .bind('jb_users_backup', JSON.stringify(finalUsers)).run();
+      }
     }
     if (eventMeta) {
       await db.prepare('INSERT INTO kv_store (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
         .bind(metaKey, JSON.stringify({ ...eventMeta, updatedAt: Date.now() })).run();
     }
-    return json({ ok: true, users: nextUsers.length });
+    return json({ ok: true, users: finalUsers.length, backupUpdated: true });
   }
 
   if (normalizedKey.startsWith('jb_chat_')) {
