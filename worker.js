@@ -3187,13 +3187,6 @@ async function saveOrdersBulk(db, body, authContext = null) {
     ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts
     WHERE
       COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) < ?
-      OR (
-        COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) = ?
-        AND COALESCE(
-          CAST(json_extract(orders.data,'$.updatedAt') AS INTEGER),
-          COALESCE(CAST(json_extract(orders.data,'$.ts') AS INTEGER),0)
-        ) <= ?
-      )
   `;
 
   let saved = 0;
@@ -3209,7 +3202,7 @@ async function saveOrdersBulk(db, body, authContext = null) {
         ts: Number(order.ts) || ts,
         v
       };
-      return db.prepare(upsertSql).bind(order.id, row.ts, JSON.stringify(row), v, v, ts);
+      return db.prepare(upsertSql).bind(order.id, row.ts, JSON.stringify(row), v);
     });
 
     const results = await withD1Retry(
@@ -4019,11 +4012,11 @@ async function applyOrderUpsertMutation(db, payload, authContext = null) {
     }
   }
 
-  const stale = (
-    incomingV < prevV ||
-    (incomingV === prevV && incomingTs < prevTs) ||
-    (prevDeleted && !incomingDeleted && incomingV <= prevV)
-  );
+  // Version is the sole ordering authority. Timestamp-only overwrites allowed
+  // an old full snapshot to replace a newer status with the same version.
+  // Replays are handled above by opId, so an existing row must receive a
+  // strictly higher version before its full payload can be replaced.
+  const stale = incomingV <= prevV;
   if (stale) {
     const staleResponse = {
       ok: true,
@@ -4070,17 +4063,10 @@ async function applyOrderUpsertMutation(db, payload, authContext = null) {
     ON CONFLICT(id) DO UPDATE SET data=excluded.data, ts=excluded.ts
     WHERE
       COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) < ?
-      OR (
-        COALESCE(CAST(json_extract(orders.data,'$.v') AS INTEGER),0) = ?
-        AND COALESCE(
-          CAST(json_extract(orders.data,'$.updatedAt') AS INTEGER),
-          COALESCE(CAST(json_extract(orders.data,'$.ts') AS INTEGER),0)
-        ) <= ?
-      )
   `;
   const writeRes = await withD1Retry(
     () => db.prepare(upsertSql)
-      .bind(id, Number(nextOrder.ts) || incomingTs, JSON.stringify(nextOrder), incomingV, incomingV, incomingTs)
+      .bind(id, Number(nextOrder.ts) || incomingTs, JSON.stringify(nextOrder), incomingV)
       .run(),
     { op: 'order_upsert_write', orderId: id, opId }
   );

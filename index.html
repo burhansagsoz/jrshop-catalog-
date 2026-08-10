@@ -2762,20 +2762,46 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
     const hasRecentMutationBlock=hasRecentUpsertOrderMutation();
     const recentFallbackOps=getRecentPendingFallbackOrderCount();
     if(hasRecentMutationBlock || recentFallbackOps>0){
-      console.warn('[OrderSync] Skip authoritative replace due to pending local mutations', {
+      console.warn('[OrderSync] Reconciling remote snapshot with pending local mutations', {
         source,
         recentPendingMutations:getRecentUpsertOrderMutationCount(),
         recentPendingFallbackOps:recentFallbackOps,
         pendingMutationsTotal:getActiveLocalOrderMutationIds().length,
         pendingFallbackOps:pendingFallbackIds.size
       });
-      return {applied:false,changed:false,count:Array.isArray(orders)?orders.length:0};
+      // Do not return here. A write-ahead outbox contains the full local
+      // payload, so the per-order merge below can retain it while still
+      // loading every other order from the server after a refresh.
     }
   }
   const normalizedRemote=normalizeOrderSnapshotList(remoteList);
   ackLocalMutationsFromIncoming(normalizedRemote);
   const currentOrders=normalizeOrderSnapshotList(Array.isArray(orders)?orders:[]);
   let nextOrders=normalizedRemote.slice();
+  // A retry can remain queued for longer than the short mutation guard window
+  // (for example while the connection is offline). Never let an older full
+  // snapshot overwrite the exact order payload that is still waiting to send.
+  // The queued payload is the intended mutation and is replaced only after the
+  // Worker acknowledges it or reports a definitive conflict.
+  if(pendingFallbackIds.size){
+    const fallback=readLocalSyncFallback();
+    const pendingOps=Array.isArray(fallback&&fallback.jb_order_ops&&fallback.jb_order_ops.value)
+      ? fallback.jb_order_ops.value
+      : [];
+    const pendingOrderById=new Map();
+    pendingOps.forEach(function(op){
+      const id=String(op&&op.orderId||'').trim();
+      if(!id || op.deferLocalUntilAck || String(op&&op.op||'upsert')==='delete') return;
+      if(op&&op.order&&typeof op.order==='object') pendingOrderById.set(id,op.order);
+    });
+    if(pendingOrderById.size){
+      const remoteById=new Map(nextOrders.map(function(order){return [String(order.id),order];}));
+      pendingOrderById.forEach(function(pendingOrder,id){
+        remoteById.set(id,{...pendingOrder,id,status:normalizeStatus(pendingOrder.status)});
+      });
+      nextOrders=[...remoteById.values()];
+    }
+  }
   if(preservePendingLocalIds.size){
     const byId=new Map(nextOrders.map(function(order){return [String(order.id),order];}));
     currentOrders.forEach(function(order){
@@ -2787,6 +2813,12 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
     });
     nextOrders=[...byId.values()].sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
   }
+  // A full snapshot can arrive after another request has already advanced an
+  // order. Reconcile per order by version instead of replacing the entire
+  // in-memory list, so an older snapshot can never roll a status backwards.
+  nextOrders=normalizeOrderSnapshotList(
+    mergeOrdersByFreshness(currentOrders,nextOrders,{source:'authoritative_'+source})
+  );
   const changed=JSON.stringify(currentOrders)!==JSON.stringify(nextOrders);
   orders=nextOrders;
   persistOrdersLocalSafe(orders);
@@ -3612,6 +3644,8 @@ function goReseller(){
   document.getElementById('pg-title').textContent='My Orders';
   hideTop();
   _resFilter='all';_resSearch='';
+  const resellerSearch=document.getElementById('res-order-search');
+  if(resellerSearch) resellerSearch.value='';
   // Collapse sidebar for reseller - they don't need it
   const sb=document.getElementById('sidebar');
   if(sb){sb.classList.add('collapsed');sb.style.width='0';}
@@ -4068,41 +4102,43 @@ function markProductArrived(orderId, prodIdx){
 // ── ADVANCE STATUS ──
 async function advanceStatus(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
-  const next=S_NEXT[o.status];if(!next)return;
-  const oldStatus=o.status;
-  const keepUkTracking=o.ukTracking;
-  const keepCnTracking=o.cnTracking;
-  
-  // Optimistic update - instantly update UI without waiting for cloud
+  const oldStatus=orderStatus(o);
+  const next=S_NEXT[oldStatus];if(!next)return;
+  // Local-first by design: the write-ahead outbox in saveOrders() persists
+  // this exact change before any network request. A sync failure therefore
+  // leaves the new status visible and retries safely in the background.
   o.status=next;
   o.updatedAt=Date.now();
-  if(next==='Completed'&&!o.completedAt)o.completedAt=Date.now();
-  if(!o.ukTracking&&keepUkTracking) o.ukTracking=keepUkTracking;
-  if(!o.cnTracking&&keepCnTracking) o.cnTracking=keepCnTracking;
-  
-  // Render immediately for instant feedback
+  if(next==='Completed') o.completedAt=o.completedAt||o.updatedAt;
+  else delete o.completedAt;
   selectOrder(o.id);
-  toast('✅ Status: '+next,'ok');
-  
-  // Send to cloud asynchronously (non-blocking)
-  const saveResult=await saveOrders([o.id]);
-  if(!saveResult||!saveResult.ok){
-    // Revert on error
-    o.status=oldStatus;
-    selectOrder(o.id);
-    toast('⚠️ Status revert to '+oldStatus,'err');
-    return;
+  showLoading('Saving status to database…');
+  try{
+    const result=await saveOrders([o.id],{allowFallbackOnStrictFailure:true});
+    updateBadges();
+    render();
+    logActivity('status',`Status: ${oldStatus} → ${next} | ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
+    const queued=!!(result&&result.queuedFallback);
+    const confirmed=!!(result&&result.ok&&!queued);
+    toast(confirmed?'✅ Status saved: '+next:'⟳ Status saved locally — syncing…',confirmed?'ok':'warn');
+
+    // Do not send customer/reseller notifications before the mutation reaches
+    // the server; the background sync will render the confirmed status later.
+    if(confirmed){
+      if(next==='At Depot'&&notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
+      if(next==='Sent to Factory'&&notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
+      if(next==='Shipped'&&notifSettings.shipped&&o.resellerId){
+        setTimeout(()=>{if(confirm(`Send shipping notification to reseller?\n${users.find(u=>u.id===o.resellerId)?.email}`))triggerResellerNotif(o,'shipped');},300);
+      }
+      if(next==='Completed'&&notifSettings.completed&&o.resellerId) triggerResellerNotif(o,'completed');
+    }
+  }catch(_e){
+    // saveOrders queues before sending; this path only reports an unexpected
+    // UI error and deliberately never restores the old status.
+    toast('⟳ Status saved locally — syncing…','warn');
+  }finally{
+    hideLoading();
   }
-  
-  logActivity('status',`Status: ${oldStatus} → ${next} | ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
-  
-  // Reseller notifications
-  if(next==='At Depot'&&notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
-  if(next==='Sent to Factory'&&notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
-  if(next==='Shipped'&&notifSettings.shipped&&o.resellerId){
-    setTimeout(()=>{if(confirm(`Send shipping notification to reseller?\n${users.find(u=>u.id===o.resellerId)?.email}`))triggerResellerNotif(o,'shipped');},300);
-  }
-  if(next==='Completed'&&notifSettings.completed&&o.resellerId) triggerResellerNotif(o,'completed');
 }
 
 // ── RESELLER NOTIFICATIONS ──
@@ -4617,11 +4653,15 @@ function setResellerFilter(btn,f){
   filterResellerOrders();
 }
 function doResSearch(v){
-  _resSearch=v;
-  renderResellerView();
+  _resSearch=String(v||'');
+  // The visible Orders tab is rendered by renderResOrders(). Rendering the
+  // home view here used to be overwritten immediately by that tab renderer.
+  renderResOrders();
 }
 function filterResellerOrders(){
-  _resSearch=(document.getElementById('res-search')||{}).value||'';
+  // Keep the active query when switching status filters. The reseller search
+  // input is `res-order-search` (not the old `res-search` id).
+  _resSearch=(document.getElementById('res-order-search')||{}).value||'';
   renderResellerView();
 }
 
@@ -4664,13 +4704,18 @@ function renderResellerView(){
 
   // Search
   if(_resSearch.trim()){
-    const q=_resSearch.toLowerCase();
-    myOrders=myOrders.filter(o=>
-      (o.name||'').toLowerCase().includes(q)||
-      (o.ref||'').toLowerCase().includes(q)||
-      (o.products||[]).some(p=>(p.name||'').toLowerCase().includes(q))||
-      (o.id||'').toLowerCase().includes(q)
-    );
+    const q=String(_resSearch).trim().toLowerCase();
+    const matchesSearch=function(value){
+      return String(value===undefined||value===null?'':value).toLowerCase().includes(q);
+    };
+    myOrders=myOrders.filter(function(o){
+      return matchesSearch(o&&o.name) ||
+        matchesSearch(o&&o.ref) ||
+        matchesSearch(o&&o.id) ||
+        (Array.isArray(o&&o.products) && o.products.some(function(p){
+          return matchesSearch(p&&p.name);
+        }));
+    });
   }
 
   myOrders=myOrders.sort((a,b)=>b.ts-a.ts);
@@ -8594,7 +8639,9 @@ function queueOrderOperationFallback(operation){
     opId,
     v,
     ts,
-    order:orderPayload
+    order:orderPayload,
+    // Strict status updates remain invisible locally until D1 confirms them.
+    deferLocalUntilAck:!!operation.deferLocalUntilAck
   });
 }
 function mapOperationResultByEntityId(result,operations){
@@ -9092,6 +9139,7 @@ async function flushLocalSyncFallback(){
   const entries=Object.entries(map||{});
   if(!entries.length) return 0;
   let synced=0;
+  let confirmedOrderApplied=false;
   for(const [key,entry] of entries){
     const retryAt=Math.max(0,Number(entry&&entry.nextRetryAt)||0);
     if(retryAt && retryAt>Date.now()) continue;
@@ -9136,6 +9184,21 @@ async function flushLocalSyncFallback(){
               remaining.push(op);
             }else{
               clearLocalOrderMutation(op.orderId);
+              // A queued status change was intentionally not shown before D1
+              // confirmation. Apply it now only after the Worker confirms it.
+              if(op.op!=='delete' && op.order && !(payload&&payload.staleIgnored)){
+                const current=orders.find(function(order){return order&&String(order.id)===String(op.orderId);});
+                const incomingV=Math.max(0,Number(op.order.v)||Number(op.v)||0);
+                const currentV=Math.max(0,Number(current&&current.v)||0);
+                const incomingTs=Number(op.order.updatedAt||op.order.ts)||0;
+                const currentTs=Number(current&&current.updatedAt||current&&current.ts)||0;
+                if(!current || incomingV>currentV || (incomingV===currentV && incomingTs>=currentTs)){
+                  orders=orders.map(function(order){
+                    return order&&String(order.id)===String(op.orderId)?{...op.order}:order;
+                  });
+                  confirmedOrderApplied=true;
+                }
+              }
             }
           }catch(_e){
             remaining.push(op);
@@ -9249,6 +9312,16 @@ async function flushLocalSyncFallback(){
         entry,
         (_e&&_e.message)||'sync_retry_exception'
       );
+    }
+  }
+  if(confirmedOrderApplied){
+    persistOrdersLocalSafe(orders);
+    updateBadges();
+    render();
+    if(selId&&orders.some(function(order){return order&&String(order.id)===String(selId);})){selectOrder(selId);}
+    if(me&&me.role==='Reseller'){
+      renderResellerView();
+      renderResOrders();
     }
   }
   return synced;
@@ -9837,7 +9910,7 @@ const LOCAL_ORDER_CONVERGENCE_GRACE_MS=20*60*1000;
 const FORCE_REMOTE_MUTATION_BLOCK_MS=90*1000;
 const LOCAL_DATA_MUTATION_TS_KEY='jb_local_data_mutations';
 const LOCAL_DATA_META_KEY='jb_data_meta';
-const LOCAL_DATA_MUTATION_KEEP_MS=10*60*1000;
+const LOCAL_DATA_MUTATION_KEEP_MS=24*60*60*1000;
 const LOCAL_MEDIA_MAP_KEY='jb_media_local';
 const LOCAL_CATALOG_ORDERS_KEY='jb_catalog_orders_map';
 const LOCAL_SYNC_FALLBACK_KEY='jb_sync_fallback';
@@ -10459,6 +10532,20 @@ function queueOrderOpFallback(op){
   dedup.push(op);
   persistLocalSyncFallback('jb_order_ops',dedup);
 }
+function removeQueuedOrderOperation(opId){
+  const id=String(opId||'').trim();
+  if(!id) return;
+  const q=readLocalSyncFallback();
+  const entry=q&&q.jb_order_ops;
+  const arr=Array.isArray(entry&&entry.value)?entry.value:[];
+  const remaining=arr.filter(function(row){return String(row&&row.opId||'')!==id;});
+  if(remaining.length===arr.length) return;
+  if(remaining.length){
+    persistLocalSyncFallback('jb_order_ops',remaining);
+  }else{
+    clearLocalSyncFallbackKey('jb_order_ops');
+  }
+}
 function ackLocalMutationsFromIncoming(incomingOrders){
   const map=cleanupLocalOrderMutations();
   if(!Object.keys(map).length) return;
@@ -10765,7 +10852,17 @@ function applyDataKeysFromRemote(remoteMap,opts={}){
         notifSettings=(incomingValue&&typeof incomingValue==='object')?incomingValue:{};
         if(!silent) loadNotifSettings();
       }else if(key==='jb_users'){
-        users=persistUsersLocalSafe(Array.isArray(incomingValue)?incomingValue:[],'data_realtime');
+        const incoming = Array.isArray(incomingValue)?incomingValue:[];
+        const existing = Array.isArray(users)?users.slice():[];
+        const incomingIds = new Set(incoming.map(u => (String(u&&u.email||'')).trim().toLowerCase() || String(u&&u.id||'')));
+        let merged = incoming.slice();
+        for (const eu of existing) {
+          const euKey = (String(eu&&eu.email||'')).trim().toLowerCase() || String(eu&&eu.id||'');
+          if (euKey && !incomingIds.has(euKey)) {
+            merged.push(eu);
+          }
+        }
+        users=persistUsersLocalSafe(merged,'data_realtime');
       }else if(key==='jb_suppliers'){
         suppliers=Array.isArray(incomingValue)?incomingValue:[];
       }else if(key==='jb_catalog'){
@@ -10940,24 +11037,10 @@ async function deleteOrderWithTombstone(orderId,meta={}){
   if(acked||staleIgnored){
     clearLocalOrderMutation(id);
   }else{
-    if(STRICT_ORDER_CLOUD_COMMIT){
-      // Strict mode: do not keep local-only deletes. Revert immediately.
-      if(previous){
-        const next=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
-        next.push(previous);
-        orders=next
-          .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
-          .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
-      }else{
-        orders=(Array.isArray(orders)?orders:[]).filter(function(o){return o&&String(o.id)!==id;});
-      }
-      clearLocalOrderMutation(id);
-      persistOrdersLocalSafe(orders);
-      updateBadges();
-      render();
-      toast('❌ Cloud delete failed — reverted local change','err');
-      return false;
-    }
+    // Always queue for retry — NEVER revert local delete to avoid jarring UX.
+    // Background retry queue (jb_sync_fallback) will retry the delete when
+    // connectivity resumes. Strict mode still enforced on server side via
+    // tombstone version guards; local UI keeps the user's intent.
     queueOrderOpFallback({
       op:'delete',
       orderId:id,
@@ -10965,9 +11048,13 @@ async function deleteOrderWithTombstone(orderId,meta={}){
       v,
       ts,
       deletedAt:ts,
-      event
+      previousOrder:previous
     });
-    queueOrderEventFallback(event);
+    persistOrdersLocalSafe(orders);
+    updateBadges();
+    render();
+    toast('⟳ Delete queued — will sync when online','warn');
+    return true;
   }
   return true;
 }
@@ -11719,7 +11806,17 @@ function applyRealtimeDataKey(key,value,updatedAt,opts={}){
     return;
   }
   if(k==='jb_users'){
-    users=persistUsersLocalSafe(Array.isArray(value)?value:[],'realtime');
+    const incoming = Array.isArray(value)?value:[];
+    const existing = Array.isArray(users)?users.slice():[];
+    const incomingIds = new Set(incoming.map(u => (String(u&&u.email||'')).trim().toLowerCase() || String(u&&u.id||'')));
+    let merged = incoming.slice();
+    for (const eu of existing) {
+      const euKey = (String(eu&&eu.email||'')).trim().toLowerCase() || String(eu&&eu.id||'');
+      if (euKey && !incomingIds.has(euKey)) {
+        merged.push(eu);
+      }
+    }
+    users=persistUsersLocalSafe(merged,'realtime');
     if(me&&me.id){
       const mine=users.find(u=>u&&u.id===me.id) || users.find(u=>u&&String(u.email||'').toLowerCase()===String(me.email||'').toLowerCase());
       if(mine){
@@ -12798,7 +12895,7 @@ if('serviceWorker' in navigator){
       // Apply fresh UI assets once after service worker updates; otherwise old
       // cached index.html can briefly redraw older chat rows after refresh.
       navigator.serviceWorker.addEventListener('controllerchange',()=>{
-        const key='jrshop-sw-controller-reload-v20260520-chat-ui-v4';
+        const key='jrshop-sw-controller-reload-v20260811-order-sync-v1';
         try{
           if(sessionStorage.getItem(key)==='1') return;
           sessionStorage.setItem(key,'1');
@@ -12814,7 +12911,7 @@ if('serviceWorker' in navigator){
       });
       try{
         if(navigator.serviceWorker.controller){
-          navigator.serviceWorker.controller.postMessage({type:'JRSHOP_ACTIVE_BUILD',build:'20260520-chat-ui-v4'});
+          navigator.serviceWorker.controller.postMessage({type:'JRSHOP_ACTIVE_BUILD',build:'20260811-order-sync-v1'});
         }
       }catch(_e){}
     }
@@ -15656,12 +15753,26 @@ function fmtStatus(s){
 
 function renderResOrders(){
   if(!me)return;
-  const filter=document.querySelector('#res-order-filters .active')?.dataset?.filter||'all';
+  const filter=document.querySelector('#res-order-filters .active')?.dataset?.filter||_resFilter||'all';
   let myOrders=orders.filter(o=>o.resellerId===me.id);
   
   if(filter==='pending') myOrders=myOrders.filter(o=>normalizeBooleanFlag(o&&o.pendingApproval));
   else if(filter==='Sent to Factory') myOrders=myOrders.filter(o=>normalizeStatus(o.status)==='Sent to Factory');
   else if(filter!=='all') myOrders=myOrders.filter(o=>normalizeStatus(o.status)===filter);
+
+  // This is the renderer for #res-pg-orders, so the search field must be
+  // applied here (not only in the reseller home renderer).
+  const searchInput=document.getElementById('res-order-search');
+  const query=String(searchInput?searchInput.value:_resSearch||'').trim().toLowerCase();
+  _resSearch=query;
+  if(query){
+    const matches=function(value){
+      return String(value===undefined||value===null?'':value).toLowerCase().includes(query);
+    };
+    myOrders=myOrders.filter(function(order){
+      return matches(order&&order.name) || matches(order&&order.ref);
+    });
+  }
   
   myOrders=myOrders.sort((a,b)=>b.ts-a.ts);
   
@@ -15718,8 +15829,24 @@ function setResellerFilter(el, filter){
   document.querySelectorAll('#res-order-filters button').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   el.dataset.filter=filter;
+  _resFilter=filter;
   renderResOrders();
 }
+
+function bindResellerOrderSearch(){
+  const input=document.getElementById('res-order-search');
+  if(!input||input.dataset.searchBound==='1') return;
+  input.dataset.searchBound='1';
+  input.addEventListener('input',function(){
+    _resSearch=this.value;
+    renderResOrders();
+  });
+  input.addEventListener('search',function(){
+    _resSearch=this.value;
+    renderResOrders();
+  });
+}
+bindResellerOrderSearch();
 
 function openResDetail(orderId){
   const o=orders.find(x=>x.id===orderId);
@@ -17991,6 +18118,12 @@ async function saveOrders(changedOrderIds,opts={}){
     const strictFailedOrderIds=new Set();
     const strictFailureReasons=[];
     const opsPayload=buildOrderOpsPayload(targetOrders,prevById,deletedOrderIds,nowTs);
+    // Write-ahead outbox: persist every mutation before its first network
+    // attempt. A tab close, timeout, or temporary Cloudflare error can no
+    // longer lose a new order or roll a status back to an older snapshot.
+    (opsPayload.operations||[]).forEach(function(op){
+      if(op&&op.entityId) queueOrderOperationFallback(op);
+    });
     const markOpsQueuedForFallback=function(){
       (opsPayload.operations||[]).forEach(function(op){
         if(!op||!op.entityId) return;
@@ -18009,84 +18142,87 @@ async function saveOrders(changedOrderIds,opts={}){
         markOpsQueuedForFallback();
       }
       const byEntity=mapOperationResultByEntityId(opsResult,opsPayload.operations);
+      const versionConflictIds=new Set();
+      const retryableFailedIds=new Set();
       byEntity.forEach(function(entry,entityId){
         if(entry.status==='acked'){
+          (entry.rows||[]).forEach(function(row){removeQueuedOrderOperation(row&&row.opId);});
           clearLocalOrderMutation(entityId);
           return;
         }
         clearLocalOrderMutation(entityId);
         const firstRow=(entry.rows&&entry.rows[0])||{};
         const reason=String(firstRow&&firstRow.reason||opsResult.error||'ops_failed');
+        if(entry.status==='rejected' && (
+          reason==='VERSION_CONFLICT' ||
+          (firstRow&&firstRow.reason&&String(firstRow.reason).indexOf('VERSION')>=0)
+        )){
+          (entry.rows||[]).forEach(function(row){removeQueuedOrderOperation(row&&row.opId);});
+          // Server has newer or equal state — DON'T revert. We'll refetch below
+          // and merge fresh server state on top of local optimistic changes.
+          versionConflictIds.add(String(entityId));
+          return;
+        }
+        // Anything else (status==='failed', transient errors, transport errors)
+        // → retryable. Queue for fallback; keep optimistic local change.
+        retryableFailedIds.add(String(entityId));
+        queueOrderOperationFallback((opsPayload.operations||[]).find(function(op){
+          return String(op&&op.entityId||'')===String(entityId);
+        }));
+        queuedFallback=true;
         if(STRICT_ORDER_CLOUD_COMMIT){
           strictFailedOrderIds.add(String(entityId));
           strictFailureReasons.push(reason);
-          // For reseller-created pending orders, keep retry queue even in strict mode
-          // so the request is not silently lost on transient connectivity failures.
-          if(String(me&&me.role||'')==='Reseller'){
-            const failedOp=(opsPayload.operations||[]).find(function(op){return String(op&&op.entityId||'')===String(entityId);});
-            if(failedOp) queueOrderOperationFallback(failedOp);
-          }
-          return;
         }
-        queuedFallback=true;
       });
+      // Always refetch server updates; especially important when there are
+      // version conflicts so local state merges in the latest server truth.
+      try{
+        await fetchOrderUpdatesWithCursor({silent:true,maxBatches:3,limit:200});
+      }catch(_e){}
       if(opsResult.ok){
-        await fetchOrderUpdatesWithCursor({silent:true,maxBatches:3,limit:200}).catch(()=>{});
+        // All good, already refetched
       }else if(STRICT_ORDER_CLOUD_COMMIT){
-        (opsPayload.operations||[]).forEach(function(op){
-          if(!op||!op.entityId) return;
-          strictFailedOrderIds.add(String(op.entityId));
-        });
-        strictFailureReasons.push(String(opsResult.error||'ops_failed'));
+        // Transport-level failure; not a version conflict (those are separated above).
+        // Keep retry queue populated, do NOT add versionConflictIds to strictFailed.
       }else{
         queuedFallback=true;
       }
     }
     if(STRICT_ORDER_CLOUD_COMMIT && strictFailedOrderIds.size){
       const failedIds=Array.from(strictFailedOrderIds);
-      if(allowFallbackOnStrictFailure){
-        const failedSet=new Set(failedIds.map(function(id){return String(id);}));
-        const failedOps=(opsPayload.operations||[]).filter(function(op){
-          return op&&op.entityId&&failedSet.has(String(op.entityId));
-        });
-        failedOps.forEach(function(op){
-          queueOrderOperationFallback(op);
-        });
-        console.warn('[saveOrders][strict_cloud_commit_deferred]',{
-          failedIds,
-          reason:String(strictFailureReasons[0]||'cloud_commit_failed')
-        });
-        markSync('orders_save_deferred');
-        return {
-          ok:true,
-          saved:targetOrders.length,
-          deleted:deletedOrderIds.length,
-          queuedFallback:true,
-          deferred:true,
-          failedOrderIds:failedIds
-        };
-      }
-      const failedSet=new Set(failedIds);
-      const nextMap=new Map((orders||[]).filter(function(o){return o&&o.id;}).map(function(o){return [String(o.id),o];}));
-      failedSet.forEach(function(id){
-        const prev=prevById.get(String(id));
-        if(prev) nextMap.set(String(id),prev);
-        else nextMap.delete(String(id));
+      // Always prefer "deferred + retry queue" over disruptive UI revert.
+      // Even when caller doesn't pass allowFallbackOnStrictFailure explicitly,
+      // the background retry queue guarantees eventual consistency without
+      // rolling back the user's visible changes.
+      const failedSet=new Set(failedIds.map(function(id){return String(id);}));
+      const failedOps=(opsPayload.operations||[]).filter(function(op){
+        return op&&op.entityId&&failedSet.has(String(op.entityId));
       });
-      orders=[...nextMap.values()]
-        .filter(function(o){return o&&o.id&&!isOrderDeleted(o);})
-        .sort(function(a,b){return (Number(b&&b.ts)||0)-(Number(a&&a.ts)||0);});
-      updateBadges();
-      render();
+      failedOps.forEach(function(op){
+        queueOrderOperationFallback(op);
+      });
       const firstReason=String(strictFailureReasons[0]||'cloud_commit_failed');
-      console.warn('[saveOrders][strict_cloud_commit_failed]',{failedIds,reason:firstReason});
-      toast(`❌ Cloud write failed for ${failedIds.length} order(s) — reverted local changes`,'err');
-      writeAuditEvent('orders_save_strict_revert',{
+      console.warn('[saveOrders][strict_cloud_commit_deferred]',{
+        failedIds,
+        reason:firstReason
+      });
+      markSync('orders_save_deferred');
+      // Occasional gentle reminder toast; not scary red error
+      toast(`⟳ Change saved locally — syncing... (${firstReason})`,'warn');
+      writeAuditEvent('orders_save_strict_deferred',{
         failedIds,
         reason:firstReason,
         actor:me&&me.email?me.email:'system'
       }).catch(()=>{});
-      return {ok:false,failedOrderIds:failedIds,reason:firstReason,reverted:true};
+      return {
+        ok:true,
+        saved:targetOrders.length,
+        deleted:deletedOrderIds.length,
+        queuedFallback:true,
+        deferred:true,
+        failedOrderIds:failedIds
+      };
     }
     if(queuedFallback){
       console.warn('[saveOrders] queued order events for retry');
@@ -18096,7 +18232,39 @@ async function saveOrders(changedOrderIds,opts={}){
     return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:!!queuedFallback};
   } catch(e) {
     console.error('[saveOrders]', e);
-    return {ok:false,error:String(e&&e.message||e||'save_orders_failed')};
+    // Last-resort durability path. Even if preparation fails before the normal
+    // write-ahead queue is reached, keep each changed order locally and queue
+    // a complete upsert rather than letting a later cloud snapshot erase it.
+    const queuedIds=[];
+    try{
+      for(const target of (targetOrders||[])){
+        const live=(orders||[]).find(function(order){return order&&target&&order.id===target.id;})||target;
+        if(!live||!live.id) continue;
+        const previous=prevById.get(live.id)||null;
+        const fallbackOrder={
+          ...live,
+          products:Array.isArray(live.products)?live.products.map(function(product){return {...product};}):[],
+          updatedAt:Number(live.updatedAt)||Date.now(),
+          v:Math.max(1,Number(live.v)||nextOrderVersion(live,previous))
+        };
+        const fallbackOpId=createLocalMutationOpId('emergency_sync');
+        fallbackOrder.opId=fallbackOpId;
+        fallbackOrder.lastOpId=fallbackOpId;
+        const fallbackOp=buildOperationFromOrder(fallbackOrder,previous);
+        if(!fallbackOp) continue;
+        fallbackOp.opId=fallbackOpId;
+        queueOrderOperationFallback(fallbackOp);
+        markLocalOrderMutation(live.id,'upsert',{opId:fallbackOpId,v:fallbackOrder.v});
+        queuedIds.push(String(live.id));
+      }
+      if(queuedIds.length) persistOrdersLocalSafe(orders);
+    }catch(_queueErr){}
+    return {
+      ok:queuedIds.length>0,
+      queuedFallback:queuedIds.length>0,
+      failedOrderIds:queuedIds,
+      error:String(e&&e.message||e||'save_orders_failed')
+    };
   }
 }
 function saveUsers(){

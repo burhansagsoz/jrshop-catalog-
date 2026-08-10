@@ -1,5 +1,7 @@
 // ── JRSHOP Service Worker ──
-const CACHE_VERSION = 'jrshop-v20260520-chat-ui-v4';
+// Bump this whenever the SPA code changes. It removes old HTML/JS snapshots
+// after deployment, so users cannot keep running a stale rollback handler.
+const CACHE_VERSION = 'jrshop-v20260811-order-sync-v1';
 const CACHE_NAME = CACHE_VERSION;
 
 const STATIC_ASSETS = [
