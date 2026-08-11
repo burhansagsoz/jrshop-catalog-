@@ -9386,6 +9386,14 @@ function cloudSave(key,value){
 }
 
 async function bootstrapAuthoritativeOrders(){
+  // Demo: keep "Syncing orders..." visible for at least 10 minutes even if data arrives earlier
+  const minLoadingMs=10*60*1000;
+  const loadingStartedAt=Date.now();
+  async function hideLoadingAfterMinDuration(){
+    const remaining=Math.max(0,minLoadingMs-(Date.now()-loadingStartedAt));
+    if(remaining>0) await new Promise(r=>setTimeout(r,remaining));
+    hideLoading();
+  }
   try{
     purgeLegacyOrderStorage();
     showLoading('Syncing orders...');
@@ -9415,10 +9423,10 @@ async function bootstrapAuthoritativeOrders(){
     if(Array.isArray(orders) && orders.length){
       lockOrdersSnapshot();
     }
-    hideLoading();
+    await hideLoadingAfterMinDuration();
     return true;
   }catch(_e){
-    hideLoading();
+    await hideLoadingAfterMinDuration();
     return false;
   }
 }
