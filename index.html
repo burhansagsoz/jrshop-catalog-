@@ -2762,16 +2762,14 @@ function applyAuthoritativeOrdersSnapshot(remoteOrders,opts={}){
     const hasRecentMutationBlock=hasRecentUpsertOrderMutation();
     const recentFallbackOps=getRecentPendingFallbackOrderCount();
     if(hasRecentMutationBlock || recentFallbackOps>0){
-      console.warn('[OrderSync] Reconciling remote snapshot with pending local mutations', {
+      console.warn('[OrderSync] Skip authoritative replace due to pending local mutations', {
         source,
         recentPendingMutations:getRecentUpsertOrderMutationCount(),
         recentPendingFallbackOps:recentFallbackOps,
         pendingMutationsTotal:getActiveLocalOrderMutationIds().length,
         pendingFallbackOps:pendingFallbackIds.size
       });
-      // Do not return here. A write-ahead outbox contains the full local
-      // payload, so the per-order merge below can retain it while still
-      // loading every other order from the server after a refresh.
+      return {applied:false,changed:false,count:Array.isArray(orders)?orders.length:0};
     }
   }
   const normalizedRemote=normalizeOrderSnapshotList(remoteList);
@@ -4104,38 +4102,60 @@ async function advanceStatus(){
   const o=orders.find(x=>x.id===selId);if(!o)return;
   const oldStatus=orderStatus(o);
   const next=S_NEXT[oldStatus];if(!next)return;
-  // Local-first by design: the write-ahead outbox in saveOrders() persists
-  // this exact change before any network request. A sync failure therefore
-  // leaves the new status visible and retries safely in the background.
-  o.status=next;
-  o.updatedAt=Date.now();
-  if(next==='Completed') o.completedAt=o.completedAt||o.updatedAt;
-  else delete o.completedAt;
-  selectOrder(o.id);
+  const savedAt=Date.now();
+  const opId=createLocalMutationOpId('status');
+  // Do not change the live order object yet. The UI is updated only after the
+  // Worker has acknowledged that D1 accepted this exact version.
+  const candidate={
+    ...o,
+    products:Array.isArray(o.products)?o.products.map(function(product){return {...product};}):[],
+    status:next,
+    updatedAt:savedAt,
+    v:nextOrderVersion(o,o),
+    opId,
+    lastOpId:opId
+  };
+  if(next==='Completed') candidate.completedAt=candidate.completedAt||savedAt;
+  else delete candidate.completedAt;
+  const operation=buildOperationFromOrder(candidate,o);
+  if(!operation) return;
+  operation.opId=opId;
+  operation.deferLocalUntilAck=true;
+
   showLoading('Saving status to database…');
   try{
-    const result=await saveOrders([o.id],{allowFallbackOnStrictFailure:true});
+    markLocalOrderMutation(o.id,'upsert',{opId,v:candidate.v});
+    const result=await sendOrderOperationsBatch([operation]);
+    const acknowledged=(result&&Array.isArray(result.acked)) && result.acked.some(function(row){
+      return String(row&&row.opId||'')===opId;
+    });
+    if(!acknowledged){
+      // Keep the current, confirmed UI state. The request can retry in the
+      // background, but it is not shown to the admin until D1 accepts it.
+      queueOrderOperationFallback(operation);
+      toast('⏳ Status queued — it will update after database confirmation','warn');
+      return;
+    }
+
+    clearLocalOrderMutation(o.id);
+    orders=orders.map(function(item){return item&&item.id===o.id?candidate:item;});
+    persistOrdersLocalSafe(orders);
+    selectOrder(o.id);
     updateBadges();
     render();
     logActivity('status',`Status: ${oldStatus} → ${next} | ${esc(o.ref||o.id.slice(-6))} (${esc(o.name)})`,o.id);
-    const queued=!!(result&&result.queuedFallback);
-    const confirmed=!!(result&&result.ok&&!queued);
-    toast(confirmed?'✅ Status saved: '+next:'⟳ Status saved locally — syncing…',confirmed?'ok':'warn');
+    toast('✅ Status saved: '+next,'ok');
 
-    // Do not send customer/reseller notifications before the mutation reaches
-    // the server; the background sync will render the confirmed status later.
-    if(confirmed){
-      if(next==='At Depot'&&notifSettings.depot&&o.resellerId) triggerResellerNotif(o,'depot');
-      if(next==='Sent to Factory'&&notifSettings.logistics&&o.resellerId) triggerResellerNotif(o,'logistics');
-      if(next==='Shipped'&&notifSettings.shipped&&o.resellerId){
-        setTimeout(()=>{if(confirm(`Send shipping notification to reseller?\n${users.find(u=>u.id===o.resellerId)?.email}`))triggerResellerNotif(o,'shipped');},300);
-      }
-      if(next==='Completed'&&notifSettings.completed&&o.resellerId) triggerResellerNotif(o,'completed');
+    // Reseller notifications
+    if(next==='At Depot'&&notifSettings.depot&&o.resellerId) triggerResellerNotif(candidate,'depot');
+    if(next==='Sent to Factory'&&notifSettings.logistics&&o.resellerId) triggerResellerNotif(candidate,'logistics');
+    if(next==='Shipped'&&notifSettings.shipped&&o.resellerId){
+      setTimeout(()=>{if(confirm(`Send shipping notification to reseller?\n${users.find(u=>u.id===candidate.resellerId)?.email}`))triggerResellerNotif(candidate,'shipped');},300);
     }
+    if(next==='Completed'&&notifSettings.completed&&o.resellerId) triggerResellerNotif(candidate,'completed');
   }catch(_e){
-    // saveOrders queues before sending; this path only reports an unexpected
-    // UI error and deliberately never restores the old status.
-    toast('⟳ Status saved locally — syncing…','warn');
+    queueOrderOperationFallback(operation);
+    toast('⏳ Status queued — it will update after database confirmation','warn');
   }finally{
     hideLoading();
   }
@@ -10532,20 +10552,6 @@ function queueOrderOpFallback(op){
   dedup.push(op);
   persistLocalSyncFallback('jb_order_ops',dedup);
 }
-function removeQueuedOrderOperation(opId){
-  const id=String(opId||'').trim();
-  if(!id) return;
-  const q=readLocalSyncFallback();
-  const entry=q&&q.jb_order_ops;
-  const arr=Array.isArray(entry&&entry.value)?entry.value:[];
-  const remaining=arr.filter(function(row){return String(row&&row.opId||'')!==id;});
-  if(remaining.length===arr.length) return;
-  if(remaining.length){
-    persistLocalSyncFallback('jb_order_ops',remaining);
-  }else{
-    clearLocalSyncFallbackKey('jb_order_ops');
-  }
-}
 function ackLocalMutationsFromIncoming(incomingOrders){
   const map=cleanupLocalOrderMutations();
   if(!Object.keys(map).length) return;
@@ -12895,7 +12901,7 @@ if('serviceWorker' in navigator){
       // Apply fresh UI assets once after service worker updates; otherwise old
       // cached index.html can briefly redraw older chat rows after refresh.
       navigator.serviceWorker.addEventListener('controllerchange',()=>{
-        const key='jrshop-sw-controller-reload-v20260811-order-sync-v1';
+        const key='jrshop-sw-controller-reload-v20260520-chat-ui-v4';
         try{
           if(sessionStorage.getItem(key)==='1') return;
           sessionStorage.setItem(key,'1');
@@ -12911,7 +12917,7 @@ if('serviceWorker' in navigator){
       });
       try{
         if(navigator.serviceWorker.controller){
-          navigator.serviceWorker.controller.postMessage({type:'JRSHOP_ACTIVE_BUILD',build:'20260811-order-sync-v1'});
+          navigator.serviceWorker.controller.postMessage({type:'JRSHOP_ACTIVE_BUILD',build:'20260520-chat-ui-v4'});
         }
       }catch(_e){}
     }
@@ -18118,12 +18124,6 @@ async function saveOrders(changedOrderIds,opts={}){
     const strictFailedOrderIds=new Set();
     const strictFailureReasons=[];
     const opsPayload=buildOrderOpsPayload(targetOrders,prevById,deletedOrderIds,nowTs);
-    // Write-ahead outbox: persist every mutation before its first network
-    // attempt. A tab close, timeout, or temporary Cloudflare error can no
-    // longer lose a new order or roll a status back to an older snapshot.
-    (opsPayload.operations||[]).forEach(function(op){
-      if(op&&op.entityId) queueOrderOperationFallback(op);
-    });
     const markOpsQueuedForFallback=function(){
       (opsPayload.operations||[]).forEach(function(op){
         if(!op||!op.entityId) return;
@@ -18146,7 +18146,6 @@ async function saveOrders(changedOrderIds,opts={}){
       const retryableFailedIds=new Set();
       byEntity.forEach(function(entry,entityId){
         if(entry.status==='acked'){
-          (entry.rows||[]).forEach(function(row){removeQueuedOrderOperation(row&&row.opId);});
           clearLocalOrderMutation(entityId);
           return;
         }
@@ -18157,7 +18156,6 @@ async function saveOrders(changedOrderIds,opts={}){
           reason==='VERSION_CONFLICT' ||
           (firstRow&&firstRow.reason&&String(firstRow.reason).indexOf('VERSION')>=0)
         )){
-          (entry.rows||[]).forEach(function(row){removeQueuedOrderOperation(row&&row.opId);});
           // Server has newer or equal state — DON'T revert. We'll refetch below
           // and merge fresh server state on top of local optimistic changes.
           versionConflictIds.add(String(entityId));
@@ -18232,39 +18230,7 @@ async function saveOrders(changedOrderIds,opts={}){
     return {ok:true,saved:targetOrders.length,deleted:deletedOrderIds.length,queuedFallback:!!queuedFallback};
   } catch(e) {
     console.error('[saveOrders]', e);
-    // Last-resort durability path. Even if preparation fails before the normal
-    // write-ahead queue is reached, keep each changed order locally and queue
-    // a complete upsert rather than letting a later cloud snapshot erase it.
-    const queuedIds=[];
-    try{
-      for(const target of (targetOrders||[])){
-        const live=(orders||[]).find(function(order){return order&&target&&order.id===target.id;})||target;
-        if(!live||!live.id) continue;
-        const previous=prevById.get(live.id)||null;
-        const fallbackOrder={
-          ...live,
-          products:Array.isArray(live.products)?live.products.map(function(product){return {...product};}):[],
-          updatedAt:Number(live.updatedAt)||Date.now(),
-          v:Math.max(1,Number(live.v)||nextOrderVersion(live,previous))
-        };
-        const fallbackOpId=createLocalMutationOpId('emergency_sync');
-        fallbackOrder.opId=fallbackOpId;
-        fallbackOrder.lastOpId=fallbackOpId;
-        const fallbackOp=buildOperationFromOrder(fallbackOrder,previous);
-        if(!fallbackOp) continue;
-        fallbackOp.opId=fallbackOpId;
-        queueOrderOperationFallback(fallbackOp);
-        markLocalOrderMutation(live.id,'upsert',{opId:fallbackOpId,v:fallbackOrder.v});
-        queuedIds.push(String(live.id));
-      }
-      if(queuedIds.length) persistOrdersLocalSafe(orders);
-    }catch(_queueErr){}
-    return {
-      ok:queuedIds.length>0,
-      queuedFallback:queuedIds.length>0,
-      failedOrderIds:queuedIds,
-      error:String(e&&e.message||e||'save_orders_failed')
-    };
+    return {ok:false,error:String(e&&e.message||e||'save_orders_failed')};
   }
 }
 function saveUsers(){
