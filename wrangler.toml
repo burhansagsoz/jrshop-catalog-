@@ -1,0 +1,18 @@
+name = "jrshop-api"
+main = "worker.js"
+compatibility_date = "2026-04-07"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jrshop-db"
+database_id = "b2aef6bf-6c79-4beb-a36b-7e8d1f672a19"
+preview_database_id = "b2aef6bf-6c79-4beb-a36b-7e8d1f672a19"
+
+[env.development]
+vars = { SETUP_ENABLED = "true", JWT_AUTH_SECRET = "dev-secret-key-do-not-use-in-production" }
+
+[[env.development.d1_databases]]
+binding = "DB"
+database_name = "jrshop-db"
+database_id = "b2aef6bf-6c79-4beb-a36b-7e8d1f672a19"
+preview_database_id = "b2aef6bf-6c79-4beb-a36b-7e8d1f672a19"
